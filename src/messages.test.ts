@@ -15,6 +15,7 @@ import {
   orcaUnavailableLine,
   queuedLine,
   refusalLine,
+  restartNotice,
   workerCapLine,
   workerDoneFallbackLine,
   zeroMatchLine,
@@ -357,5 +358,32 @@ describe('extractPullRequestLinks', () => {
 
   it('returns nothing when the report names no PR', () => {
     expect(extractPullRequestLinks('all done, nothing to link')).toEqual([]);
+  });
+});
+
+describe('restartNotice (issue #25)', () => {
+  it('renders the mock reboot verbatim for a single in-flight delegation', () => {
+    expect(
+      restartNotice([{ ref: 'forwardly#84', state: 'still in progress (last sign 4 min ago)' }]),
+    ).toBe(
+      '⚠️ Restarted — `forwardly#84` was in flight: still in progress (last sign 4 min ago). ' +
+        'Reply to resume supervision.',
+    );
+  });
+
+  it('groups several delegations into one bulleted ⚠️ message', () => {
+    expect(
+      restartNotice([
+        { ref: 'forwardly#84', state: 'still in progress (last sign 4 min ago)' },
+        { ref: 'scratch#21', state: '✅ completed during the outage (details in the card ⤴)' },
+      ]),
+    ).toBe(
+      [
+        '⚠️ Restarted — 2 delegations were in flight:',
+        '• `forwardly#84` — still in progress (last sign 4 min ago)',
+        '• `scratch#21` — ✅ completed during the outage (details in the card ⤴)',
+        'Reply to resume supervision.',
+      ].join('\n'),
+    );
   });
 });

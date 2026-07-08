@@ -222,6 +222,24 @@ export function queuedLine(activeSessions: number): string {
   return `⏳ Queued (${activeSessions} active ${noun}) — I'll get to it as soon as a slot frees up.`;
 }
 
+/**
+ * "Daemon restart — reconciliation" (issue #25): the fixed reboot verbatim —
+ * `⚠️ Restarted — <repo>#<n> was in flight: <observed state>. Reply to
+ * resume supervision.` One message per affected thread; several delegations
+ * in flight group into one bulleted message, never a second ⚠️.
+ */
+export function restartNotice(items: Array<{ ref: string; state: string }>): string {
+  const single = items.length === 1 ? items[0] : undefined;
+  if (single !== undefined) {
+    return `⚠️ Restarted — \`${single.ref}\` was in flight: ${single.state}. Reply to resume supervision.`;
+  }
+  return [
+    `⚠️ Restarted — ${items.length} delegations were in flight:`,
+    ...items.map((item) => `• \`${item.ref}\` — ${item.state}`),
+    'Reply to resume supervision.',
+  ].join('\n');
+}
+
 /** "Brief moments" — the only reply a closed thread ever gets (spec §3: closed is final). */
 export const CLOSED_THREAD_LINE =
   'Session closed. Mention me on a new root message to start again.';
