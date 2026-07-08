@@ -3,7 +3,7 @@ import {
   execFileRunner,
   listWorktreeActivity,
   readTerminalTail,
-  registryIssueUrl,
+  safeRegistryIssueUrl,
   type CommandRunner,
   type WorktreeActivity,
 } from './orca.ts';
@@ -133,9 +133,18 @@ export class Watchdog {
     const stalledForMs = this.now().getTime() - lastActivityAt;
     if (stalledForMs < this.stallAfterMs) return false;
 
-    // One alert per stall state: same last-activity clock ⇒ already alerted.
+    // One alert per stall state: same last-activity clock ⇒ already alerted
+    // — unless that alert never reached Slack AND nobody answered it through
+    // the turn context, in which case nobody has seen it and the next sweep
+    // retries the post rather than losing the stall to a transient error.
     const fingerprint = String(lastActivityAt);
-    if (this.store.getStall(row.dispatchId)?.fingerprint === fingerprint) return false;
+    const existing = this.store.getStall(row.dispatchId);
+    if (
+      existing?.fingerprint === fingerprint &&
+      (existing.relayTs !== null || existing.status === 'answered')
+    ) {
+      return false;
+    }
 
     // A worker with a pending relayed gate DID ask — spec §5's watchdog only
     // covers the silent stall; the ❓/🚨 gate relay owns this one.
@@ -168,7 +177,7 @@ export class Watchdog {
           worktreeName: row.worktreeName,
           repo: row.repo,
           issueNumber: row.issueNumber,
-          issueUrl: await this.issueUrl(row),
+          issueUrl: await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
           stalledForMs,
           lastOutput,
         }),
@@ -176,8 +185,20 @@ export class Watchdog {
     } catch (error) {
       this.logger.error(
         { err: error, threadTs: row.threadTs, dispatchId: row.dispatchId },
-        'stall alert post failed — the registry row below still holds the stall',
+        'stall alert post failed — the registry row below still holds the stall, and the next sweep retries the post',
       );
+    }
+    // worker_done can land while this alert was in flight: a closed
+    // delegation must neither gain a pending stall row (a sanctioned AUTO
+    // send target backing no in-flight work) nor have its fresh ✅ root
+    // re-stamped 🚨 — the posted ⚠️ is simply superseded by the ✅ that
+    // follows it in the thread.
+    if (this.store.getByDispatchId(row.dispatchId)?.status !== 'dispatched') {
+      this.logger.info(
+        { threadTs: row.threadTs, dispatchId: row.dispatchId },
+        'delegation closed while its stall alert posted — nothing registered',
+      );
+      return;
     }
     this.store.recordStall({
       dispatchId: row.dispatchId,
@@ -216,19 +237,6 @@ export class Watchdog {
     }
   }
 
-  /** Same degradation as the gate relay's link: folder repo / Orca down → plain ref. */
-  private async issueUrl(row: DelegationRow): Promise<string | undefined> {
-    if (row.repo === null || row.issueNumber === null) return undefined;
-    try {
-      return await registryIssueUrl(this.run, row.repo, row.issueNumber);
-    } catch (error) {
-      this.logger.warn(
-        { err: error, repo: row.repo },
-        'registry lookup for the issue link failed — plain reference',
-      );
-      return undefined;
-    }
-  }
 }
 
 /**

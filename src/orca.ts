@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { Logger } from './logger.ts';
 
 /**
  * The one seam to the orca CLI: the promisified runner, the `--json`
@@ -161,6 +162,29 @@ export async function registryIssueUrl(
   const registry = await listRegistryRepos(run);
   const key = registry.find((repo) => repo.name === repoName)?.canonicalKey;
   return key === undefined ? undefined : `https://${key}/issues/${issueNumber}`;
+}
+
+/**
+ * `registryIssueUrl` with the degradation every card and alert shares: a row
+ * with no linkable repo, or an unreachable Orca (spec §10, warned) →
+ * undefined, and the caller's rendering falls back to the plain `repo#n`.
+ */
+export async function safeRegistryIssueUrl(
+  run: CommandRunner,
+  logger: Logger,
+  repoName: string | null,
+  issueNumber: number | null,
+): Promise<string | undefined> {
+  if (repoName === null || issueNumber === null) return undefined;
+  try {
+    return await registryIssueUrl(run, repoName, issueNumber);
+  } catch (error) {
+    logger.warn(
+      { err: error, repo: repoName },
+      'registry lookup for the issue link failed — plain reference',
+    );
+    return undefined;
+  }
 }
 
 /** The liveness signals `orca worktree ps` reports for one worktree —

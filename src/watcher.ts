@@ -8,7 +8,7 @@ import {
   execFileRunner,
   makeExecFileRunner,
   parseOrcaEnvelope,
-  registryIssueUrl,
+  safeRegistryIssueUrl,
   type CommandRunner,
 } from './orca.ts';
 import type { DelegationRow, DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
@@ -455,7 +455,10 @@ export class GateWatcher {
           worktreeName: row?.worktreeName ?? null,
           repo: row?.repo ?? null,
           issueNumber: row?.issueNumber ?? null,
-          issueUrl: row === undefined ? undefined : await this.issueUrl(row),
+          issueUrl:
+            row === undefined
+              ? undefined
+              : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
           question,
           options,
         }),
@@ -534,28 +537,10 @@ export class GateWatcher {
   ): Promise<void> {
     await flipCardFinal(this.surface, this.logger, row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
-      issueUrl: await this.issueUrl(row),
+      issueUrl: await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
       reportText: `${message.subject}\n${message.body}`,
       ...(failed && { failureReason: message.subject }),
     });
-  }
-
-  /**
-   * The issue link is re-derived from the registry at close time — the
-   * ledger row keeps only `repo#n`. Wrapped: a folder repo (no remote) or an
-   * unreachable Orca degrades to the plain reference (spec §10).
-   */
-  private async issueUrl(row: DelegationRow): Promise<string | undefined> {
-    if (row.repo === null || row.issueNumber === null) return undefined;
-    try {
-      return await registryIssueUrl(this.run, row.repo, row.issueNumber);
-    } catch (error) {
-      this.logger.warn(
-        { err: error, repo: row.repo },
-        'registry lookup for the issue link failed — plain reference',
-      );
-      return undefined;
-    }
   }
 
   // ── root reactions ─────────────────────────────────────────────────────────

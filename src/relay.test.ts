@@ -264,6 +264,14 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
       false,
     );
   });
+
+  it('the stall sanction demands --enter — keystrokes without it answer nothing', () => {
+    const { relay, store } = makeRelay();
+    seedStall(store);
+    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
+      false,
+    );
+  });
 });
 
 describe('observe — the pending → answered flip', () => {
@@ -385,6 +393,19 @@ describe('observe — the pending → answered flip', () => {
     await relay.observe(
       THREAD,
       'orca terminal send --terminal term_other --text "y" --enter --json',
+      SEND_OK,
+    );
+
+    expect(store.getStall('ctx_stalled')?.status).toBe('pending');
+  });
+
+  it('an enter-less send leaves the stall pending — the prompt is still sitting', async () => {
+    const { relay, store } = makeRelay();
+    seedStall(store);
+
+    await relay.observe(
+      THREAD,
+      `orca terminal send --terminal ${WORKER} --text "y" --json`,
       SEND_OK,
     );
 

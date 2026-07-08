@@ -313,13 +313,50 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
     expect(surface.posts[0]?.text).toContain('> (no recent output could be read)');
   });
 
-  it('a failed Slack post still writes the registry row — the stall is never lost', async () => {
+  it('a failed Slack post still writes the registry row, and the next sweep retries the post', async () => {
     const { watchdog, store, surface } = makeWatchdog();
     surface.failPosts = true;
     seedDispatch(store);
 
     expect(await watchdog.sweep()).toBe(1);
     expect(store.getStall('ctx_w1')).toMatchObject({ status: 'pending', relayTs: null });
+
+    // Nobody saw the alert and nobody answered it — Slack recovering means
+    // the same stall state posts after all, exactly once.
+    surface.failPosts = false;
+    expect(await watchdog.sweep()).toBe(1);
+    expect(surface.posts).toHaveLength(1);
+    expect(store.getStall('ctx_w1')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
+    expect(await watchdog.sweep()).toBe(0);
+  });
+
+  it('an unseen alert answered through the turn context stops retrying', async () => {
+    const { watchdog, store, surface } = makeWatchdog();
+    surface.failPosts = true;
+    seedDispatch(store);
+
+    await watchdog.sweep();
+    store.answerStall('ctx_w1');
+
+    surface.failPosts = false;
+    expect(await watchdog.sweep()).toBe(0);
+    expect(surface.posts).toEqual([]);
+  });
+
+  it('a worker_done racing the alert leaves no pending row and never re-stamps the root', async () => {
+    const { watchdog, store, surface } = makeWatchdog();
+    seedDispatch(store);
+    // The delegation closes while the ⚠️ post is in flight.
+    const post = surface.post.bind(surface);
+    surface.post = (threadTs, text) => {
+      store.closeDelegation('ctx_w1', 'completed');
+      return post(threadTs, text);
+    };
+
+    await watchdog.sweep();
+
+    expect(store.getStall('ctx_w1')).toBeUndefined();
+    expect(surface.reactions).toEqual([]);
   });
 
   it('degrades the issue link to plain repo#n on a folder repo, and survives a down registry', async () => {

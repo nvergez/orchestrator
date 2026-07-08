@@ -126,7 +126,11 @@ export class GateRelay implements SessionRelay {
     }
     return (
       this.store.listPendingGates(threadTs).some((gate) => gate.workerHandle === handle) ||
-      this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)
+      // The stall nudge must land as an ANSWER: keystrokes plus enter (spec
+      // §6) — a send without --enter would leave the prompt sitting, so it
+      // keeps its 🚦 instead of riding the stall's sanction.
+      (hasFlag(tokens, '--enter') &&
+        this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle))
     );
   }
 
@@ -257,15 +261,21 @@ export class GateRelay implements SessionRelay {
     if (parseOrcaEnvelope(stdout) === null) return;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return;
-    // A stalled worker got its keystrokes whatever else the send was for —
-    // its ⚠️ alert is no longer awaiting an answer (issue #22).
-    for (const stall of this.store.listPendingStalls(threadTs)) {
-      if (stall.workerHandle !== handle || !this.store.answerStall(stall.dispatchId)) continue;
-      this.logger.info(
-        { threadTs, dispatchId: stall.dispatchId, workerHandle: handle },
-        'stall alert answered — the nudge reached the worker terminal',
-      );
-      await this.settleRootReaction(threadTs);
+    // A stalled worker whose terminal got keystrokes AND enter has been
+    // nudged, whatever else the send was for — its ⚠️ alert is no longer
+    // awaiting an answer (issue #22). An enter-less send leaves the prompt
+    // sitting, so the alert stays pending.
+    if (hasFlag(tokens, '--enter')) {
+      let nudged = false;
+      for (const stall of this.store.listPendingStalls(threadTs)) {
+        if (stall.workerHandle !== handle || !this.store.answerStall(stall.dispatchId)) continue;
+        nudged = true;
+        this.logger.info(
+          { threadTs, dispatchId: stall.dispatchId, workerHandle: handle },
+          'stall alert answered — the nudge reached the worker terminal',
+        );
+      }
+      if (nudged) await this.settleRootReaction(threadTs);
     }
     const last = this.lastReply.get(threadTs);
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
