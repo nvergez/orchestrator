@@ -15,6 +15,41 @@ export interface IncomingEvent {
   subtype?: string;
   bot_id?: string;
   text?: string;
+  blocks?: SlackBlock[];
+}
+
+/** The slice of Slack's block structure the text extractor walks. */
+interface SlackBlock {
+  type?: string;
+  elements?: SlackBlock[];
+  text?: string;
+  user_id?: string;
+  url?: string;
+  name?: string;
+}
+
+/**
+ * The human's words, extracted from `rich_text` blocks — never from `context`
+ * blocks, where clients append decorations ("*Sent with* @App" footers). Text
+ * pulled from `event.text` includes those footers, which breaks exact-match
+ * commands and lets the model hallucinate around them (issue #41). Falls back
+ * to `event.text` when no rich_text block exists (plain API posts).
+ */
+export function humanText(event: IncomingEvent): string {
+  const richTextBlocks = (event.blocks ?? []).filter((b) => b.type === 'rich_text');
+  if (richTextBlocks.length === 0) return event.text ?? '';
+  const parts: string[] = [];
+  const walk = (el: SlackBlock): void => {
+    if (el.type === 'text' && el.text !== undefined) parts.push(el.text);
+    // Mentions re-render as <@ID> so the botTag rules below keep working on
+    // extracted text exactly as they did on event.text.
+    else if (el.type === 'user' && el.user_id !== undefined) parts.push(`<@${el.user_id}>`);
+    else if (el.type === 'link') parts.push(el.text ?? el.url ?? '');
+    else if (el.type === 'emoji' && el.name !== undefined) parts.push(`:${el.name}:`);
+    else if (el.elements !== undefined) el.elements.forEach(walk);
+  };
+  richTextBlocks.forEach(walk);
+  return parts.join('');
 }
 
 /** The identities the filter guards with, straight from config + auth.test. */
@@ -64,8 +99,9 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   }
 
   const botTag = `<@${guard.botUserId}>`;
+  const spokenText = humanText(event);
   if (event.type === 'message') {
-    if (event.text?.includes(botTag) === true) {
+    if (spokenText.includes(botTag)) {
       // A mention fires both message.channels and app_mention for the same
       // Slack message; acting on the app_mention copy only prevents doubled
       // turns.
@@ -79,7 +115,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (event.user !== guard.allowedUserId) {
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
-    const replyText = (event.text ?? '').trim();
+    const replyText = spokenText.trim();
     if (replyText === '') {
       // Attachment-only or whitespace replies never become empty Claude turns.
       return { action: 'ignore', reason: 'empty_text' };
@@ -98,7 +134,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     return { action: 'refuse', threadTs: event.ts };
   }
 
-  const text = (event.text ?? '').replaceAll(botTag, '').trim();
+  const text = spokenText.replaceAll(botTag, '').trim();
   if (event.thread_ts !== undefined) {
     if (text === '') {
       return { action: 'ignore', reason: 'empty_text' };

@@ -221,3 +221,86 @@ describe('classifyEvent', () => {
     expect((decision as { text: string }).text).not.toBe('');
   });
 });
+
+describe('humanText via blocks (issue #41 — client context-block footers)', () => {
+  // The claude.ai Slack MCP (and similar clients) append "*Sent with* @App"
+  // as a `context` block; its text also leaks into event.text. Commands and
+  // turn text must come from the rich_text block alone.
+  const footerBlocks = (words: { user?: string; text: string }[]) => [
+    {
+      type: 'rich_text',
+      elements: [
+        {
+          type: 'rich_text_section',
+          elements: words.map((w) =>
+            w.user !== undefined
+              ? { type: 'user', user_id: w.user }
+              : { type: 'text', text: w.text },
+          ),
+        },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '*Envoyé avec* <@U0A2GC44JKY>' }],
+    },
+  ];
+
+  it('close command still matches when a context footer pollutes event.text', () => {
+    const event = {
+      type: 'app_mention' as const,
+      channel: 'C0ASJR3LAE6',
+      user: 'U09CC6M3W1W',
+      ts: '1751970003.000400',
+      thread_ts: '1751970000.000100',
+      text: '<@U0BGRT64CPJ> close *Envoyé avec* <@U0A2GC44JKY>',
+      blocks: footerBlocks([
+        { user: 'U0BGRT64CPJ', text: '' },
+        { text: ' close' },
+      ]),
+    };
+
+    expect(classifyEvent(event, guard)).toEqual({
+      action: 'close',
+      threadTs: '1751970000.000100',
+    });
+  });
+
+  it('strips the footer from reply text handed to the session', () => {
+    const event = {
+      ...threadReply,
+      text: 'yes, go ahead *Envoyé avec* <@U0A2GC44JKY>',
+      blocks: footerBlocks([{ text: 'yes, go ahead' }]),
+    };
+
+    expect(classifyEvent(event, guard)).toEqual({
+      action: 'reply',
+      threadTs: threadReply.thread_ts,
+      text: 'yes, go ahead',
+    });
+  });
+
+  it('detects the bot mention from the user element in blocks (mention_duplicate)', () => {
+    const event = {
+      ...threadReply,
+      text: 'ignored',
+      blocks: footerBlocks([
+        { user: 'U0BGRT64CPJ', text: '' },
+        { text: ' hello' },
+      ]),
+    };
+
+    expect(classifyEvent(event, guard)).toEqual({
+      action: 'ignore',
+      reason: 'mention_duplicate',
+    });
+  });
+
+  it('falls back to event.text when no rich_text block exists (plain API posts)', () => {
+    expect(classifyEvent(threadReply, guard)).toEqual({
+      action: 'reply',
+      threadTs: threadReply.thread_ts,
+      text: 'yes, go ahead',
+    });
+  });
+});
