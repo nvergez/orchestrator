@@ -10,9 +10,12 @@ import {
 } from './sessions.ts';
 
 const THREAD = '1751970000.000100';
+const THREAD_2 = '1751970001.000200';
+const THREAD_3 = '1751970002.000300';
 const CHANNEL = 'C0ASJR3LAE6';
 const USER = 'U09CC6M3W1W';
 const TTL = 30 * 60_000;
+const DAY = 24 * 60 * 60_000;
 
 /** A scriptable stand-in for the Claude subprocess behind one thread. */
 class FakeProcess implements OrchestratorProcess {
@@ -61,7 +64,7 @@ interface Harness {
 
 const makeHarness = (
   script?: (text: string, events: TurnEvents) => TurnOutcome,
-  options: { store?: SessionStore; notify?: Notifier } = {},
+  options: { store?: SessionStore; notify?: Notifier; cap?: number; autoCloseMs?: number } = {},
 ): Harness => {
   const store = options.store ?? new SessionStore(':memory:');
   const spawns: Harness['spawns'] = [];
@@ -87,6 +90,8 @@ const makeHarness = (
       }),
     costThresholdsUsd: [5, 10],
     warmTtlMs: TTL,
+    liveSessionCap: options.cap ?? 5,
+    autoCloseAfterMs: options.autoCloseMs ?? 7 * DAY,
     logger: createLogger('silent'),
   });
   return { manager, store, spawns, voices, notices };
@@ -126,10 +131,10 @@ describe('SessionManager', () => {
   it('reply in an unregistered thread does nothing — never a ghost resume', async () => {
     const { manager, spawns } = makeHarness(chattyScript('sess-1'));
 
-    const handled = manager.reply(THREAD, CHANNEL, 'sneaky resume');
+    const result = manager.reply(THREAD, CHANNEL, 'sneaky resume');
     await flush();
 
-    expect(handled).toBe(false);
+    expect(result).toBe('unregistered');
     expect(spawns).toHaveLength(0);
   });
 
@@ -138,10 +143,10 @@ describe('SessionManager', () => {
     manager.open(THREAD, CHANNEL, USER, 'first');
     await flush();
 
-    const handled = manager.reply(THREAD, CHANNEL, 'second');
+    const result = manager.reply(THREAD, CHANNEL, 'second');
     await flush();
 
-    expect(handled).toBe(true);
+    expect(result).toBe('turn');
     expect(spawns).toHaveLength(1);
     expect(manager.liveProcessCount()).toBe(1);
   });
@@ -209,6 +214,8 @@ describe('SessionManager', () => {
       notify: () => Promise.resolve(),
       costThresholdsUsd: [5, 10],
       warmTtlMs: TTL,
+      liveSessionCap: 5,
+      autoCloseAfterMs: 7 * DAY,
       logger: createLogger('silent'),
     });
 
@@ -363,5 +370,357 @@ describe('SessionManager cost ledger (spec §7)', () => {
     const row = store.get(THREAD, CHANNEL);
     expect(row?.turnCount).toBe(1);
     expect(row?.costUsdTotal).toBeCloseTo(7);
+  });
+});
+
+describe('SessionManager live-session cap (spec §3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Every thread gets its own session_id so cold-resumes are traceable. */
+  const perThreadScript = (text: string, events: TurnEvents): TurnOutcome => {
+    events.onSessionId(`sess-${text}`);
+    return { status: 'success', resultText: `echo: ${text}`, costUsd: 0 };
+  };
+
+  it('at the cap, silently reaps the coldest finished-turn session to make room', async () => {
+    const { manager, spawns, notices } = makeHarness(perThreadScript, { cap: 2 });
+
+    manager.open(THREAD, CHANNEL, USER, 'one');
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    manager.open(THREAD_2, CHANNEL, USER, 'two');
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    manager.open(THREAD_3, CHANNEL, USER, 'three');
+    await flush();
+
+    expect(spawns).toHaveLength(3);
+    expect(spawns[0]?.proc.ended).toBe(true); // the coldest — reaped
+    expect(spawns[1]?.proc.ended).toBe(false); // warmer — kept
+    expect(manager.liveProcessCount()).toBe(2);
+    expect(notices).toHaveLength(0); // reaping is silent, no ⏳
+  });
+
+  it('a reaped session cold-resumes from its persisted session_id — nothing lost', async () => {
+    const { manager, spawns } = makeHarness(perThreadScript, { cap: 2 });
+    manager.open(THREAD, CHANNEL, USER, 'one');
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    manager.open(THREAD_2, CHANNEL, USER, 'two');
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    manager.open(THREAD_3, CHANNEL, USER, 'three'); // reaps THREAD
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    manager.reply(THREAD, CHANNEL, 'back again'); // reaps the next-coldest
+    await flush();
+
+    expect(spawns).toHaveLength(4);
+    expect(spawns[3]?.resumeSessionId).toBe('sess-one');
+    expect(manager.liveProcessCount()).toBe(2);
+  });
+
+  it('never reaps a mid-turn session: the message queues with the ⏳ line, then runs when the turn ends', async () => {
+    // A mid-turn session may be suspended on a 🚦 gate (spec §7) — reaping
+    // it would kill the gate under the human's feet. cap=1, one busy thread.
+    const { manager, spawns, notices } = makeHarness(undefined, { cap: 1 });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+
+    manager.open(THREAD_2, CHANNEL, USER, 'waiting');
+    await flush();
+
+    expect(spawns).toHaveLength(1); // no reap, no spawn
+    expect(spawns[0]?.proc.ended).toBe(false);
+    expect(notices).toEqual([
+      {
+        threadTs: THREAD_2,
+        text: "⏳ Queued (1 active session) — I'll get to it as soon as a slot frees up.",
+      },
+    ]);
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'done', costUsd: 0 });
+    await flush();
+
+    expect(spawns).toHaveLength(2); // slot freed → the queued message ran
+    expect(spawns[0]?.proc.ended).toBe(true); // by reaping the now-idle thread
+    expect(spawns[1]?.proc.turns[0]?.text).toBe('waiting');
+  });
+
+  it('queued messages dequeue FIFO, in arrival order, and none is ever dropped', async () => {
+    const { manager, spawns, notices } = makeHarness(undefined, { cap: 1 });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+    manager.open(THREAD_2, CHANNEL, USER, 'second');
+    await flush();
+    manager.open(THREAD_3, CHANNEL, USER, 'third');
+    await flush();
+
+    expect(notices.filter((n) => n.text.startsWith('⏳'))).toHaveLength(2);
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.proc.turns[0]?.text).toBe('second');
+
+    spawns[1]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(spawns).toHaveLength(3);
+    expect(spawns[2]?.proc.turns[0]?.text).toBe('third');
+  });
+
+  it('a failed ⏳ post still leaves the message queued — it runs when a slot frees', async () => {
+    const { manager, spawns } = makeHarness(undefined, {
+      cap: 1,
+      notify: () => Promise.reject(new Error('slack down')),
+    });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+    manager.open(THREAD_2, CHANNEL, USER, 'waiting');
+    await flush();
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.proc.turns[0]?.text).toBe('waiting');
+  });
+});
+
+describe('SessionManager close (spec §3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const costedScript = (text: string, events: TurnEvents): TurnOutcome => {
+    events.onSessionId('sess-1');
+    return { status: 'success', resultText: `echo: ${text}`, costUsd: 1.25 };
+  };
+
+  it('explicit close posts the 🔚 summary from the ledger row and finalizes the session', async () => {
+    const { manager, store, spawns, notices } = makeHarness(costedScript);
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'second');
+    await flush();
+
+    const result = manager.close(THREAD, CHANNEL);
+    await flush();
+
+    expect(result).toBe('closing');
+    expect(notices.at(-1)).toEqual({
+      threadTs: THREAD,
+      text:
+        '🔚 Session closed.\n' +
+        '• 0 delegations\n' +
+        '• thread cost: $2.50 · 2 turns\n' +
+        'Mention me on a new root message to start again.',
+    });
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
+    expect(spawns[0]?.proc.ended).toBe(true);
+    expect(manager.liveProcessCount()).toBe(0);
+  });
+
+  it('close during a turn waits for the turn to finish — never a mid-turn kill', async () => {
+    const { manager, store, spawns, notices } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'working');
+    await flush();
+
+    expect(manager.close(THREAD, CHANNEL)).toBe('closing');
+    await flush();
+
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('open'); // turn still running
+    expect(spawns[0]?.proc.ended).toBe(false);
+    expect(notices).toHaveLength(0);
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'done', costUsd: 0 });
+    await flush();
+
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
+    expect(notices.at(-1)?.text).toContain('🔚 Session closed.');
+    expect(spawns[0]?.proc.ended).toBe(true);
+  });
+
+  it('reply in a closed thread gets the fixed line — no resume, no state change', async () => {
+    const { manager, store, spawns, notices } = makeHarness(costedScript);
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    await flush();
+    const before = store.get(THREAD, CHANNEL);
+
+    const result = manager.reply(THREAD, CHANNEL, 'and an XML version?');
+    await flush();
+
+    expect(result).toBe('closed');
+    expect(notices.at(-1)).toEqual({
+      threadTs: THREAD,
+      text: 'Session closed. Mention me on a new root message to start again.',
+    });
+    expect(spawns).toHaveLength(1); // never a resume
+    expect(store.get(THREAD, CHANNEL)).toEqual(before); // no state change
+  });
+
+  it('close on an already-closed thread posts the fixed line, nothing else', async () => {
+    const { manager, notices } = makeHarness(costedScript);
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    await flush();
+    const noticesBefore = notices.length;
+
+    const result = manager.close(THREAD, CHANNEL);
+    await flush();
+
+    expect(result).toBe('closed');
+    expect(notices).toHaveLength(noticesBefore + 1);
+    expect(notices.at(-1)?.text).toBe(
+      'Session closed. Mention me on a new root message to start again.',
+    );
+  });
+
+  it('close in an unregistered thread does nothing', async () => {
+    const { manager, notices } = makeHarness(costedScript);
+
+    const result = manager.close(THREAD, CHANNEL);
+    await flush();
+
+    expect(result).toBe('unregistered');
+    expect(notices).toHaveLength(0);
+  });
+
+  it('messages queued behind a close get one fixed line and never run', async () => {
+    const { manager, spawns, notices } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'working');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    manager.reply(THREAD, CHANNEL, 'one more thing'); // sent before the close ran
+    await flush();
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'done', costUsd: 0 });
+    await flush();
+
+    expect(spawns[0]?.proc.turns).toHaveLength(1); // the late message never became a turn
+    expect(notices.at(-2)?.text).toContain('🔚 Session closed.');
+    expect(notices.at(-1)?.text).toBe(
+      'Session closed. Mention me on a new root message to start again.',
+    );
+  });
+
+  it('closing a live session frees its slot for a queued message', async () => {
+    const { manager, store, spawns } = makeHarness(undefined, { cap: 1 });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+    manager.open(THREAD_2, CHANNEL, USER, 'waiting');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    await flush();
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'done', costUsd: 0 });
+    await flush();
+
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.proc.turns[0]?.text).toBe('waiting');
+  });
+
+  it('a redelivered root mention on a closed thread gets the fixed line, never a fresh turn', async () => {
+    const { manager, spawns, notices } = makeHarness(costedScript);
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    await flush();
+
+    manager.open(THREAD, CHANNEL, USER, 'first'); // Slack redelivery
+    await flush();
+
+    expect(spawns).toHaveLength(1);
+    expect(notices.at(-1)?.text).toBe(
+      'Session closed. Mention me on a new root message to start again.',
+    );
+  });
+});
+
+describe('SessionManager auto-close sweep (spec §3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sessions dormant past the span auto-close with the dormancy 🔚 summary', async () => {
+    const { manager, store, notices } = makeHarness(chattyScript('sess-1'), {
+      autoCloseMs: 7 * DAY,
+    });
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(7 * DAY + 60_000);
+    const closed = await manager.sweepDormant();
+
+    expect(closed).toBe(1);
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
+    expect(notices.at(-1)?.text).toContain('🔚 Session closed — dormant for 7 days.');
+    expect(manager.liveProcessCount()).toBe(0); // the warm TTL reaped it long ago
+  });
+
+  it('a session with recent activity is untouched', async () => {
+    const { manager, store } = makeHarness(chattyScript('sess-1'), { autoCloseMs: 7 * DAY });
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(1 * DAY);
+    const closed = await manager.sweepDormant();
+
+    expect(closed).toBe(0);
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('open');
+  });
+
+  it('never closes a session with a turn in flight, even on a stale ledger row', async () => {
+    // last_activity_at only moves when a turn completes — a week-later reply
+    // whose first turn is still running must not be closed under the user.
+    const { manager, store, spawns } = makeHarness(undefined, { autoCloseMs: 7 * DAY });
+    manager.open(THREAD, CHANNEL, USER, 'long haul');
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(8 * DAY);
+    const closed = await manager.sweepDormant();
+
+    expect(closed).toBe(0);
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('open');
+
+    spawns[0]?.proc.turns[0]?.resolve({ status: 'success', resultText: 'done', costUsd: 0 });
+    await flush();
+    expect(store.get(THREAD, CHANNEL)?.turnCount).toBe(1); // the turn still landed
+  });
+
+  it('a reply after auto-close gets the fixed line — dormancy closes are final too', async () => {
+    const { manager, notices, spawns } = makeHarness(chattyScript('sess-1'), {
+      autoCloseMs: 7 * DAY,
+    });
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+    await vi.advanceTimersByTimeAsync(7 * DAY + 60_000);
+    await manager.sweepDormant();
+
+    const result = manager.reply(THREAD, CHANNEL, 'still there?');
+    await flush();
+
+    expect(result).toBe('closed');
+    expect(spawns).toHaveLength(1);
+    expect(notices.at(-1)?.text).toBe(
+      'Session closed. Mention me on a new root message to start again.',
+    );
   });
 });

@@ -145,6 +145,70 @@ describe('classifyEvent', () => {
     expect(classifyEvent(event, guard)).toEqual({ action: 'ignore', reason });
   });
 
+  it('recognizes "@orchestrator close" in a thread as the explicit close command (spec §3)', () => {
+    const closeCommand = {
+      ...mention,
+      thread_ts: '1751960000.000001',
+      text: '<@U0BGRT64CPJ> close',
+    };
+
+    expect(classifyEvent(closeCommand, guard)).toEqual({
+      action: 'close',
+      threadTs: '1751960000.000001',
+    });
+  });
+
+  it.each([['Close'], ['CLOSE'], ['close.'], ['close!']])(
+    'normalizes "%s" to the close command',
+    (variant) => {
+      const closeCommand = {
+        ...mention,
+        thread_ts: '1751960000.000001',
+        text: `<@U0BGRT64CPJ> ${variant}`,
+      };
+
+      expect(classifyEvent(closeCommand, guard).action).toBe('close');
+    },
+  );
+
+  it('a mention-less "close" reply stays an ordinary turn — the command needs the mention', () => {
+    expect(classifyEvent({ ...threadReply, text: 'close' }, guard)).toEqual({
+      action: 'reply',
+      threadTs: '1751970000.000100',
+      text: 'close',
+    });
+  });
+
+  it('a longer sentence mentioning close stays a reply for the session to interpret', () => {
+    const sentence = {
+      ...mention,
+      thread_ts: '1751960000.000001',
+      text: '<@U0BGRT64CPJ> close it once the PR merges',
+    };
+
+    expect(classifyEvent(sentence, guard).action).toBe('reply');
+  });
+
+  it('a root "@orchestrator close" mention opens a session — close is a thread command', () => {
+    expect(classifyEvent({ ...mention, text: '<@U0BGRT64CPJ> close' }, guard).action).toBe(
+      'open',
+    );
+  });
+
+  it('a third-party "@orchestrator close" in a thread stays silence, never a close', () => {
+    const thirdParty = {
+      ...mention,
+      user: 'U0THIRDPARTY',
+      thread_ts: '1751960000.000001',
+      text: '<@U0BGRT64CPJ> close',
+    };
+
+    expect(classifyEvent(thirdParty, guard)).toEqual({
+      action: 'ignore',
+      reason: 'third_party_in_thread',
+    });
+  });
+
   it('a bare root mention still opens the session — the mention IS the open (spec §3)', () => {
     const bare = { ...mention, text: '<@U0BGRT64CPJ>' };
 

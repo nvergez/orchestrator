@@ -40,6 +40,8 @@ export type Decision =
   | { action: 'open'; threadTs: string; text: string }
   /** Authorized-user message inside a thread — a turn iff the thread is registered. */
   | { action: 'reply'; threadTs: string; text: string }
+  /** `@orchestrator close` inside a thread — the explicit close command (spec §3). */
+  | { action: 'close'; threadTs: string }
   /** Root @mention by a third party — one polite fixed line (UX mock G1). */
   | { action: 'refuse'; threadTs: string }
   | { action: 'ignore'; reason: IgnoreReason };
@@ -101,11 +103,24 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (text === '') {
       return { action: 'ignore', reason: 'empty_text' };
     }
+    if (isCloseCommand(text)) {
+      return { action: 'close', threadTs: event.thread_ts };
+    }
     return { action: 'reply', threadTs: event.thread_ts, text };
   }
   // A bare root mention is still an Open (spec §3: a root @mention is the one
   // and only opener) — substitute a fixed prompt rather than an empty turn.
   return { action: 'open', threadTs: event.ts, text: text === '' ? BARE_MENTION_PROMPT : text };
+}
+
+/**
+ * The close command is the mention plus the bare word (spec §3: explicit
+ * `@orchestrator close`, thread-only — a root "close" mention just opens a
+ * session). A mention-less "close" reply stays an ordinary turn, and any
+ * longer sentence goes to the session to interpret.
+ */
+function isCloseCommand(text: string): boolean {
+  return text.toLowerCase().replace(/[.!]+$/, '').trim() === 'close';
 }
 
 /** What the session gets when the thread opened on a mention with no words. */

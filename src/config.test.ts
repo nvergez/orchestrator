@@ -25,6 +25,9 @@ describe('loadConfig', () => {
       dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
       warmTtlMs: 30 * 60_000,
       costWarnThresholdsUsd: [5, 10],
+      liveSessionCap: 5,
+      autoCloseAfterMs: 7 * 24 * 60 * 60_000,
+      sweepIntervalMs: 60 * 60_000,
     });
   });
 
@@ -103,6 +106,61 @@ describe('loadConfig', () => {
 
       expect(() => loadConfig(env)).toThrowError(ConfigError);
       expect(() => loadConfig(env)).toThrowError(/COST_WARN_THRESHOLDS_USD/);
+    },
+  );
+
+  it('defaults the live-session cap to 5 (spec §3)', () => {
+    expect(loadConfig(validEnv).liveSessionCap).toBe(5);
+  });
+
+  it('honors SESSION_LIVE_CAP when provided', () => {
+    expect(loadConfig({ ...validEnv, SESSION_LIVE_CAP: '2' }).liveSessionCap).toBe(2);
+  });
+
+  it.each([['0'], ['-1'], ['2.5'], ['many']])(
+    'rejects a SESSION_LIVE_CAP of %s (must be a positive integer)',
+    (badValue) => {
+      const env = { ...validEnv, SESSION_LIVE_CAP: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/SESSION_LIVE_CAP/);
+    },
+  );
+
+  it('defaults the auto-close span to 7 days dormant (spec §3)', () => {
+    expect(loadConfig(validEnv).autoCloseAfterMs).toBe(7 * 24 * 60 * 60_000);
+  });
+
+  it('honors SESSION_AUTO_CLOSE_DAYS when provided', () => {
+    const config = loadConfig({ ...validEnv, SESSION_AUTO_CLOSE_DAYS: '14' });
+
+    expect(config.autoCloseAfterMs).toBe(14 * 24 * 60 * 60_000);
+  });
+
+  it.each([['0'], ['-7'], ['never']])(
+    'rejects a SESSION_AUTO_CLOSE_DAYS of %s (must be a positive number)',
+    (badValue) => {
+      const env = { ...validEnv, SESSION_AUTO_CLOSE_DAYS: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/SESSION_AUTO_CLOSE_DAYS/);
+    },
+  );
+
+  it('defaults the sweep interval to an hour and honors the override', () => {
+    expect(loadConfig(validEnv).sweepIntervalMs).toBe(60 * 60_000);
+    expect(
+      loadConfig({ ...validEnv, SESSION_SWEEP_INTERVAL_MINUTES: '15' }).sweepIntervalMs,
+    ).toBe(15 * 60_000);
+  });
+
+  it.each([['0'], ['-10'], ['hourly']])(
+    'rejects a SESSION_SWEEP_INTERVAL_MINUTES of %s (must be a positive number)',
+    (badValue) => {
+      const env = { ...validEnv, SESSION_SWEEP_INTERVAL_MINUTES: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/SESSION_SWEEP_INTERVAL_MINUTES/);
     },
   );
 });

@@ -46,3 +46,46 @@ export function zeroMatchLine(repoNames: string[]): string {
   const list = repoNames.map((name) => `\`${name}\``).join(', ');
   return `No repo I drive matches. I know: ${list}. Rephrase targeting one of them.`;
 }
+
+/**
+ * Scenario F′ — live-session cap reached with every session mid-turn: the
+ * message waits its turn instead of being rejected (spec §3).
+ */
+export function queuedLine(activeSessions: number): string {
+  const noun = activeSessions === 1 ? 'session' : 'sessions';
+  return `⏳ Queued (${activeSessions} active ${noun}) — I'll get to it as soon as a slot frees up.`;
+}
+
+/** "Brief moments" — the only reply a closed thread ever gets (spec §3: closed is final). */
+export const CLOSED_THREAD_LINE =
+  'Session closed. Mention me on a new root message to start again.';
+
+/**
+ * "Brief moments" — the 🔚 closing summary, posted by an explicit
+ * `@orchestrator close` or by the dormancy auto-close (which names its
+ * reason). The delegation count stays a bare number until #19 lands the
+ * delegations ledger that lets each one be listed like the mock does.
+ */
+export function closingSummary(opts: {
+  delegations: number;
+  costUsd: number;
+  turnCount: number;
+  /** Set by the auto-close sweep — says why the session closed on its own. */
+  dormantDays?: number;
+}): string {
+  const header =
+    opts.dormantDays === undefined
+      ? '🔚 Session closed.'
+      : `🔚 Session closed — dormant for ${formatDays(opts.dormantDays)}.`;
+  return [
+    header,
+    `• ${opts.delegations} delegation${opts.delegations === 1 ? '' : 's'}`,
+    `• thread cost: $${opts.costUsd.toFixed(2)} · ${opts.turnCount} turn${opts.turnCount === 1 ? '' : 's'}`,
+    'Mention me on a new root message to start again.',
+  ].join('\n');
+}
+
+function formatDays(days: number): string {
+  const shown = Number.isInteger(days) ? String(days) : days.toFixed(1);
+  return `${shown} day${days === 1 ? '' : 's'}`;
+}

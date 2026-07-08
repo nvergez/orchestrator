@@ -129,6 +129,49 @@ describe('SessionStore', () => {
     expect(store.count()).toBe(1);
   });
 
+  it('closeSession flips the row to its terminal status and keeps the history (spec §3)', () => {
+    const store = memoryStore();
+    store.register(THREAD, CHANNEL, USER);
+    store.recordTurn(THREAD, CHANNEL, 1.5);
+
+    store.closeSession(THREAD, CHANNEL);
+
+    const row = store.get(THREAD, CHANNEL);
+    expect(row?.status).toBe('closed');
+    expect(row?.turnCount).toBe(1);
+    expect(row?.costUsdTotal).toBeCloseTo(1.5);
+  });
+
+  it('a closed row survives a close-and-reopen — closed is final across restarts', () => {
+    const dbPath = tempDbPath('orchestrator.db');
+    const first = new SessionStore(dbPath);
+    first.register(THREAD, CHANNEL, USER);
+    first.closeSession(THREAD, CHANNEL);
+    first.close();
+
+    const reopened = new SessionStore(dbPath);
+    stores.push(reopened);
+
+    expect(reopened.get(THREAD, CHANNEL)?.status).toBe('closed');
+  });
+
+  it('openSessionsInactiveSince shortlists only open rows idle past the cutoff, oldest first', () => {
+    const timestamps = [
+      '2026-06-20T00:00:00.000Z', // oldest — but will be closed
+      '2026-07-01T00:00:00.000Z', // old and open — the sweep's target
+      '2026-07-07T00:00:00.000Z', // recent — untouched
+    ];
+    const store = memoryStore(() => timestamps.shift() ?? '2026-07-08T00:00:00.000Z');
+    store.register('1751970002.000300', CHANNEL, USER);
+    store.register(THREAD, CHANNEL, USER);
+    store.register('1751970001.000200', CHANNEL, USER);
+    store.closeSession('1751970002.000300', CHANNEL);
+
+    const dormant = store.openSessionsInactiveSince('2026-07-02T00:00:00.000Z');
+
+    expect(dormant.map((row) => row.threadTs)).toEqual([THREAD]);
+  });
+
   it('counts registered sessions for the boot log', () => {
     const store = memoryStore();
     store.register(THREAD, CHANNEL, USER);

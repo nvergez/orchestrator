@@ -67,17 +67,7 @@ export class SessionStore {
       .prepare('SELECT * FROM sessions WHERE thread_ts = ? AND channel_id = ?')
       .get(threadTs, channelId) as Record<string, unknown> | undefined;
     if (row === undefined) return undefined;
-    return {
-      threadTs: row.thread_ts as string,
-      channelId: row.channel_id as string,
-      sessionId: row.session_id as string | null,
-      rootUser: row.root_user as string,
-      status: row.status as 'open' | 'closed',
-      createdAt: row.created_at as string,
-      lastActivityAt: row.last_activity_at as string,
-      turnCount: Number(row.turn_count),
-      costUsdTotal: Number(row.cost_usd_total),
-    };
+    return toSessionRow(row);
   }
 
   setSessionId(threadTs: string, channelId: string, sessionId: string): void {
@@ -101,6 +91,32 @@ export class SessionStore {
       .run(costUsd, this.now(), threadTs, channelId);
   }
 
+  /**
+   * The terminal transition (spec §3): the row stays — it *is* the history —
+   * but no reply will ever resume the session again.
+   */
+  closeSession(threadTs: string, channelId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET status = 'closed' WHERE thread_ts = ? AND channel_id = ?`)
+      .run(threadTs, channelId);
+  }
+
+  /**
+   * Open sessions with no activity since `cutoffIso` — the dormancy sweep's
+   * shortlist. ISO-8601 UTC strings compare lexicographically in time order,
+   * so plain string comparison is exact.
+   */
+  openSessionsInactiveSince(cutoffIso: string): SessionRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sessions
+          WHERE status = 'open' AND last_activity_at < ?
+          ORDER BY last_activity_at`,
+      )
+      .all(cutoffIso) as Array<Record<string, unknown>>;
+    return rows.map(toSessionRow);
+  }
+
   count(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as {
       n: number;
@@ -111,4 +127,18 @@ export class SessionStore {
   close(): void {
     this.db.close();
   }
+}
+
+function toSessionRow(row: Record<string, unknown>): SessionRow {
+  return {
+    threadTs: row.thread_ts as string,
+    channelId: row.channel_id as string,
+    sessionId: row.session_id as string | null,
+    rootUser: row.root_user as string,
+    status: row.status as 'open' | 'closed',
+    createdAt: row.created_at as string,
+    lastActivityAt: row.last_activity_at as string,
+    turnCount: Number(row.turn_count),
+    costUsdTotal: Number(row.cost_usd_total),
+  };
 }

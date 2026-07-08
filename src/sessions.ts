@@ -1,7 +1,12 @@
 import type { Logger } from './logger.ts';
 import type { SessionStore } from './db.ts';
 import { crossedThresholds } from './cost.ts';
-import { costWarningLine } from './messages.ts';
+import {
+  CLOSED_THREAD_LINE,
+  closingSummary,
+  costWarningLine,
+  queuedLine,
+} from './messages.ts';
 
 /**
  * The session manager — one Claude Code session per Slack thread (spec §3).
@@ -48,14 +53,23 @@ export type VoiceFactory = (threadTs: string) => VoiceHandle;
 /** Posts a standalone message to a thread — 💸 warnings "post the event" (spec §8). */
 export type Notifier = (threadTs: string, text: string) => Promise<void>;
 
+/** A thread's FIFO carries turns and, terminally, the close command (spec §3). */
+type QueueItem = { kind: 'turn'; text: string } | { kind: 'close' };
+
 interface ThreadState {
   threadTs: string;
   channelId: string;
-  queue: string[];
+  queue: QueueItem[];
   running: boolean;
   proc: OrchestratorProcess | null;
   warmTimer: NodeJS.Timeout | null;
+  /** When the last drain finished — the reaping order at the cap (coldest first). */
+  warmSince: number;
 }
+
+export type ReplyResult = 'turn' | 'closed' | 'unregistered';
+
+export type CloseResult = 'closing' | 'closed' | 'unregistered';
 
 export interface SessionManagerOptions {
   store: SessionStore;
@@ -65,8 +79,14 @@ export interface SessionManagerOptions {
   /** Ascending USD totals at which to warn once each (spec §7, default 5 then 10). */
   costThresholdsUsd: number[];
   warmTtlMs: number;
+  /** Global cap on live sessions — dormant ones don't count (spec §3, default 5). */
+  liveSessionCap: number;
+  /** Dormancy span after which `sweepDormant` closes a session (spec §3, 7 days). */
+  autoCloseAfterMs: number;
   logger: Logger;
 }
+
+const DAY_MS = 24 * 60 * 60_000;
 
 export class SessionManager {
   private readonly store: SessionStore;
@@ -75,8 +95,18 @@ export class SessionManager {
   private readonly notify: Notifier;
   private readonly costThresholdsUsd: number[];
   private readonly warmTtlMs: number;
+  private readonly liveSessionCap: number;
+  private readonly autoCloseAfterMs: number;
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
+  /**
+   * Live sessions = threads holding a subprocess. `pendingSpawns` reserves
+   * the async gap between winning a slot and the spawn landing, so a burst
+   * of simultaneous messages can never overshoot the cap.
+   */
+  private pendingSpawns = 0;
+  /** Threads waiting for a slot, FIFO — queued messages run in arrival order. */
+  private readonly slotWaiters: Array<() => void> = [];
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -85,6 +115,8 @@ export class SessionManager {
     this.notify = options.notify;
     this.costThresholdsUsd = options.costThresholdsUsd;
     this.warmTtlMs = options.warmTtlMs;
+    this.liveSessionCap = options.liveSessionCap;
+    this.autoCloseAfterMs = options.autoCloseAfterMs;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
     // Nothing here touches a process; the next human message resumes.
@@ -93,18 +125,90 @@ export class SessionManager {
   /** Root @mention: register the thread and run its first turn. */
   open(threadTs: string, channelId: string, rootUser: string, text: string): void {
     this.store.register(threadTs, channelId, rootUser);
-    this.enqueue(threadTs, channelId, text);
+    // A redelivered root mention can land on an already-closed row; closed
+    // is final (spec §3), so it gets the fixed line, never a fresh turn.
+    if (this.store.get(threadTs, channelId)?.status === 'closed') {
+      this.postClosedLine(threadTs);
+      return;
+    }
+    this.enqueue(threadTs, channelId, { kind: 'turn', text });
   }
 
   /**
    * Reply in a thread: a turn iff the thread is registered and open.
-   * Returns false for unregistered threads — never a ghost resume.
+   * Unregistered threads stay untouched — never a ghost resume — and a
+   * closed thread answers with the fixed line only (spec §3).
    */
-  reply(threadTs: string, channelId: string, text: string): boolean {
+  reply(threadTs: string, channelId: string, text: string): ReplyResult {
     const row = this.store.get(threadTs, channelId);
-    if (row === undefined || row.status !== 'open') return false;
-    this.enqueue(threadTs, channelId, text);
-    return true;
+    if (row === undefined) return 'unregistered';
+    if (row.status === 'closed') {
+      this.postClosedLine(threadTs);
+      return 'closed';
+    }
+    this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    return 'turn';
+  }
+
+  /**
+   * `@orchestrator close` (spec §3): queued FIFO like any message, so an
+   * in-flight turn — including one suspended on a 🚦 gate — always settles
+   * before the session is finalized; a session is never killed mid-turn.
+   */
+  close(threadTs: string, channelId: string): CloseResult {
+    const row = this.store.get(threadTs, channelId);
+    if (row === undefined) return 'unregistered';
+    if (row.status === 'closed') {
+      this.postClosedLine(threadTs);
+      return 'closed';
+    }
+    this.enqueue(threadTs, channelId, { kind: 'close' });
+    return 'closing';
+  }
+
+  /**
+   * The dormancy sweep (spec §3): auto-close open sessions past the
+   * configured span. Anything showing signs of life right now — a live
+   * process, a running turn, queued messages — is skipped: last_activity_at
+   * only moves when a turn completes, so a first-turn-after-a-week must not
+   * be closed under the user's feet.
+   */
+  async sweepDormant(): Promise<number> {
+    const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
+    let closed = 0;
+    for (const row of this.store.openSessionsInactiveSince(cutoff)) {
+      const state = this.threads.get(`${row.channelId}:${row.threadTs}`);
+      if (
+        state !== undefined &&
+        (state.running || state.proc !== null || state.queue.length > 0)
+      ) {
+        continue;
+      }
+      this.store.closeSession(row.threadTs, row.channelId);
+      closed += 1;
+      this.logger.info(
+        { threadTs: row.threadTs, lastActivityAt: row.lastActivityAt },
+        'auto-closed dormant session',
+      );
+      try {
+        await this.notify(
+          row.threadTs,
+          closingSummary({
+            // Delegations stay 0 until #19 lands the delegations ledger.
+            delegations: 0,
+            costUsd: row.costUsdTotal,
+            turnCount: row.turnCount,
+            dormantDays: this.autoCloseAfterMs / DAY_MS,
+          }),
+        );
+      } catch (error) {
+        this.logger.warn(
+          { err: error, threadTs: row.threadTs },
+          '🔚 auto-close summary post failed',
+        );
+      }
+    }
+    return closed;
   }
 
   /** Warm subprocesses currently alive (the global-cap slice builds on this). */
@@ -116,14 +220,29 @@ export class SessionManager {
     return count;
   }
 
-  private enqueue(threadTs: string, channelId: string, text: string): void {
+  /** Closed is final (spec §3): the fixed line, no resume, no state change. */
+  private postClosedLine(threadTs: string): void {
+    this.notify(threadTs, CLOSED_THREAD_LINE).catch((error: unknown) => {
+      this.logger.warn({ err: error, threadTs }, 'closed-thread line post failed');
+    });
+  }
+
+  private enqueue(threadTs: string, channelId: string, item: QueueItem): void {
     const key = `${channelId}:${threadTs}`;
     let state = this.threads.get(key);
     if (state === undefined) {
-      state = { threadTs, channelId, queue: [], running: false, proc: null, warmTimer: null };
+      state = {
+        threadTs,
+        channelId,
+        queue: [],
+        running: false,
+        proc: null,
+        warmTimer: null,
+        warmSince: 0,
+      };
       this.threads.set(key, state);
     }
-    state.queue.push(text);
+    state.queue.push(item);
     if (state.warmTimer !== null) {
       clearTimeout(state.warmTimer);
       state.warmTimer = null;
@@ -140,24 +259,151 @@ export class SessionManager {
   /** FIFO per thread (spec §3): strictly one turn in flight, queue the rest. */
   private async drain(state: ThreadState): Promise<void> {
     try {
-      for (let text = state.queue.shift(); text !== undefined; text = state.queue.shift()) {
-        await this.runOneTurn(state, text);
+      for (let item = state.queue.shift(); item !== undefined; item = state.queue.shift()) {
+        if (item.kind === 'close') await this.runClose(state);
+        else await this.runOneTurn(state, item.text);
       }
     } finally {
       state.running = false;
+      state.warmSince = Date.now();
       if (state.proc !== null) this.armWarmTimer(state);
+      // The finished drain may have freed a slot — or made this thread the
+      // reapable one a queued message was waiting for.
+      this.wakeWaiters();
+    }
+  }
+
+  /**
+   * Takes one of the `liveSessionCap` slots before a spawn (spec §3). Fast
+   * path: capacity left, or a coldest finished-turn session to reap. Slow
+   * path: every live session is mid-turn — never a hard reject, so the
+   * thread posts the ⏳ line and waits, FIFO, until a slot frees.
+   */
+  private async acquireSlot(state: ThreadState): Promise<void> {
+    if (this.slotWaiters.length === 0 && this.tryReserveSlot()) return;
+    // Register the waiter before the ⏳ post: a slot freed while the post is
+    // in flight must still find us in the line.
+    const slot = new Promise<void>((resolve) => this.slotWaiters.push(resolve));
+    this.logger.info(
+      { threadTs: state.threadTs, liveSessionCap: this.liveSessionCap },
+      'live-session cap reached, all sessions mid-turn — message queued',
+    );
+    try {
+      await this.notify(
+        state.threadTs,
+        queuedLine(this.liveProcessCount() + this.pendingSpawns),
+      );
+    } catch (error) {
+      this.logger.warn({ err: error, threadTs: state.threadTs }, '⏳ queued line post failed');
+    }
+    return slot;
+  }
+
+  /**
+   * Claims capacity for one spawn. Under the cap: reserve. At the cap: reap
+   * the coldest live session whose turn is finished — it gives up its
+   * process and cold-resumes later from its persisted session_id, nothing
+   * lost. A mid-turn session (running, possibly suspended on a 🚦 gate) is
+   * never touched.
+   */
+  private tryReserveSlot(): boolean {
+    if (this.liveProcessCount() + this.pendingSpawns < this.liveSessionCap) {
+      this.pendingSpawns += 1;
+      return true;
+    }
+    let coldest: ThreadState | undefined;
+    for (const candidate of this.threads.values()) {
+      if (candidate.proc === null || candidate.running) continue;
+      if (coldest === undefined || candidate.warmSince < coldest.warmSince) {
+        coldest = candidate;
+      }
+    }
+    if (coldest === undefined) return false;
+    this.logger.info(
+      { threadTs: coldest.threadTs },
+      'live-session cap reached — reaping the coldest idle session',
+    );
+    if (coldest.warmTimer !== null) {
+      clearTimeout(coldest.warmTimer);
+      coldest.warmTimer = null;
+    }
+    void this.dropProcess(coldest);
+    this.pendingSpawns += 1;
+    return true;
+  }
+
+  /**
+   * Hands freed capacity to queued messages, FIFO. Called after anything
+   * that could free a slot or leave a session reapable: a drain finishing,
+   * a process dropping, a close. NOT called from within dropProcess — the
+   * reap inside tryReserveSlot would recurse and over-hand slots.
+   */
+  private wakeWaiters(): void {
+    while (this.slotWaiters.length > 0 && this.tryReserveSlot()) {
+      this.slotWaiters.shift()?.();
+    }
+  }
+
+  /**
+   * The terminal close (spec §3), reached through the thread's FIFO. Posts
+   * the 🔚 summary from the ledger row, flips the row, and releases the
+   * process and its slot.
+   */
+  private async runClose(state: ThreadState): Promise<void> {
+    const row = this.store.get(state.threadTs, state.channelId);
+    if (row === undefined || row.status === 'closed') return;
+    this.store.closeSession(state.threadTs, state.channelId);
+    this.logger.info(
+      { threadTs: state.threadTs, turnCount: row.turnCount, costUsdTotal: row.costUsdTotal },
+      'session closed',
+    );
+    // Anything still queued behind the close was sent to a session that no
+    // longer exists: drop it, answering turns once with the fixed line.
+    const dropped = state.queue.splice(0);
+    if (state.warmTimer !== null) {
+      clearTimeout(state.warmTimer);
+      state.warmTimer = null;
+    }
+    const hadProc = state.proc !== null;
+    void this.dropProcess(state);
+    if (hadProc) this.wakeWaiters();
+    try {
+      await this.notify(
+        state.threadTs,
+        closingSummary({
+          // Delegations stay 0 until #19 lands the delegations ledger.
+          delegations: 0,
+          costUsd: row.costUsdTotal,
+          turnCount: row.turnCount,
+        }),
+      );
+      if (dropped.some((item) => item.kind === 'turn')) {
+        await this.notify(state.threadTs, CLOSED_THREAD_LINE);
+      }
+    } catch (error) {
+      this.logger.warn(
+        { err: error, threadTs: state.threadTs },
+        '🔚 closing summary post failed',
+      );
     }
   }
 
   private async runOneTurn(state: ThreadState, text: string): Promise<void> {
     if (state.proc === null) {
+      await this.acquireSlot(state);
       const row = this.store.get(state.threadTs, state.channelId);
       const resumeSessionId = row?.sessionId ?? null;
       this.logger.info(
         { threadTs: state.threadTs, resumeSessionId },
         resumeSessionId === null ? 'opening session' : 'cold-resuming session',
       );
-      state.proc = this.spawn({ resumeSessionId, threadTs: state.threadTs });
+      try {
+        state.proc = this.spawn({ resumeSessionId, threadTs: state.threadTs });
+      } finally {
+        this.pendingSpawns -= 1;
+        // A throwing spawn releases its reserved slot to the next in line.
+        if (state.proc === null) this.wakeWaiters();
+      }
     }
 
     const voice = this.voiceFor(state.threadTs);
@@ -191,6 +437,7 @@ export class SessionManager {
     voice.append(reason);
     await voice.finalize();
     await this.dropProcess(state);
+    this.wakeWaiters();
   }
 
   /**
@@ -226,6 +473,7 @@ export class SessionManager {
       if (state.running || state.proc === null) return;
       this.logger.info({ threadTs: state.threadTs }, 'warmth TTL expired, session dormant');
       void this.dropProcess(state);
+      this.wakeWaiters();
     }, this.warmTtlMs);
     state.warmTimer.unref();
   }
