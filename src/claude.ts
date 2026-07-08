@@ -121,7 +121,10 @@ class ClaudeProcess {
         // CLI-default settings loading (never `--bare`, spec §10 — bare would
         // strip the OAuth token) and lets the subprocess inherit process.env,
         // which is where systemd puts CLAUDE_CODE_OAUTH_TOKEN.
-        stderr: (data: string) => this.logger.debug({ src: 'claude-cli' }, data.trim()),
+        // warn, not debug: the CLI only writes here when something is wrong
+        // (API retries, auth trouble), and that must be visible in production
+        // logs (issue #39).
+        stderr: (data: string) => this.logger.warn({ src: 'claude-cli' }, data.trim()),
       },
     });
   }
