@@ -25,3 +25,9 @@ export function costWarningLine(
   if (nextThresholdUsd === undefined) return line;
   return `${line}\nNext warning at $${nextThresholdUsd}.`;
 }
+
+/** Scenario B — the one-line autonomy gate: `🚦 <command> on <worktree> — go?` */
+export function gateLine(command: string, worktree?: string): string {
+  const location = worktree === undefined ? '' : ` on \`${worktree}\``;
+  return `🚦 \`${command}\`${location} — go?`;
+}

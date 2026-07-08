@@ -1,6 +1,7 @@
 import type { App } from '@slack/bolt';
 import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
 import { refusalLine } from './messages.ts';
+import type { GateResolver } from './gate.ts';
 import type { Logger } from './logger.ts';
 
 /** The slice of SessionManager the event handlers drive. */
@@ -14,6 +15,7 @@ export function registerHandlers(
   app: App,
   guard: Guard,
   sessions: SessionGateway,
+  gates: GateResolver,
   logger: Logger,
 ): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
@@ -48,6 +50,17 @@ export function registerHandlers(
         );
         return;
       case 'reply': {
+        // A pending 🚦 gate eats the reply (spec §7): it resolves the
+        // suspended tool call instead of becoming a new session turn. The
+        // filter already guarantees only the authorized user gets here;
+        // tryResolve re-checks the user as defense in depth.
+        if (
+          incoming.user !== undefined &&
+          gates.tryResolve(decision.threadTs, incoming.user, decision.text)
+        ) {
+          logger.info({ threadTs: decision.threadTs }, 'thread reply resolved a pending 🚦 gate');
+          return;
+        }
         const handled = sessions.reply(decision.threadTs, guard.channelId, decision.text);
         logger.debug(
           { threadTs: decision.threadTs, handled },

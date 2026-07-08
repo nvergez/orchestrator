@@ -7,6 +7,7 @@ import { reportOrcaHealth } from './orca-health.ts';
 import { SessionStore } from './db.ts';
 import { SessionManager } from './sessions.ts';
 import { createProcessFactory } from './claude.ts';
+import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
 
 let config: Config;
@@ -70,9 +71,17 @@ try {
     return result.ts;
   };
 
+  // 🚦 gates post as their own thread messages (spec §8: anything requiring
+  // the human is a new message, never an edit of the streaming voice).
+  const gates = new GateKeeper({
+    allowedUserId: config.slackAllowedUserId,
+    post: postToThread,
+    logger,
+  });
+
   const sessions = new SessionManager({
     store,
-    spawn: createProcessFactory({ cwd: process.cwd(), logger }),
+    spawn: createProcessFactory({ cwd: process.cwd(), gates, logger }),
     voiceFor: (threadTs) =>
       new Voice(
         {
@@ -92,7 +101,7 @@ try {
     logger,
   });
 
-  registerHandlers(app, guard, sessions, logger);
+  registerHandlers(app, guard, sessions, gates, logger);
   await app.start();
   logger.info(
     { botUserId: guard.botUserId, channelId: guard.channelId },
