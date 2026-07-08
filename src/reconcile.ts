@@ -1,4 +1,4 @@
-import { completedCard, extractPullRequestLinks, formatDuration, restartNotice } from './messages.ts';
+import { formatDuration, restartNotice } from './messages.ts';
 import {
   execFileRunner,
   listOrchestrationTasks,
@@ -9,6 +9,8 @@ import {
 } from './orca.ts';
 import {
   applyRootReaction,
+  flipCardFinal,
+  isFailureSubject,
   readCheckMessages,
   type OrchestrationMessage,
   type WatcherSurface,
@@ -32,6 +34,10 @@ import type { Logger } from './logger.ts';
  *   ledger row and flip their card right here, daemon-side, so no watcher
  *   ever turns them into a wake; the session stays dormant (#5's boot rule)
  *   until the next human message resumes supervision;
+ * - never close on absence of evidence — only a positive signal (the
+ *   worker's own worker_done, or a terminal task status) ends a row; a
+ *   vanished worktree or an unreachable runtime is reported truthfully but
+ *   stays supervisable;
  * - never notify twice — the per-thread fingerprint of still-open
  *   delegations and their classes is persisted, and a restart that observes
  *   the same picture posts nothing.
@@ -41,7 +47,8 @@ import type { Logger } from './logger.ts';
  * the gate watchers re-arm — rows closed here free their cap slots by never
  * being counted, and threads left with nothing in flight never arm a
  * watcher, so an outage completion is reported exactly once (a leftover
- * unread worker_done consumed later hits the watcher's duplicate guard).
+ * unread worker_done consumed later hits the watcher's duplicate guard,
+ * which the store's any-status task-id lookup backstops).
  */
 
 /** What reconciliation concluded about one dispatched row. */
@@ -58,8 +65,19 @@ interface Reconciled {
   report?: OrchestrationMessage;
 }
 
-/** The kinds that keep their ledger row open (still supervisable). */
-const OPEN_KINDS: ReadonlySet<OutcomeKind> = new Set(['in-flight', 'stalled', 'unknown']);
+/** The two kinds that close a ledger row; everything else stays supervisable. */
+const isTerminal = (item: Reconciled): item is Reconciled & { kind: 'completed' | 'failed' } =>
+  item.kind === 'completed' || item.kind === 'failed';
+
+/** What the task list and the worktree table said, fetched once per boot. */
+interface Observations {
+  taskStatus: Map<string, string>;
+  worktrees: WorktreeProcess[];
+}
+
+const COMPLETED_STATE = '✅ completed during the outage (details in the card ⤴)';
+
+const DEFAULT_STALL_AFTER_MS = 15 * 60_000;
 
 export interface BootReconcilerOptions {
   store: DelegationStore;
@@ -71,8 +89,6 @@ export interface BootReconcilerOptions {
   /** A worker quiet longer than this reads as stalled; default 15 min. */
   stallAfterMs?: number;
 }
-
-const DEFAULT_STALL_AFTER_MS = 15 * 60_000;
 
 export class BootReconciler {
   private readonly store: DelegationStore;
@@ -100,48 +116,50 @@ export class BootReconciler {
       this.logger.debug('no in-flight delegations — nothing to reconcile');
       return;
     }
-    let tasks;
-    let worktrees: WorktreeProcess[];
+    let observed: Observations | undefined;
     try {
-      [tasks, worktrees] = await Promise.all([
+      const [tasks, worktrees] = await Promise.all([
         listOrchestrationTasks(this.run),
         listWorktreeProcesses(this.run),
       ]);
+      observed = { taskStatus: new Map(tasks.map((task) => [task.id, task.status])), worktrees };
     } catch (error) {
-      // Without observations there is no truth to post: leave every row as
-      // it was — the watchers still re-arm off the ledger and supervision
-      // resumes on the next human message (spec §10: degrade, never crash).
+      // No observations, no conclusions: every row stays as it was and the
+      // ⚠️ lines say so — spec §10's "Orca runtime unavailable, never a
+      // crash", but the affected threads still hear about the restart.
       this.logger.warn(
         { err: error, threads: threads.length },
-        'Orca runtime unavailable — boot reconciliation skipped',
+        'Orca runtime unavailable — restart notices will say state unknown',
       );
-      return;
     }
-    const taskStatus = new Map(tasks.map((task) => [task.id, task.status]));
     for (const { threadTs } of threads) {
       try {
-        await this.reconcileThread(threadTs, taskStatus, worktrees);
+        await this.reconcileThread(threadTs, observed);
       } catch (error) {
         this.logger.error({ err: error, threadTs }, 'thread reconciliation failed');
       }
     }
   }
 
-  private async reconcileThread(
-    threadTs: string,
-    taskStatus: Map<string, string>,
-    worktrees: WorktreeProcess[],
-  ): Promise<void> {
+  private async reconcileThread(threadTs: string, observed: Observations | undefined): Promise<void> {
     const rows = this.store.listInFlightForThread(threadTs);
     if (rows.length === 0) return;
-    const reports = await this.peekWorkerDones(threadTs);
-    const items = rows.map((row) => this.classify(row, taskStatus, worktrees, reports));
+    const items =
+      observed === undefined
+        ? rows.map(
+            (row): Reconciled => ({
+              row,
+              kind: 'unknown',
+              state: 'state unknown (Orca runtime unavailable)',
+            }),
+          )
+        : await this.classifyThread(threadTs, rows, observed);
 
     // Close what actually ended — ledger first (the truth), card second (the
     // cosmetics). Closed rows never arm a watcher, so no wake follows.
     const closed: Reconciled[] = [];
     for (const item of items) {
-      if (item.kind !== 'completed' && item.kind !== 'failed') continue;
+      if (!isTerminal(item)) continue;
       if (!this.store.closeDelegation(item.row.dispatchId, item.kind)) continue;
       closed.push(item);
       this.logger.info(
@@ -157,7 +175,7 @@ export class BootReconciler {
     // cannot re-report — it leaves the dispatched set); an unchanged open
     // picture posts nothing.
     const fingerprint = items
-      .filter((item) => OPEN_KINDS.has(item.kind))
+      .filter((item) => !isTerminal(item))
       .map((item) => `${item.row.dispatchId}=${item.kind}`)
       .sort()
       .join('|');
@@ -165,7 +183,7 @@ export class BootReconciler {
       this.logger.info({ threadTs }, 'state unchanged since the last restart — no ⚠️ re-post');
       return;
     }
-    const notice = restartNotice(items.map((item) => ({ ref: delegationRef(item.row), state: item.state })));
+    const notice = restartNotice(items.map((item) => ({ ref: noticeRef(item.row), state: item.state })));
     try {
       await this.surface.post(threadTs, notice);
     } catch (error) {
@@ -182,20 +200,25 @@ export class BootReconciler {
 
   // ── classification ───────────────────────────────────────────────────────
 
+  private async classifyThread(
+    threadTs: string,
+    rows: DelegationRow[],
+    observed: Observations,
+  ): Promise<Reconciled[]> {
+    const reports = await this.peekWorkerDones(threadTs);
+    return rows.map((row) => this.classify(row, observed, reports));
+  }
+
   /**
    * One row against the three observation sources. Precedence: a peeked
    * worker_done is the worker's own word (and the only failure signal with a
    * reason — the "Failed:" subject contract); the task list is authoritative
    * for bare completion; only an unfinished task falls through to worktree
-   * liveness. Absence of evidence closes nothing — a row nothing can be
-   * observed for stays open rather than being invented dead.
+   * liveness. Liveness only ever describes — a worktree that is gone,
+   * archived or silent keeps its row open (absence of evidence closes
+   * nothing); the human decides in the thread.
    */
-  private classify(
-    row: DelegationRow,
-    taskStatus: Map<string, string>,
-    worktrees: WorktreeProcess[],
-    reports: OrchestrationMessage[],
-  ): Reconciled {
+  private classify(row: DelegationRow, observed: Observations, reports: OrchestrationMessage[]): Reconciled {
     const report =
       reports.find((message) => message.payload.dispatchId === row.dispatchId) ??
       // Like the watcher: the task-id fallback only covers payloads that
@@ -205,8 +228,7 @@ export class BootReconciler {
           message.payload.dispatchId === undefined && message.payload.taskId === row.taskId,
       );
     if (report !== undefined) {
-      const failed = /^fail/i.test(report.subject.trim());
-      return failed
+      return isFailureSubject(report.subject)
         ? {
             row,
             kind: 'failed',
@@ -217,32 +239,44 @@ export class BootReconciler {
         : { row, kind: 'completed', state: COMPLETED_STATE, report };
     }
 
-    const status = taskStatus.get(row.taskId);
+    const status = observed.taskStatus.get(row.taskId);
     if (status === 'completed') return { row, kind: 'completed', state: COMPLETED_STATE };
     if (status === 'failed') {
       const reason = 'the task list marked it failed while the daemon was down';
       return { row, kind: 'failed', state: `❌ failed during the outage (${reason})`, reason };
     }
 
+    // The path fallback only covers rows that never learned their worktree
+    // id: on folder repos every workspace shares the folder's path, so a
+    // recorded-but-vanished id must NOT borrow a sibling's liveness.
     const worktree =
-      worktrees.find((candidate) => candidate.worktreeId === row.worktreeId) ??
-      worktrees.find((candidate) => row.worktreePath !== null && candidate.path === row.worktreePath);
+      observed.worktrees.find((candidate) => candidate.worktreeId === row.worktreeId) ??
+      (row.worktreeId === null
+        ? observed.worktrees.find(
+            (candidate) => row.worktreePath !== null && candidate.path === row.worktreePath,
+          )
+        : undefined);
     if (worktree === undefined) {
-      if (row.worktreeId === null && row.worktreePath === null) {
-        // The ledger row never learned its worktree (a dispatch observed
-        // without a matching create) — there is nothing to observe.
-        return {
-          row,
-          kind: 'unknown',
-          state: 'state unknown — its worktree was never recorded, results stay reachable via the task list',
-        };
-      }
-      const reason = 'its worktree is gone without a completion';
-      return { row, kind: 'failed', state: `❌ ${reason} — marked failed`, reason };
+      return row.worktreeId === null && row.worktreePath === null
+        ? // The ledger row never learned its worktree (a dispatch observed
+          // without a matching create) — there is nothing to observe.
+          {
+            row,
+            kind: 'unknown',
+            state: 'state unknown — its worktree was never recorded, results stay reachable via the task list',
+          }
+        : {
+            row,
+            kind: 'unknown',
+            state: 'its worktree is no longer listed — presumed dead',
+          };
     }
     if (worktree.isArchived) {
-      const reason = 'its worktree was archived without a completion';
-      return { row, kind: 'failed', state: `❌ ${reason} — marked failed`, reason };
+      return {
+        row,
+        kind: 'stalled',
+        state: 'its worktree was archived without a completion — presumed dead',
+      };
     }
     if (worktree.liveTerminalCount === 0) {
       return { row, kind: 'stalled', state: 'seems stalled — its worker terminal is gone' };
@@ -260,10 +294,11 @@ export class BootReconciler {
 
   /**
    * The thread mailbox, peeked without consuming: `--all` returns every
-   * message and marks nothing read, so a worker_done the re-armed watcher
-   * would have seen is still there for it — this also recovers the one
-   * crash window `--unread` loses (read by a watcher that died before
-   * closing the row). Filtered to worker_done client-side belt-and-braces.
+   * message and marks nothing read (verified against the live runtime), so
+   * a worker_done the re-armed watcher would have seen is still there for
+   * it — this also recovers the one crash window `--unread` loses (read by
+   * a watcher that died before closing the row). Filtered to worker_done
+   * client-side belt-and-braces.
    */
   private async peekWorkerDones(threadTs: string): Promise<OrchestrationMessage[]> {
     const mailbox = this.store.getMailbox(threadTs);
@@ -291,32 +326,15 @@ export class BootReconciler {
 
   // ── the closed rows' Slack surface ───────────────────────────────────────
 
-  /** The card's final ✅/❌ state, same mold as the watcher's worker_done flip. */
+  /** The card's final ✅/❌ state, the same flip the watcher gives a live worker_done. */
   private async finishCard(item: Reconciled): Promise<void> {
     const { row } = item;
-    const reportText = item.report === undefined ? '' : `${item.report.subject}\n${item.report.body}`;
-    const text = completedCard({
-      repo: row.repo ?? 'work',
-      issueNumber: row.issueNumber ?? 0,
-      title: row.title ?? row.taskId,
-      worktreePath: row.worktreePath,
+    await flipCardFinal(this.surface, this.logger, row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
       issueUrl: await this.issueUrl(row),
-      prLinks: extractPullRequestLinks(reportText),
+      reportText: item.report === undefined ? '' : `${item.report.subject}\n${item.report.body}`,
       ...(item.kind === 'failed' && { failureReason: item.reason ?? 'lost during the outage' }),
     });
-    try {
-      if (row.cardTs === null) {
-        await this.surface.post(row.threadTs, text);
-      } else {
-        await this.surface.update(row.cardTs, text);
-      }
-    } catch (error) {
-      this.logger.warn(
-        { err: error, threadTs: row.threadTs, cardTs: row.cardTs },
-        'reconciliation card flip failed',
-      );
-    }
   }
 
   /**
@@ -331,7 +349,7 @@ export class BootReconciler {
     closed: Reconciled[],
   ): Promise<void> {
     const anyFailed = closed.some((item) => item.kind === 'failed');
-    const anyOpen = items.some((item) => OPEN_KINDS.has(item.kind));
+    const anyOpen = items.some((item) => !isTerminal(item));
     if (anyFailed) {
       await applyRootReaction(this.surface, this.logger, threadTs, 'x');
     } else if (closed.length > 0 && !anyOpen) {
@@ -363,10 +381,12 @@ export class BootReconciler {
   }
 }
 
-const COMPLETED_STATE = '✅ completed during the outage (details in the card ⤴)';
-
-/** `repo#n`, degrading to the worktree name, then the task id. */
-function delegationRef(row: DelegationRow): string {
+/**
+ * `repo#n`, degrading to the worktree name, then the task id — the ⚠️
+ * line's name for a row (plain, per the mock; unlike the watcher's wake-text
+ * ref it never appends the worktree name).
+ */
+function noticeRef(row: DelegationRow): string {
   if (row.repo !== null && row.issueNumber !== null) return `${row.repo}#${row.issueNumber}`;
   return row.worktreeName ?? row.taskId;
 }

@@ -214,6 +214,24 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
+  /**
+   * The thread's newest row for a task, ANY status (issue #25): after boot
+   * reconciliation closes an outage completion, the re-armed watcher can
+   * still consume the same worker_done — a taskId-only payload must resolve
+   * to the closed row (and hit the duplicate guard) instead of surfacing as
+   * an unknown worker.
+   */
+  latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND task_id = ?
+         ORDER BY dispatched_at DESC LIMIT 1`,
+      )
+      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
   listInFlightForThread(threadTs: string): DelegationRow[] {
     const rows = this.db

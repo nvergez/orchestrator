@@ -305,3 +305,15 @@ describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
     expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=stalled');
   });
 });
+
+describe('DelegationStore — any-status task lookup (issue #25)', () => {
+  it('finds the thread’s newest row for a task even after it closed', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.latestByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_8b685db09a47');
+    expect(store.latestByTaskId('1751970099.000900', 'task_13c700f151b3')).toBeUndefined();
+    expect(store.latestByTaskId(THREAD, 'task_none')).toBeUndefined();
+  });
+});

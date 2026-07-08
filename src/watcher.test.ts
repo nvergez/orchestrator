@@ -678,3 +678,35 @@ describe('boot re-arm', () => {
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
   });
 });
+
+describe('worker_done after boot reconciliation (issue #25)', () => {
+  it('lands a taskId-only replay for an already-closed row on the duplicate guard', async () => {
+    const { watcher, store, surface, wakes, slotsFreed } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({ payload: JSON.stringify({ taskId: 'task_3f81' }) }),
+          busMessage({
+            id: 'msg_sibling',
+            subject: 'sibling shipped',
+            payload: JSON.stringify({ taskId: 'task_s1', dispatchId: 'ctx_d2' }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_s1', cardTs: 'card-ts-2' });
+    // Boot reconciliation closed the first delegation during the outage.
+    store.closeDelegation('ctx_d1', 'completed');
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    // The replayed completion neither surfaces raw nor wakes anyone; only
+    // the live sibling's close counts.
+    expect(surface.posts).toEqual([]);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]?.text).toContain('sibling shipped');
+    expect(slotsFreed()).toBe(1);
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+  });
+});

@@ -133,6 +133,55 @@ export interface OrchestrationMessage {
 }
 
 /**
+ * The dispatch preamble's failure contract (issue #20): failure is still a
+ * worker_done — a subject shaped "Failed: <reason>" is the only signal
+ * there is. One predicate so the watcher and boot reconciliation (issue
+ * #25) can never drift on what counts as a failure.
+ */
+export function isFailureSubject(subject: string): boolean {
+  return /^fail/i.test(subject.trim());
+}
+
+/**
+ * The delegation card's final ✅/❌ state — or a fresh post when no card
+ * ever landed. Shared by the watcher's worker_done flip and boot
+ * reconciliation's outage closures (issue #25); failure is signalled by
+ * passing a `failureReason`.
+ */
+export async function flipCardFinal(
+  surface: Pick<WatcherSurface, 'post' | 'update'>,
+  logger: Logger,
+  row: DelegationRow,
+  opts: {
+    durationMs: number;
+    issueUrl: string | undefined;
+    /** Where the PR links come from — the worker's report, or empty. */
+    reportText: string;
+    failureReason?: string;
+  },
+): Promise<void> {
+  const text = completedCard({
+    repo: row.repo ?? 'work',
+    issueNumber: row.issueNumber ?? 0,
+    title: row.title ?? row.taskId,
+    worktreePath: row.worktreePath,
+    durationMs: opts.durationMs,
+    issueUrl: opts.issueUrl,
+    prLinks: extractPullRequestLinks(opts.reportText),
+    ...(opts.failureReason !== undefined && { failureReason: opts.failureReason }),
+  });
+  try {
+    if (row.cardTs === null) {
+      await surface.post(row.threadTs, text);
+    } else {
+      await surface.update(row.cardTs, text);
+    }
+  } catch (error) {
+    logger.warn({ err: error, threadTs: row.threadTs, cardTs: row.cardTs }, 'final card edit failed');
+  }
+}
+
+/**
  * `orchestration check --json` stdout → the readable bus messages, with the
  * raw array riding along for the caller's dropped-entries log line. Throws
  * on a shapeless envelope. Shared with boot reconciliation (issue #25),
@@ -309,7 +358,7 @@ export class GateWatcher {
       );
       return;
     }
-    const failed = /^fail/i.test(message.subject.trim());
+    const failed = isFailureSubject(message.subject);
     if (!this.store.closeDelegation(row.dispatchId, failed ? 'failed' : 'completed')) {
       this.logger.info(
         { threadTs, dispatchId: row.dispatchId },
@@ -433,7 +482,13 @@ export class GateWatcher {
       return byDispatch;
     }
     if (message.payload.taskId !== undefined) {
-      return this.store.inFlightByTaskId(threadTs, message.payload.taskId);
+      return (
+        this.store.inFlightByTaskId(threadTs, message.payload.taskId) ??
+        // A closed row still matches (issue #25): a worker_done consumed
+        // after boot reconciliation already closed its delegation must land
+        // on the duplicate guard above, not surface as an unknown worker.
+        this.store.latestByTaskId(threadTs, message.payload.taskId)
+      );
     }
     // The handle fallback only covers id-LESS payloads (an `ask`): a message
     // that names ids pointing nowhere is a stale straggler — matching it by
@@ -452,28 +507,12 @@ export class GateWatcher {
     message: OrchestrationMessage,
     failed: boolean,
   ): Promise<void> {
-    const text = completedCard({
-      repo: row.repo ?? 'work',
-      issueNumber: row.issueNumber ?? 0,
-      title: row.title ?? row.taskId,
-      worktreePath: row.worktreePath,
+    await flipCardFinal(this.surface, this.logger, row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
       issueUrl: await this.issueUrl(row),
-      prLinks: extractPullRequestLinks(`${message.subject}\n${message.body}`),
+      reportText: `${message.subject}\n${message.body}`,
       ...(failed && { failureReason: message.subject }),
     });
-    try {
-      if (row.cardTs === null) {
-        await this.surface.post(row.threadTs, text);
-      } else {
-        await this.surface.update(row.cardTs, text);
-      }
-    } catch (error) {
-      this.logger.warn(
-        { err: error, threadTs: row.threadTs, cardTs: row.cardTs },
-        'final card edit failed',
-      );
-    }
   }
 
   /**

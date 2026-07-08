@@ -142,7 +142,11 @@ const seedDispatch = (
   });
 };
 
-const makeReconciler = (store: DelegationStore, script: RunnerScript) => {
+const makeReconciler = (
+  store: DelegationStore,
+  script: RunnerScript,
+  opts: { stallAfterMs?: number } = {},
+) => {
   const surface = new FakeSurface();
   const { run, calls } = makeRunner(script);
   const reconciler = new BootReconciler({
@@ -151,6 +155,7 @@ const makeReconciler = (store: DelegationStore, script: RunnerScript) => {
     logger: createLogger('silent'),
     run,
     now: () => new Date(NOW),
+    ...opts,
   });
   return { reconciler, surface, calls };
 };
@@ -317,7 +322,7 @@ describe('BootReconciler — workers still out there', () => {
     expect(restartPosts(surface)[0]).toContain('seems stalled — its worker terminal is gone');
   });
 
-  it('marks a delegation failed when its worktree vanished without a completion', async () => {
+  it('reports a vanished worktree truthfully but never closes on absent evidence', async () => {
     const store = new DelegationStore(':memory:');
     seedDispatch(store);
     store.setMailbox(THREAD, CHANNEL, MAILBOX);
@@ -329,9 +334,44 @@ describe('BootReconciler — workers still out there', () => {
 
     await reconciler.reconcile();
 
-    expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
-    expect(restartPosts(surface)[0]).toContain('worktree is gone');
-    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    expect(restartPosts(surface)[0]).toContain('its worktree is no longer listed — presumed dead');
+    expect(surface.reactions).toEqual([]);
+  });
+
+  it('reads an archived worktree without a completion as presumed dead, row kept open', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+      ps: psOut(psWorktree({ isArchived: true })),
+      checks: { [MAILBOX]: checkOut() },
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    expect(restartPosts(surface)[0]).toContain('archived without a completion');
+  });
+
+  it('honors a custom stall threshold through the stallAfterMs seam', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(
+      store,
+      {
+        taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+        ps: psOut(psWorktree({ lastOutputAt: NOW - 2 * 60_000 })),
+        checks: { [MAILBOX]: checkOut() },
+      },
+      { stallAfterMs: 60_000 },
+    );
+
+    await reconciler.reconcile();
+
+    expect(restartPosts(surface)[0]).toContain('seems stalled — no sign for 2 min');
   });
 
   it('keeps an unobservable delegation open instead of inventing a failure', async () => {
@@ -494,20 +534,37 @@ describe('BootReconciler — one ⚠️ per thread, idempotence', () => {
 });
 
 describe('BootReconciler — degraded runtimes', () => {
-  it('skips reconciliation entirely when Orca is unreachable, touching nothing', async () => {
+  it('says state unknown when Orca is unreachable — rows untouched, no crash-loop spam', async () => {
     const store = new DelegationStore(':memory:');
     seedDispatch(store);
     store.setMailbox(THREAD, CHANNEL, MAILBOX);
-    const { reconciler, surface } = makeReconciler(store, {
+    const script: RunnerScript = {
       taskList: new Error('orca down'),
       ps: new Error('orca down'),
-    });
+    };
 
-    await reconciler.reconcile();
+    const first = makeReconciler(store, script);
+    await first.reconciler.reconcile();
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
-    expect(surface.posts).toEqual([]);
-    expect(store.getReconcileFingerprint(THREAD)).toBeUndefined();
+    expect(restartPosts(first.surface)).toEqual([
+      '⚠️ Restarted — `scratch#21` was in flight: state unknown (Orca runtime unavailable). ' +
+        'Reply to resume supervision.',
+    ]);
+
+    // systemd Restart=always with Orca still down must not re-post.
+    const second = makeReconciler(store, script);
+    await second.reconciler.reconcile();
+    expect(second.surface.posts).toEqual([]);
+
+    // Orca back up with the worker alive — the state changed, so it posts.
+    const third = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+      ps: psOut(psWorktree()),
+      checks: { [MAILBOX]: checkOut() },
+    });
+    await third.reconciler.reconcile();
+    expect(restartPosts(third.surface)[0]).toContain('still in progress');
   });
 
   it('reconciles from task state alone when the mailbox peek fails', async () => {
@@ -541,5 +598,36 @@ describe('BootReconciler — degraded runtimes', () => {
 
     expect(surface.updates[0]?.text).toContain('• issue: scratch#21');
     expect(restartPosts(surface)).toHaveLength(1);
+  });
+});
+
+describe('BootReconciler — worktree matching', () => {
+  it('borrows the path fallback only for rows that never learned their worktree id', async () => {
+    const store = new DelegationStore(':memory:');
+    // Folder-repo shape: the recorded worktree id vanished, but a sibling
+    // workspace (the folder's main entry) still lives at the same path.
+    seedDispatch(store, { worktreePath: '/home/dev/scratch' });
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/dev/scratch' })),
+      checks: { [MAILBOX]: checkOut() },
+    });
+
+    await reconciler.reconcile();
+
+    expect(restartPosts(surface)[0]).toContain('its worktree is no longer listed — presumed dead');
+
+    // An id-less row at the same path does borrow the path match.
+    const store2 = new DelegationStore(':memory:');
+    seedDispatch(store2, { worktreeId: null, worktreePath: '/home/dev/scratch' });
+    store2.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const second = makeReconciler(store2, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/dev/scratch' })),
+      checks: { [MAILBOX]: checkOut() },
+    });
+    await second.reconciler.reconcile();
+    expect(restartPosts(second.surface)[0]).toContain('still in progress');
   });
 });
