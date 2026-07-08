@@ -284,3 +284,24 @@ describe('DelegationStore — the asking-handle fallback (issue #21)', () => {
     expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_old');
   });
 });
+
+describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
+  it('remembers the last posted fingerprint per thread', () => {
+    const store = openStore();
+
+    expect(store.getReconcileFingerprint(THREAD)).toBeUndefined();
+
+    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
+    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=in-flight');
+    expect(store.getReconcileFingerprint('1751970099.000900')).toBeUndefined();
+  });
+
+  it('replaces the fingerprint on a state change instead of stacking rows', () => {
+    const store = openStore();
+
+    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
+    store.setReconcileFingerprint(THREAD, 'ctx_a=stalled');
+
+    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=stalled');
+  });
+});

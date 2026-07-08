@@ -78,6 +78,76 @@ export async function listRegistryRepos(run: CommandRunner): Promise<RegistryRep
   });
 }
 
+/**
+ * One orchestration task as `task-list --json` reports it. Statuses observed
+ * on the live runtime: `pending`, `ready`, `dispatched`, `completed`,
+ * `failed` — boot reconciliation (issue #25) only distinguishes the two
+ * terminal ones and treats everything else as "not finished yet".
+ */
+export interface OrchestrationTask {
+  id: string;
+  status: string;
+}
+
+/** `orca orchestration task-list --json` → every task on the runtime bus. */
+export async function listOrchestrationTasks(run: CommandRunner): Promise<OrchestrationTask[]> {
+  const { stdout } = await run('orca', ['orchestration', 'task-list', '--json']);
+  const tasks = parseOrcaEnvelope(stdout)?.tasks;
+  if (!Array.isArray(tasks)) {
+    throw new Error('unexpected `orca orchestration task-list` response shape');
+  }
+  return tasks.flatMap((task: unknown) => {
+    const record = task as { id?: unknown; status?: unknown };
+    if (typeof record.id !== 'string' || typeof record.status !== 'string') return [];
+    return [{ id: record.id, status: record.status }];
+  });
+}
+
+/** One worktree's live state as `worktree ps --json` reports it (issue #25). */
+export interface WorktreeProcess {
+  /** `repoId::path[::workspace:<n>]` — the same id family `worktree create` issues. */
+  worktreeId: string;
+  path: string;
+  isArchived: boolean;
+  liveTerminalCount: number;
+  /** Epoch ms of the last terminal output — the "last sign"; null when unknown. */
+  lastOutputAt: number | null;
+}
+
+/** `orca worktree ps --json` → every worktree's liveness. Throws when Orca is down. */
+export async function listWorktreeProcesses(run: CommandRunner): Promise<WorktreeProcess[]> {
+  const { stdout } = await run('orca', ['worktree', 'ps', '--json']);
+  const worktrees = parseOrcaEnvelope(stdout)?.worktrees;
+  if (!Array.isArray(worktrees)) {
+    throw new Error('unexpected `orca worktree ps` response shape');
+  }
+  // Absent liveness fields degrade to "no signs of life" — reconciliation
+  // then reports a stall instead of inventing activity it never observed.
+  return worktrees.flatMap((worktree: unknown) => {
+    const record = worktree as {
+      worktreeId?: unknown;
+      path?: unknown;
+      isArchived?: unknown;
+      liveTerminalCount?: unknown;
+      lastOutputAt?: unknown;
+    };
+    if (typeof record.worktreeId !== 'string' || typeof record.path !== 'string') return [];
+    return [
+      {
+        worktreeId: record.worktreeId,
+        path: record.path,
+        isArchived: record.isArchived === true,
+        liveTerminalCount:
+          typeof record.liveTerminalCount === 'number' ? record.liveTerminalCount : 0,
+        lastOutputAt:
+          typeof record.lastOutputAt === 'number' && record.lastOutputAt > 0
+            ? record.lastOutputAt
+            : null,
+      },
+    ];
+  });
+}
+
 /** Every live terminal handle on the runtime. Throws when Orca is down. */
 export async function listLiveTerminalHandles(run: CommandRunner): Promise<Set<string>> {
   const { stdout } = await run('orca', ['terminal', 'list', '--json']);

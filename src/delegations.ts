@@ -99,6 +99,11 @@ export class DelegationStore {
         handle     TEXT NOT NULL,
         created_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS reconciliations (
+        thread_ts   TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        posted_at   TEXT NOT NULL
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS pending_gates (
         msg_id        TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
@@ -270,6 +275,29 @@ export class DelegationStore {
          VALUES (?, ?, ?, ?)`,
       )
       .run(threadTs, channelId, handle, this.now());
+  }
+
+  /**
+   * The thread's last posted boot-reconciliation fingerprint (issue #25) — a
+   * canonical string of the still-open delegations and their observed
+   * classes. Repeated restarts with unchanged state compare equal here and
+   * post no second ⚠️ line.
+   */
+  getReconcileFingerprint(threadTs: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ?')
+      .get(threadTs) as { fingerprint: string } | undefined;
+    return row?.fingerprint;
+  }
+
+  /** Remembers what the thread's ⚠️ line last reported (issue #25). */
+  setReconcileFingerprint(threadTs: string, fingerprint: string): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO reconciliations (thread_ts, fingerprint, posted_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(threadTs, fingerprint, this.now());
   }
 
   /**

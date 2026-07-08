@@ -122,7 +122,7 @@ export async function applyRootReaction(
   }
 }
 
-interface OrchestrationMessage {
+export interface OrchestrationMessage {
   id: string;
   type: string;
   subject: string;
@@ -130,6 +130,23 @@ interface OrchestrationMessage {
   /** The sending terminal — the asking worker, for a gate's route-back. */
   fromHandle?: string;
   payload: { taskId?: string; dispatchId?: string; question?: string; options?: string[] };
+}
+
+/**
+ * `orchestration check --json` stdout → the readable bus messages, with the
+ * raw array riding along for the caller's dropped-entries log line. Throws
+ * on a shapeless envelope. Shared with boot reconciliation (issue #25),
+ * whose read-only `check --all` peek sees the same message shape.
+ */
+export function readCheckMessages(stdout: string): {
+  messages: OrchestrationMessage[];
+  raw: unknown[];
+} {
+  const raw = parseOrcaEnvelope(stdout)?.messages;
+  if (!Array.isArray(raw)) {
+    throw new Error('unexpected `orca orchestration check` response shape');
+  }
+  return { messages: raw.flatMap(readMessage), raw };
 }
 
 export class GateWatcher {
@@ -245,19 +262,15 @@ export class GateWatcher {
       String(this.windowMs),
       '--json',
     ]);
-    const messages = parseOrcaEnvelope(stdout)?.messages;
-    if (!Array.isArray(messages)) {
-      throw new Error('unexpected `orca orchestration check` response shape');
-    }
-    const readable = messages.flatMap(readMessage);
-    if (readable.length < messages.length) {
+    const { messages, raw } = readCheckMessages(stdout);
+    if (messages.length < raw.length) {
       // The check marked them read, so this log line is their last trace.
       this.logger.error(
-        { mailbox, dropped: messages.length - readable.length, raw: messages },
+        { mailbox, dropped: raw.length - messages.length, raw },
         'unreadable bus messages dropped',
       );
     }
-    return readable;
+    return messages;
   }
 
   // ── event handling ─────────────────────────────────────────────────────────
