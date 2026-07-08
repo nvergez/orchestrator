@@ -6,7 +6,7 @@ import {
 import type { Logger } from './logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
-import { buildCanUseTool, guardrailHooks } from './permissions.ts';
+import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { SessionGates } from './gate.ts';
 
 /**
@@ -64,6 +64,8 @@ class ClaudeProcess {
     threadTs: string;
     cwd: string;
     gates: SessionGates;
+    allowList: DelegationPolicy;
+    systemPromptAppend: string;
     logger: Logger;
   }) {
     this.logger = opts.logger;
@@ -79,6 +81,14 @@ class ClaudeProcess {
         // Spec §7: the session's only side-effecting tool is Bash — no
         // file-editing tools, the orchestrator never codes itself.
         tools: ['Bash'],
+        // The orchestrator role and the routing rules (spec §4, issue #18)
+        // ride on the Claude Code preset — appended, never replacing it, so
+        // the CLI's own tool-use behavior stays intact.
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: opts.systemPromptAppend,
+        },
         // Enforcement (spec §7): 'default' routes every would-prompt call
         // into canUseTool, and the PreToolUse ask-hook forces even
         // settings-allowed Bash commands down that same path — AUTO runs
@@ -87,6 +97,7 @@ class ClaudeProcess {
         canUseTool: buildCanUseTool({
           threadTs: opts.threadTs,
           gates: opts.gates,
+          allowList: opts.allowList,
           logger: opts.logger,
         }),
         hooks: guardrailHooks(),
@@ -189,6 +200,8 @@ class ClaudeProcess {
 export function createProcessFactory(opts: {
   cwd: string;
   gates: SessionGates;
+  allowList: DelegationPolicy;
+  systemPromptAppend: string;
   logger: Logger;
 }): ProcessFactory {
   return ({ resumeSessionId, threadTs }) =>
@@ -197,6 +210,8 @@ export function createProcessFactory(opts: {
       threadTs,
       cwd: opts.cwd,
       gates: opts.gates,
+      allowList: opts.allowList,
+      systemPromptAppend: opts.systemPromptAppend,
       logger: opts.logger,
     });
 }

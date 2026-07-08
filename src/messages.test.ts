@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { costWarningLine, gateLine, refusalLine } from './messages.ts';
+import {
+  costWarningLine,
+  delegationGateLine,
+  gateLine,
+  refusalLine,
+  zeroMatchLine,
+} from './messages.ts';
 
 describe('refusalLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
@@ -38,6 +44,23 @@ describe('gateLine', () => {
   it('matches the mock verbatim when no worktree is identifiable', () => {
     expect(gateLine('orca worktree delete forwardly-84-csv-export')).toBe(
       '🚦 `orca worktree delete forwardly-84-csv-export` — go?',
+    );
+  });
+});
+
+describe('delegationGateLine', () => {
+  it('matches the issue #10 verbatim, in Slack mrkdwn', () => {
+    expect(delegationGateLine('forwardly', 'claude')).toBe(
+      "→ I'm delegating on *forwardly* with *claude*. Go? (or name another repo/agent)",
+    );
+  });
+});
+
+describe('zeroMatchLine', () => {
+  it('matches the UX mock verbatim (docs/prototypes/slack-ux, "Zero match")', () => {
+    expect(zeroMatchLine(['forwardly', 'orca', 'scratch', 'orchestrator'])).toBe(
+      'No repo I drive matches. I know: `forwardly`, `orca`, `scratch`, ' +
+        '`orchestrator`. Rephrase targeting one of them.',
     );
   });
 });

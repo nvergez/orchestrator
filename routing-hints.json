@@ -1,0 +1,29 @@
+{
+  "$comment": "Routing hints (spec §4) — and the delegation allow-list (spec §7): a repo absent from this file is not delegable even if registered in Orca. Adding a delegable repo = one commit here. `name` must match the Orca registry displayName; `defaultAgent` (claude|codex) is optional — omitted means the global default `claude` (issue #10: all-claude at the start).",
+  "repos": [
+    {
+      "name": "forwardly",
+      "description": "The product web app — email campaigns and send metrics; real features wired to real data.",
+      "aliases": ["fwd", "the product", "the app"],
+      "keywords": ["product", "campaign", "send metrics", "export", "dashboard", "endpoint", "feature"]
+    },
+    {
+      "name": "orca",
+      "description": "The Orca runtime and CLI — the worktree/agent manager that runs the delegated workers on this VPS.",
+      "aliases": ["orca runtime", "orca cli"],
+      "keywords": ["worktree", "terminal", "agent", "orchestration", "runtime", "cli"]
+    },
+    {
+      "name": "scratch",
+      "description": "Sandbox for one-shot scripts, experiments and benchmarks — nothing here ships to users.",
+      "aliases": ["sandbox", "playground"],
+      "keywords": ["one-shot", "script", "experiment", "bench", "prototype", "throwaway"]
+    },
+    {
+      "name": "orchestrator",
+      "description": "This Slack-driven orchestrator-dispatcher daemon (the bot itself) — routing, sessions, delegation, supervision.",
+      "aliases": ["the bot", "nikolai", "dispatcher", "the orchestrator"],
+      "keywords": ["slack", "bolt", "session", "routing", "gate", "guardrails", "daemon", "systemd"]
+    }
+  ]
+}

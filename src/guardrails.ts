@@ -78,6 +78,35 @@ export function describeGate(command: string): GateDescription {
   return { command: oneLine };
 }
 
+/**
+ * The `--repo` values of every `orca worktree create` segment in the command
+ * — what the allow-list check in permissions.ts runs on before any tier is
+ * honored (spec §7: the routing hints file is the delegation allow-list). A
+ * create carrying no `--repo` yields a null entry so the caller can fail
+ * closed on it.
+ */
+export function extractDelegationRepoRefs(command: string): Array<string | null> {
+  const refs: Array<string | null> = [];
+  for (const tokens of parse(command).segments) {
+    if (tokens[0] !== 'orca') continue;
+    const [topic, action] = commandWords(tokens.slice(1), 2);
+    if (topic !== 'worktree' || action !== 'create') continue;
+    let found = false;
+    for (let i = 1; i < tokens.length; i += 1) {
+      const token = tokens[i] as string;
+      if (token === '--repo') {
+        refs.push(tokens[i + 1] ?? null);
+        found = true;
+      } else if (token.startsWith('--repo=')) {
+        refs.push(token.slice('--repo='.length));
+        found = true;
+      }
+    }
+    if (!found) refs.push(null);
+  }
+  return refs;
+}
+
 // ── shell surface parsing ────────────────────────────────────────────────────
 
 interface ParsedCommand {

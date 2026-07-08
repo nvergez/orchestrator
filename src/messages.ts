@@ -31,3 +31,18 @@ export function gateLine(command: string, worktree?: string): string {
   const location = worktree === undefined ? '' : ` on \`${worktree}\``;
   return `🚦 \`${command}\`${location} — go?`;
 }
+
+/**
+ * Issue #10 §4 — the one-line conditional routing gate, posted by the session
+ * whenever repo or agent was inferred. Spec §4 shows the short form; the
+ * ticket (which wins) appends the "name another" escape hatch.
+ */
+export function delegationGateLine(repo: string, agent: string): string {
+  return `→ I'm delegating on *${repo}* with *${agent}*. Go? (or name another repo/agent)`;
+}
+
+/** Zero match — stop + list (scenario "Zero match" in the mock, issue #10 §2). */
+export function zeroMatchLine(repoNames: string[]): string {
+  const list = repoNames.map((name) => `\`${name}\``).join(', ');
+  return `No repo I drive matches. I know: ${list}. Rephrase targeting one of them.`;
+}
