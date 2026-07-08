@@ -1,4 +1,4 @@
-import { commandSegments, flagValue, hasFlag, shellQuote } from './guardrails.ts';
+import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from './guardrails.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from './messages.ts';
 import {
   createTerminal,
@@ -133,8 +133,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   async prepare(threadTs: string, command: string, signal?: AbortSignal): Promise<PrepareVerdict> {
     const segments = commandSegments(command);
-    const creates = segments.filter((tokens) => isOrca(tokens, 'worktree', 'create'));
-    const dispatches = segments.filter((tokens) => isOrca(tokens, 'orchestration', 'dispatch'));
+    const creates = segments.filter((tokens) => isOrcaCommand(tokens, 'worktree', 'create'));
+    const dispatches = segments.filter((tokens) => isOrcaCommand(tokens, 'orchestration', 'dispatch'));
     if (creates.length === 0 && dispatches.length === 0) {
       return { action: 'proceed', command };
     }
@@ -279,15 +279,15 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   async observe(threadTs: string, command: string, stdout: string): Promise<void> {
     try {
       for (const tokens of commandSegments(command)) {
-        if (isOrca(tokens, 'worktree', 'create')) {
+        if (isOrcaCommand(tokens, 'worktree', 'create')) {
           await this.observeCreate(threadTs, tokens, stdout);
-        } else if (isOrca(tokens, 'terminal', 'list')) {
+        } else if (isOrcaCommand(tokens, 'terminal', 'list')) {
           this.observeTerminalList(threadTs, stdout);
-        } else if (isOrca(tokens, 'terminal', 'wait')) {
+        } else if (isOrcaCommand(tokens, 'terminal', 'wait')) {
           this.observeTerminalWait(threadTs, tokens, stdout);
-        } else if (isOrca(tokens, 'orchestration', 'task-create')) {
+        } else if (isOrcaCommand(tokens, 'orchestration', 'task-create')) {
           this.observeTaskCreate(threadTs, stdout);
-        } else if (isOrca(tokens, 'orchestration', 'dispatch')) {
+        } else if (isOrcaCommand(tokens, 'orchestration', 'dispatch')) {
           await this.observeDispatch(threadTs, stdout);
         }
       }
@@ -646,14 +646,6 @@ class WorkerSlots {
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });
 
-/** Adjacent `<topic> <action>` anywhere in an orca segment (as in guardrails). */
-function isOrca(tokens: string[], topic: string, action: string): boolean {
-  return (
-    tokens[0] === 'orca' &&
-    tokens.some((token, index) => token === topic && tokens[index + 1] === action)
-  );
-}
-
 /** `<repo>-<issue#>-<slug>` → the repo prefix; the whole name when unconventional. */
 function repoFromName(worktreeName: string): string {
   return /^(.*?)-\d+-/.exec(worktreeName)?.[1] ?? worktreeName;
@@ -662,6 +654,16 @@ function repoFromName(worktreeName: string): string {
 function issueFromName(worktreeName: string): number | null {
   const match = /^.*?-(\d+)-/.exec(worktreeName);
   return match === null ? null : Number(match[1]);
+}
+
+/**
+ * `<repo>-<issue#>-<slug>` → the `repo#n` display ref; null when the name
+ * does not follow the convention. The one parser of the worktree naming
+ * convention shared beyond this module (the gate relay's ack refs).
+ */
+export function worktreeIssueRef(worktreeName: string): string | null {
+  const issue = issueFromName(worktreeName);
+  return issue === null ? null : `${repoFromName(worktreeName)}#${issue}`;
 }
 
 function numberOrNull(value: string | undefined): number | null {

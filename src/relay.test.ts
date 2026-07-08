@@ -171,14 +171,26 @@ describe('prepare — registry enforcement on orchestration reply', () => {
 });
 
 describe('sanctionsSend — the registry-anchored terminal send', () => {
-  it('sanctions a --json send to a relayed gate’s worker, pending or answered', () => {
+  const SEND = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
+
+  it('sanctions the fallback while the worker’s gate is pending, not forever after', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
-    const command = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
-    expect(relay.sanctionsSend(THREAD, command)).toBe(true);
+    expect(relay.sanctionsSend(THREAD, SEND)).toBe(true);
 
+    // All answered and no correction under way: the worker is no longer a
+    // silent AUTO target — the 🚦 is back.
     store.answerGate(GATE);
-    expect(relay.sanctionsSend(THREAD, command)).toBe(true);
+    expect(relay.sanctionsSend(THREAD, SEND)).toBe(false);
+  });
+
+  it('sanctions the correction send an answered-gate denial just pointed at', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    store.answerGate(GATE);
+
+    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+    expect(relay.sanctionsSend(THREAD, SEND)).toBe(true);
   });
 
   it.each([
@@ -228,11 +240,13 @@ describe('observe — the pending → answered flip', () => {
     expect(surface.reactions).toEqual([]);
   });
 
-  it('flips the oldest pending gate of the worker on a fallback send', async () => {
+  it('a fallback send answers the gate whose reply failed — not a sibling', async () => {
     const { relay, store, surface } = makeRelay();
     seedGate(store);
-    seedGate(store, { msgId: 'msg_later' });
+    seedGate(store, { msgId: 'msg_sibling', kind: 'escalation', options: [] });
 
+    // The reply to GATE fails (ask timed out) — the fallback send follows.
+    await relay.observe(THREAD, replyCommand('2'), '');
     await relay.observe(
       THREAD,
       `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`,
@@ -240,21 +254,43 @@ describe('observe — the pending → answered flip', () => {
     );
 
     expect(store.getGate(GATE)?.status).toBe('answered');
-    expect(store.getGate('msg_later')?.status).toBe('pending');
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
+    expect(store.getGate('msg_sibling')?.status).toBe('pending');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'rotating_light' });
   });
 
-  it('a send to a worker with no pending gate flips nothing — a late correction', async () => {
+  it('flips the single unambiguous pending gate on an unattributed send — never one of several', async () => {
+    const { relay, store, surface } = makeRelay();
+    seedGate(store);
+    const send = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
+
+    await relay.observe(THREAD, send, SEND_OK);
+    expect(store.getGate(GATE)?.status).toBe('answered');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'eyes' });
+
+    seedGate(store, { msgId: 'msg_two' });
+    seedGate(store, { msgId: 'msg_three', kind: 'escalation', options: [] });
+    await relay.observe(THREAD, send, SEND_OK);
+    expect(store.getGate('msg_two')?.status).toBe('pending');
+    expect(store.getGate('msg_three')?.status).toBe('pending');
+  });
+
+  it('a correction send flips nothing — the worker’s newer pending gate survives', async () => {
     const { relay, store, surface } = makeRelay();
     seedGate(store);
     store.answerGate(GATE);
+    seedGate(store, { msgId: 'msg_newer' });
+    surface.reactions.length = 0;
 
+    // The human revises the answered gate: deny points at terminal send…
+    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+    // …and that send must not mark the newer, unrelated question answered.
     await relay.observe(
       THREAD,
       `orca terminal send --terminal ${WORKER} --text "correction" --enter --json`,
       SEND_OK,
     );
 
+    expect(store.getGate('msg_newer')?.status).toBe('pending');
     expect(surface.reactions).toEqual([]);
   });
 });

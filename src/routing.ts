@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { execFileRunner, listRegistryRepos, type CommandRunner, type RegistryRepo } from './orca.ts';
-import { delegationGateLine, zeroMatchLine } from './messages.ts';
+import { delegationGateLine, gateAnswerAck, zeroMatchLine } from './messages.ts';
 import type { Logger } from './logger.ts';
 
 /**
@@ -292,7 +292,7 @@ When a worker asks a question or escalates, the daemon posts the gate message in
 - Two or more PENDING gates → route only on a clear clue (the worker or worktree is named, a bare number only one gate's options can absorb, vocabulary that fits only one question). At the slightest doubt ask ONE short clarifying line ("for \`x#1\` or \`y#2\`?") and run nothing.
 - Forward with: \`orca orchestration reply --id <gate msg id> --body "<the answer>" --json\` — its own Bash command, nothing chained.
 - Fidelity is absolute — you never rephrase a human decision. A bare option number: pass it as-is (\`--body "2"\`); the daemon substitutes that option's exact text itself. Free text: forward it word for word, only stripping Slack markup and <@…> mentions. Never summarize, translate, soften or expand an answer.
-- After the reply command succeeds, respond with exactly one line: ✅ Relayed to \`<repo>#<n>\` — "<what went down>" — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
+- After the reply command succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<what went down>')} — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
 - If the reply command fails (the worker's ask likely hit its timeout), say so in one short line, then forward the SAME text with \`orca terminal send --terminal <the gate's worker terminal> --text "<the answer>" --enter --json\` — it runs without a gate because the registry vouches for it.
 - An ANSWERED gate never re-routes. If the human revises a decision that already went down, say it was already passed on and relay the correction best-effort via the same \`orca terminal send\` — no cancellation guarantee.
 - Never use \`orca orchestration gate-resolve\` — DAG gates are not part of this relay.`;

@@ -10,7 +10,7 @@ import { gateLine } from './messages.ts';
 import type { GateRequester } from './gate.ts';
 import type { DelegationVerdict } from './routing.ts';
 import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
-import type { SessionRelay } from './relay.ts';
+import type { RelayObserver, RelayPolicy } from './relay.ts';
 import type { Logger } from './logger.ts';
 
 /** The slice of RepoAllowList this hook consults for every delegation. */
@@ -35,7 +35,7 @@ export function buildCanUseTool(opts: {
   gates: GateRequester;
   allowList: DelegationPolicy;
   delegations: DispatchPreparer;
-  relay: Pick<SessionRelay, 'sanctionsSend' | 'prepare'>;
+  relay: RelayPolicy;
   logger: Logger;
 }): CanUseTool {
   const { threadTs, gates, allowList, delegations, relay, logger } = opts;
@@ -166,7 +166,7 @@ const FORCE_ASK: HookJSONOutput = {
 export function guardrailHooks(opts: {
   threadTs: string;
   delegations: DispatchObserver;
-  relay: Pick<SessionRelay, 'observe'>;
+  relay: RelayObserver;
   logger: Logger;
 }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
   const { threadTs, delegations, relay, logger } = opts;

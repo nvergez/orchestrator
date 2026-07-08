@@ -1,8 +1,8 @@
 import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from './guardrails.ts';
 import { parseOrcaEnvelope } from './orca.ts';
 import { applyRootReaction, type ReactionSurface, type RootReaction } from './watcher.ts';
+import { worktreeIssueRef, type PrepareVerdict } from './dispatch.ts';
 import type { DelegationStore, PendingGateRow } from './delegations.ts';
-import type { PrepareVerdict } from './dispatch.ts';
 import type { Logger } from './logger.ts';
 
 /**
@@ -40,17 +40,33 @@ export interface GateRelayOptions {
   logger: Logger;
 }
 
-/** The slice a session process holds (canUseTool + hooks, issue #21). */
-export interface SessionRelay {
+/** The slice canUseTool consults before a command runs (issue #21). */
+export interface RelayPolicy {
   sanctionsSend(threadTs: string, command: string): boolean;
   prepare(threadTs: string, command: string): PrepareVerdict;
+}
+
+/** The slice the PostToolUse hooks feed after a command ran. */
+export interface RelayObserver {
   observe(threadTs: string, command: string, stdout: string): Promise<void>;
 }
+
+/** What a session process holds — both seams together. */
+export type SessionRelay = RelayPolicy & RelayObserver;
 
 export class GateRelay implements SessionRelay {
   private readonly store: DelegationStore;
   private readonly surface: ReactionSurface;
   private readonly logger: Logger;
+  /**
+   * The last reply attempt per thread — how the follow-up `terminal send`
+   * is attributed to a gate. A FAILED reply's send is the fallback and
+   * answers exactly that gate; a send after an answered-gate denial is a
+   * late correction and flips nothing. Runtime-only state: the send follows
+   * its reply within the same turn, and losing it merely degrades the
+   * attribution to the unambiguous-single-pending heuristic below.
+   */
+  private readonly lastReply = new Map<string, { msgId: string; outcome: 'failed' | 'correction' }>();
 
   constructor(options: GateRelayOptions) {
     this.store = options.store;
@@ -81,9 +97,13 @@ export class GateRelay implements SessionRelay {
   // ── prepare: the canUseTool seam ─────────────────────────────────────────
 
   /**
-   * True for the one sanctioned `terminal send`: a single-segment, --json
-   * send whose --terminal is the worker handle of a gate this thread
-   * relayed. Anything else keeps its CONFIRM tier.
+   * True for the sanctioned `terminal send`: a single-segment, --json send
+   * to a worker this thread's registry vouches for RIGHT NOW — the worker
+   * still has a pending gate here (the reply-failure fallback), or the
+   * thread's last reply attempt named one of its gates (the late correction
+   * the denial pointed at). Anything else keeps its CONFIRM tier: a worker
+   * whose gates are long answered must not stay a silent AUTO target
+   * forever.
    */
   sanctionsSend(threadTs: string, command: string): boolean {
     const segments = commandSegments(command);
@@ -93,8 +113,12 @@ export class GateRelay implements SessionRelay {
     if (!hasFlag(tokens, '--json')) return false;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return false;
+    const last = this.lastReply.get(threadTs);
+    if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
+      return true;
+    }
     return this.store
-      .listGatesForThread(threadTs)
+      .listPendingGates(threadTs)
       .some((gate) => gate.workerHandle === handle);
   }
 
@@ -126,6 +150,9 @@ export class GateRelay implements SessionRelay {
       );
     }
     if (gate.status === 'answered') {
+      // Remember the denial: it sanctions the correction send that follows,
+      // and tells observeSend that send answers nothing new.
+      this.lastReply.set(threadTs, { msgId, outcome: 'correction' });
       const handle = gate.workerHandle ?? '<worker handle>';
       return deny(
         'that gate was already answered — an answered gate never re-routes (spec §6). ' +
@@ -178,7 +205,7 @@ export class GateRelay implements SessionRelay {
     try {
       for (const tokens of commandSegments(command)) {
         if (isOrcaCommand(tokens, 'orchestration', 'reply')) {
-          await this.observeReply(tokens, stdout);
+          await this.observeReply(threadTs, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'terminal', 'send')) {
           await this.observeSend(threadTs, tokens, stdout);
         }
@@ -189,12 +216,20 @@ export class GateRelay implements SessionRelay {
   }
 
   /** A reply that reached the bus answers its gate — pending → answered. */
-  private async observeReply(tokens: string[], stdout: string): Promise<void> {
-    if (parseOrcaEnvelope(stdout) === null) return; // failed → the gate stays pending
+  private async observeReply(threadTs: string, tokens: string[], stdout: string): Promise<void> {
     const msgId = flagValue(tokens, '--id');
     if (msgId === undefined) return;
+    if (parseOrcaEnvelope(stdout) === null) {
+      // The reply failed (the ask likely hit its timeout): the gate stays
+      // pending, and the fallback send that follows answers THIS gate.
+      if (this.store.getGate(msgId)?.status === 'pending') {
+        this.lastReply.set(threadTs, { msgId, outcome: 'failed' });
+      }
+      return;
+    }
     const gate = this.store.getGate(msgId);
     if (gate === undefined || !this.store.answerGate(msgId)) return;
+    this.lastReply.delete(threadTs);
     this.logger.info(
       { threadTs: gate.threadTs, msgId, workerHandle: gate.workerHandle },
       'gate answered — human reply relayed down',
@@ -203,23 +238,52 @@ export class GateRelay implements SessionRelay {
   }
 
   /**
-   * A sanctioned fallback send also answers the (oldest) pending gate of its
-   * worker — the reply path failed, but the human's answer went down. A send
-   * to a worker with only answered gates is a late correction: nothing to flip.
+   * A sanctioned send answers the gate it is FOR: the one whose reply just
+   * failed (the fallback), never the one a correction denial named. Without
+   * that attribution, only a worker's single unambiguous pending gate flips
+   * — with two pending (an escalation plus an ask), guessing which one the
+   * send answered could mark the wrong question answered and get its real
+   * answer refused later.
    */
   private async observeSend(threadTs: string, tokens: string[], stdout: string): Promise<void> {
     if (parseOrcaEnvelope(stdout) === null) return;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return;
-    const gate = this.store
+    const last = this.lastReply.get(threadTs);
+    if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
+      this.lastReply.delete(threadTs);
+      if (last.outcome === 'correction') {
+        this.logger.info(
+          { threadTs, msgId: last.msgId, workerHandle: handle },
+          'late correction passed on best-effort — nothing to flip',
+        );
+        return;
+      }
+      await this.answerBySend(threadTs, last.msgId, handle);
+      return;
+    }
+    const pending = this.store
       .listPendingGates(threadTs)
-      .find((candidate) => candidate.workerHandle === handle);
-    if (gate === undefined || !this.store.answerGate(gate.msgId)) return;
+      .filter((gate) => gate.workerHandle === handle);
+    if (pending.length !== 1) {
+      if (pending.length > 1) {
+        this.logger.warn(
+          { threadTs, workerHandle: handle, pending: pending.map((gate) => gate.msgId) },
+          'unattributed send to a worker with several pending gates — none flipped',
+        );
+      }
+      return;
+    }
+    await this.answerBySend(threadTs, (pending[0] as PendingGateRow).msgId, handle);
+  }
+
+  private async answerBySend(threadTs: string, msgId: string, handle: string): Promise<void> {
+    if (!this.store.answerGate(msgId)) return;
     this.logger.info(
-      { threadTs, msgId: gate.msgId, workerHandle: handle },
+      { threadTs, msgId, workerHandle: handle },
       'gate answered via the terminal send fallback',
     );
-    await this.settleRootReaction(gate.threadTs);
+    await this.settleRootReaction(threadTs);
   }
 
   /** ❓/🚨 while gates remain, 👀 when the last one was answered (spec §8). */
@@ -255,7 +319,6 @@ function contextLine(gate: PendingGateRow): string {
 
 /** `repo#n` out of the worktree name, degrading to the task id / message id. */
 function gateRef(gate: PendingGateRow): string {
-  const match = gate.worktreeName === null ? null : /^(.*?)-(\d+)-/.exec(gate.worktreeName);
-  if (match !== null) return `${match[1]}#${match[2]}`;
-  return gate.taskId ?? gate.msgId;
+  const ref = gate.worktreeName === null ? null : worktreeIssueRef(gate.worktreeName);
+  return ref ?? gate.taskId ?? gate.msgId;
 }
