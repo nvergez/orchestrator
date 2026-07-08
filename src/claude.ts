@@ -7,7 +7,11 @@ import type { Logger } from './logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
+import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
 import type { SessionGates } from './gate.ts';
+
+/** The coordinator slice a session process holds (issue #19). */
+export type SessionDelegations = DispatchPreparer & DispatchObserver;
 
 /**
  * The Claude Agent SDK adapter behind `OrchestratorProcess` (spec §1/§3):
@@ -57,6 +61,7 @@ class ClaudeProcess {
   // One meter per process — see TurnCostMeter for the cumulative semantics.
   private readonly costMeter = new TurnCostMeter();
   private readonly gates: SessionGates;
+  private readonly delegations: SessionDelegations;
   private readonly threadTs: string;
 
   constructor(opts: {
@@ -65,11 +70,13 @@ class ClaudeProcess {
     cwd: string;
     gates: SessionGates;
     allowList: DelegationPolicy;
+    delegations: SessionDelegations;
     systemPromptAppend: string;
     logger: Logger;
   }) {
     this.logger = opts.logger;
     this.gates = opts.gates;
+    this.delegations = opts.delegations;
     this.threadTs = opts.threadTs;
     this.session = query({
       prompt: this.input,
@@ -98,9 +105,14 @@ class ClaudeProcess {
           threadTs: opts.threadTs,
           gates: opts.gates,
           allowList: opts.allowList,
+          delegations: opts.delegations,
           logger: opts.logger,
         }),
-        hooks: guardrailHooks(),
+        hooks: guardrailHooks({
+          threadTs: opts.threadTs,
+          delegations: opts.delegations,
+          logger: opts.logger,
+        }),
         // settingSources and env are deliberately NOT set: omitting them keeps
         // CLI-default settings loading (never `--bare`, spec §10 — bare would
         // strip the OAuth token) and lets the subprocess inherit process.env,
@@ -167,10 +179,13 @@ class ClaudeProcess {
   /**
    * A dead or dying process can never release a suspended gate, and a
    * stranded gate would swallow the thread's next reply — deny whatever is
-   * still pending whenever this process stops being able to answer.
+   * still pending whenever this process stops being able to answer. Worker
+   * slots reserved for delegations this process will never dispatch go back
+   * to the pool the same way (issue #19).
    */
   private releaseGates(): void {
     this.gates.cancelThread(this.threadTs);
+    this.delegations.abandonThread(this.threadTs);
   }
 
   async end(): Promise<void> {
@@ -201,6 +216,7 @@ export function createProcessFactory(opts: {
   cwd: string;
   gates: SessionGates;
   allowList: DelegationPolicy;
+  delegations: SessionDelegations;
   systemPromptAppend: string;
   logger: Logger;
 }): ProcessFactory {
@@ -211,6 +227,7 @@ export function createProcessFactory(opts: {
       cwd: opts.cwd,
       gates: opts.gates,
       allowList: opts.allowList,
+      delegations: opts.delegations,
       systemPromptAppend: opts.systemPromptAppend,
       logger: opts.logger,
     });

@@ -23,6 +23,8 @@ export interface RegistryRepo {
   id: string;
   /** The registry `displayName` — what a routing-hints entry's `name` pins. */
   name: string;
+  /** `github.com/<owner>/<repo>` — absent on folder repos with no remote. */
+  canonicalKey?: string;
 }
 
 /** `orca repo list --json` → the living registry. Throws when Orca is down. */
@@ -36,9 +38,19 @@ export async function listRegistryRepos(run: CommandRunner): Promise<RegistryRep
   // An entry without id or displayName cannot be matched — dropping it only
   // narrows the delegable surface, which is the fail-closed direction.
   return repos.flatMap((repo: unknown) => {
-    const record = repo as { id?: unknown; displayName?: unknown };
-    return typeof record.id === 'string' && typeof record.displayName === 'string'
-      ? [{ id: record.id, name: record.displayName }]
-      : [];
+    const record = repo as {
+      id?: unknown;
+      displayName?: unknown;
+      gitRemoteIdentity?: { canonicalKey?: unknown };
+    };
+    if (typeof record.id !== 'string' || typeof record.displayName !== 'string') return [];
+    const canonicalKey = record.gitRemoteIdentity?.canonicalKey;
+    return [
+      {
+        id: record.id,
+        name: record.displayName,
+        ...(typeof canonicalKey === 'string' && { canonicalKey }),
+      },
+    ];
   });
 }

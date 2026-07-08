@@ -84,6 +84,8 @@ export interface SessionManagerOptions {
   liveSessionCap: number;
   /** Dormancy span after which `sweepDormant` closes a session (spec §3, 7 days). */
   autoCloseAfterMs: number;
+  /** The thread's delegation count from the #19 ledger — the 🔚 summary's number. */
+  countDelegations: (threadTs: string) => number;
   logger: Logger;
 }
 
@@ -96,6 +98,7 @@ export class SessionManager {
   private readonly warmTtlMs: number;
   private readonly liveSessionCap: number;
   private readonly autoCloseAfterMs: number;
+  private readonly countDelegations: (threadTs: string) => number;
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   /**
@@ -117,6 +120,7 @@ export class SessionManager {
     this.warmTtlMs = options.warmTtlMs;
     this.liveSessionCap = options.liveSessionCap;
     this.autoCloseAfterMs = options.autoCloseAfterMs;
+    this.countDelegations = options.countDelegations;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
     // Nothing here touches a process; the next human message resumes.
@@ -228,8 +232,7 @@ export class SessionManager {
       await this.notify(
         row.threadTs,
         closingSummary({
-          // Delegations stay 0 until #19 lands the delegations ledger.
-          delegations: 0,
+          delegations: this.countDelegations(row.threadTs),
           costUsd: row.costUsdTotal,
           turnCount: row.turnCount,
           dormantDays,

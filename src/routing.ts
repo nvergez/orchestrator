@@ -270,7 +270,16 @@ ${delegationGateLine('<repo>', '<agent>')}
   An affirmative reply releases it; a reply naming a different repo or agent re-routes to that choice without another question.
 - A disambiguation answer already IS the confirmation — asking again is forbidden.
 
-## Current build — stop at the routing decision
+## Delegation — the dispatch sequence (spec §5)
 
-Dispatch is not wired up yet (next slice). Once the routing decision is confirmed — or was fully explicit — state it in one line (target repo, its registry \`id\`, the agent) and stop. Do not run \`orca worktree create\` yet.`;
+Once the routing decision is confirmed — or was fully explicit — delegate. Run each step as its OWN Bash command, in this exact order, always with \`--json\`. Never chain two steps with \`&&\`, \`;\` or pipes.
+
+1. Ensure a GitHub issue exists on the target repo: reuse the one the user pointed at, otherwise create it — \`gh issue create --repo <owner>/<repo> --title "<short>" --body "<the request, restated>"\`. Take \`<owner>/<repo>\` from the registry entry's git remote. Its number is \`<n>\` below. If the repo has no GitHub remote (a local sandbox), skip this step and use the next small integer as \`<n>\` — it is only a local tag.
+2. \`orca worktree create --repo id:<repoId> --name <repo>-<n>-<slug> --agent <agent> --issue <n> --no-parent --json\` — \`<slug>\` is 2–4 lowercase hyphenated words. NEVER pass \`--prompt\`: the brief travels with the dispatch injection, or the worker misses the coordinator preamble and never reports done.
+3. \`orca terminal list --worktree id:<worktreeId> --json\` — \`<worktreeId>\` from step 2's output; note the worker terminal \`handle\`.
+4. \`orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json\` — the agent TUI must be idle before injection.
+5. \`orca orchestration task-create --spec "<brief>" --task-title "<short>" --display-name "<repo>#<n>" --json\` — the \`--spec\` brief must stand alone: context, what to change, how to verify, what to deliver.
+6. \`orca orchestration dispatch --task <taskId> --to <handle> --inject --json\` — never pass \`--from\`; the daemon adds the thread mailbox itself.
+
+The daemon posts and maintains the delegation status card in the thread on its own — never repeat the card's content. After the dispatch succeeds, reply with ONE short line ("Delegated — I'll keep you posted.") and end your turn; supervision events arrive later on their own. If a step fails, say which step and why in one line, then stop and wait for the user.`;
 }
