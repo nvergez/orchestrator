@@ -4,6 +4,10 @@ import { ConfigError, loadConfig, type Config } from './config.ts';
 import { createLogger, toBoltLogger } from './logger.ts';
 import { registerHandlers } from './app.ts';
 import { reportOrcaHealth } from './orca-health.ts';
+import { SessionStore } from './db.ts';
+import { SessionManager } from './sessions.ts';
+import { createProcessFactory } from './claude.ts';
+import { Voice } from './voice.ts';
 
 let config: Config;
 try {
@@ -23,6 +27,14 @@ const logger = createLogger(config.logLevel);
 void reportOrcaHealth(logger);
 
 try {
+  const store = new SessionStore(config.dbPath);
+  // Boot rule (spec §3): rows survive the restart, every session comes back
+  // dormant, and nothing below wakes one — the next human message does.
+  logger.info(
+    { dbPath: config.dbPath, sessions: store.count() },
+    'state database open — all sessions dormant',
+  );
+
   const app = new App({
     token: config.slackBotToken,
     appToken: config.slackAppToken,
@@ -46,7 +58,34 @@ try {
     botUserId: auth.user_id,
   };
 
-  registerHandlers(app, guard, logger);
+  const sessions = new SessionManager({
+    store,
+    spawn: createProcessFactory({ cwd: process.cwd(), logger }),
+    voiceFor: (threadTs) =>
+      new Voice(
+        {
+          post: async (text) => {
+            const result = await app.client.chat.postMessage({
+              channel: config.slackChannelId,
+              thread_ts: threadTs,
+              text,
+            });
+            if (result.ts === undefined) {
+              throw new Error('chat.postMessage returned no ts');
+            }
+            return result.ts;
+          },
+          update: async (ts, text) => {
+            await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+          },
+        },
+        { onError: (err) => logger.warn({ err, threadTs }, 'voice flush failed') },
+      ),
+    warmTtlMs: config.warmTtlMs,
+    logger,
+  });
+
+  registerHandlers(app, guard, sessions, logger);
   await app.start();
   logger.info(
     { botUserId: guard.botUserId, channelId: guard.channelId },

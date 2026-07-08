@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig } from './config.ts';
 
@@ -6,6 +8,7 @@ const validEnv = {
   SLACK_APP_TOKEN: 'xapp-1-A111-222-abc',
   SLACK_CHANNEL_ID: 'C0ASJR3LAE6',
   SLACK_ALLOWED_USER_ID: 'U09CC6M3W1W',
+  CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-abc123',
 };
 
 describe('loadConfig', () => {
@@ -17,14 +20,17 @@ describe('loadConfig', () => {
       slackAppToken: 'xapp-1-A111-222-abc',
       slackChannelId: 'C0ASJR3LAE6',
       slackAllowedUserId: 'U09CC6M3W1W',
+      claudeCodeOauthToken: 'sk-ant-oat01-abc123',
       logLevel: 'info',
+      dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
+      warmTtlMs: 30 * 60_000,
     });
   });
 
   it('fails fast, naming every missing key at once', () => {
     expect(() => loadConfig({})).toThrowError(ConfigError);
     expect(() => loadConfig({})).toThrowError(
-      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_ID.*SLACK_ALLOWED_USER_ID/s,
+      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_ID.*SLACK_ALLOWED_USER_ID.*CLAUDE_CODE_OAUTH_TOKEN/s,
     );
   });
 
@@ -33,6 +39,7 @@ describe('loadConfig', () => {
     ['SLACK_APP_TOKEN', 'xoxb-not-an-app-token', 'xapp-'],
     ['SLACK_CHANNEL_ID', 'U09CC6M3W1W', 'C'],
     ['SLACK_ALLOWED_USER_ID', 'C0ASJR3LAE6', 'U'],
+    ['CLAUDE_CODE_OAUTH_TOKEN', 'xoxb-not-an-oauth-token', 'sk-ant-'],
   ])('rejects a malformed %s (must start with %s)', (key, badValue) => {
     const env = { ...validEnv, [key]: badValue };
 
@@ -52,4 +59,29 @@ describe('loadConfig', () => {
     expect(() => loadConfig(env)).toThrowError(ConfigError);
     expect(() => loadConfig(env)).toThrowError(/LOG_LEVEL/);
   });
+
+  it('honors the ORCHESTRATOR_DB_PATH override (spec §9)', () => {
+    const config = loadConfig({
+      ...validEnv,
+      ORCHESTRATOR_DB_PATH: '/var/tmp/test-orchestrator.db',
+    });
+
+    expect(config.dbPath).toBe('/var/tmp/test-orchestrator.db');
+  });
+
+  it('honors SESSION_WARM_TTL_MINUTES when provided', () => {
+    const config = loadConfig({ ...validEnv, SESSION_WARM_TTL_MINUTES: '5' });
+
+    expect(config.warmTtlMs).toBe(5 * 60_000);
+  });
+
+  it.each([['0'], ['-3'], ['soon']])(
+    'rejects a SESSION_WARM_TTL_MINUTES of %s (must be a positive number)',
+    (badValue) => {
+      const env = { ...validEnv, SESSION_WARM_TTL_MINUTES: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/SESSION_WARM_TTL_MINUTES/);
+    },
+  );
 });

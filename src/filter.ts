@@ -1,6 +1,8 @@
 /**
  * The event filter — the gate every Slack event passes before anything else
- * happens (spec §2/§7). Pure: no Slack client, no I/O, fully unit-testable.
+ * happens (spec §2/§3/§7). Pure: no Slack client, no I/O, fully unit-testable.
+ * It decides *what kind* of turn an event is; whether the thread is actually
+ * registered is the session manager's call (it owns the SQLite registry).
  */
 
 /** The fields of a Slack `app_mention` / `message` event the filter rules on. */
@@ -12,6 +14,7 @@ export interface IncomingEvent {
   thread_ts?: string;
   subtype?: string;
   bot_id?: string;
+  text?: string;
 }
 
 /** The identities the filter guards with, straight from config + auth.test. */
@@ -28,10 +31,16 @@ export type IgnoreReason =
   | 'self'
   | 'no_user'
   | 'not_a_mention'
-  | 'third_party_in_thread';
+  | 'third_party_in_thread'
+  | 'mention_duplicate'
+  | 'empty_text';
 
 export type Decision =
-  | { action: 'ack'; threadTs: string }
+  /** Root @mention by the authorized user — register the thread, first turn. */
+  | { action: 'open'; threadTs: string; text: string }
+  /** Authorized-user message inside a thread — a turn iff the thread is registered. */
+  | { action: 'reply'; threadTs: string; text: string }
+  /** Root @mention by a third party — one polite fixed line (UX mock G1). */
   | { action: 'refuse'; threadTs: string }
   | { action: 'ignore'; reason: IgnoreReason };
 
@@ -51,20 +60,43 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   if (event.user === undefined) {
     return { action: 'ignore', reason: 'no_user' };
   }
-  if (event.type !== 'app_mention') {
-    // message.channels events never open anything in this slice; mentions
-    // arrive separately as app_mention, so this also prevents double replies.
-    return { action: 'ignore', reason: 'not_a_mention' };
+
+  const botTag = `<@${guard.botUserId}>`;
+  if (event.type === 'message') {
+    if (event.text?.includes(botTag) === true) {
+      // A mention fires both message.channels and app_mention for the same
+      // Slack message; acting on the app_mention copy only prevents doubled
+      // turns.
+      return { action: 'ignore', reason: 'mention_duplicate' };
+    }
+    if (event.thread_ts === undefined) {
+      // A root channel message never opens anything — spec §3: no mention,
+      // no session.
+      return { action: 'ignore', reason: 'not_a_mention' };
+    }
+    if (event.user !== guard.allowedUserId) {
+      return { action: 'ignore', reason: 'third_party_in_thread' };
+    }
+    return { action: 'reply', threadTs: event.thread_ts, text: event.text ?? '' };
   }
 
-  if (event.user === guard.allowedUserId) {
-    return { action: 'ack', threadTs: event.thread_ts ?? event.ts };
+  // app_mention from here on.
+  if (event.user !== guard.allowedUserId) {
+    if (event.thread_ts !== undefined) {
+      // The polite refusal is for *root* mentions only (UX mock G1). Anything
+      // a third party posts inside a thread is silence, per spec §7 — never
+      // injected, and no "I'm ignoring you" polluting the thread.
+      return { action: 'ignore', reason: 'third_party_in_thread' };
+    }
+    return { action: 'refuse', threadTs: event.ts };
+  }
+
+  const text = (event.text ?? '').replaceAll(botTag, '').trim();
+  if (text === '') {
+    return { action: 'ignore', reason: 'empty_text' };
   }
   if (event.thread_ts !== undefined) {
-    // The polite refusal is for *root* mentions only (UX mock G1). Anything a
-    // third party posts inside a thread is silence, per spec §7 — never
-    // injected, and no "I'm ignoring you" polluting the thread.
-    return { action: 'ignore', reason: 'third_party_in_thread' };
+    return { action: 'reply', threadTs: event.thread_ts, text };
   }
-  return { action: 'refuse', threadTs: event.ts };
+  return { action: 'open', threadTs: event.ts, text };
 }

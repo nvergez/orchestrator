@@ -7,7 +7,3 @@
 export function refusalLine(allowedUserId: string): string {
   return `v1: only <@${allowedUserId}> can drive me.`;
 }
-
-/** Canned walking-skeleton acknowledgment — no Claude behind it yet (#14). */
-export const ACK_TEXT =
-  '👋 Heard. Walking skeleton online — canned reply, no brain wired up yet.';
