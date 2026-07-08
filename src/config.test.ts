@@ -45,4 +45,11 @@ describe('loadConfig', () => {
 
     expect(config.logLevel).toBe('debug');
   });
+
+  it('rejects a LOG_LEVEL pino does not know', () => {
+    const env = { ...validEnv, LOG_LEVEL: 'verbose' };
+
+    expect(() => loadConfig(env)).toThrowError(ConfigError);
+    expect(() => loadConfig(env)).toThrowError(/LOG_LEVEL/);
+  });
 });

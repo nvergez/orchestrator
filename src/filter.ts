@@ -21,10 +21,19 @@ export interface Guard {
   botUserId: string;
 }
 
+export type IgnoreReason =
+  | 'wrong_channel'
+  | 'subtype'
+  | 'bot_message'
+  | 'self'
+  | 'no_user'
+  | 'not_a_mention'
+  | 'third_party_in_thread';
+
 export type Decision =
   | { action: 'ack'; threadTs: string }
   | { action: 'refuse'; threadTs: string }
-  | { action: 'ignore'; reason: string };
+  | { action: 'ignore'; reason: IgnoreReason };
 
 export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   if (event.channel !== guard.channelId) {
@@ -48,9 +57,14 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     return { action: 'ignore', reason: 'not_a_mention' };
   }
 
-  const threadTs = event.thread_ts ?? event.ts;
   if (event.user === guard.allowedUserId) {
-    return { action: 'ack', threadTs };
+    return { action: 'ack', threadTs: event.thread_ts ?? event.ts };
   }
-  return { action: 'refuse', threadTs };
+  if (event.thread_ts !== undefined) {
+    // The polite refusal is for *root* mentions only (UX mock G1). Anything a
+    // third party posts inside a thread is silence, per spec §7 — never
+    // injected, and no "I'm ignoring you" polluting the thread.
+    return { action: 'ignore', reason: 'third_party_in_thread' };
+  }
+  return { action: 'refuse', threadTs: event.ts };
 }

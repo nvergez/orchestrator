@@ -31,12 +31,25 @@ describe('classifyEvent', () => {
     });
   });
 
-  it('refuses an app_mention from any other user', () => {
+  it('refuses a root app_mention from any other user', () => {
     const thirdParty = { ...mention, user: 'U0THIRDPARTY' };
 
     expect(classifyEvent(thirdParty, guard)).toEqual({
       action: 'refuse',
       threadTs: '1751970000.000100',
+    });
+  });
+
+  it('stays silent on a third-party mention inside an existing thread (spec §7: never injected, never answered)', () => {
+    const thirdPartyInThread = {
+      ...mention,
+      user: 'U0THIRDPARTY',
+      thread_ts: '1751960000.000001',
+    };
+
+    expect(classifyEvent(thirdPartyInThread, guard)).toEqual({
+      action: 'ignore',
+      reason: 'third_party_in_thread',
     });
   });
 

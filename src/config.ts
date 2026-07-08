@@ -12,32 +12,37 @@ export interface Config {
 
 export class ConfigError extends Error {}
 
-const REQUIRED_KEYS: ReadonlyArray<readonly [key: string, prefix: string]> = [
-  ['SLACK_BOT_TOKEN', 'xoxb-'],
-  ['SLACK_APP_TOKEN', 'xapp-'],
-  ['SLACK_CHANNEL_ID', 'C'],
-  ['SLACK_ALLOWED_USER_ID', 'U'],
-];
+const PINO_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'];
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const problems: string[] = [];
-  for (const [key, prefix] of REQUIRED_KEYS) {
+
+  const required = (key: string, prefix: string): string => {
     const value = env[key];
     if (!value) {
       problems.push(`${key} is missing`);
-    } else if (!value.startsWith(prefix)) {
-      problems.push(`${key} must start with "${prefix}"`);
+      return '';
     }
+    if (!value.startsWith(prefix)) {
+      problems.push(`${key} must start with "${prefix}"`);
+      return '';
+    }
+    return value;
+  };
+
+  const config: Config = {
+    slackBotToken: required('SLACK_BOT_TOKEN', 'xoxb-'),
+    slackAppToken: required('SLACK_APP_TOKEN', 'xapp-'),
+    slackChannelId: required('SLACK_CHANNEL_ID', 'C'),
+    slackAllowedUserId: required('SLACK_ALLOWED_USER_ID', 'U'),
+    logLevel: env.LOG_LEVEL ?? 'info',
+  };
+  if (!PINO_LEVELS.includes(config.logLevel)) {
+    problems.push(`LOG_LEVEL must be one of ${PINO_LEVELS.join(', ')}`);
   }
+
   if (problems.length > 0) {
     throw new ConfigError(`invalid configuration: ${problems.join('; ')}`);
   }
-
-  return {
-    slackBotToken: env.SLACK_BOT_TOKEN as string,
-    slackAppToken: env.SLACK_APP_TOKEN as string,
-    slackChannelId: env.SLACK_CHANNEL_ID as string,
-    slackAllowedUserId: env.SLACK_ALLOWED_USER_ID as string,
-    logLevel: env.LOG_LEVEL ?? 'info',
-  };
+  return config;
 }

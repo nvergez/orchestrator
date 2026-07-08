@@ -32,10 +32,13 @@ try {
   // auth.test both verifies the bot token before we connect (fail fast on an
   // invalid key) and tells us our own user id for the filter's self-check.
   const auth = await app.client.auth.test();
+  if (!auth.user_id) {
+    throw new Error('auth.test returned no user_id — cannot build the event filter');
+  }
   const guard = {
     channelId: config.slackChannelId,
     allowedUserId: config.slackAllowedUserId,
-    botUserId: auth.user_id as string,
+    botUserId: auth.user_id,
   };
 
   registerHandlers(app, guard, logger);
