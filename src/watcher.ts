@@ -1,7 +1,7 @@
 import {
   completedCard,
-  crudeWorkerEventLine,
   extractPullRequestLinks,
+  gateRelayMessage,
   workerDoneFallbackLine,
 } from './messages.ts';
 import {
@@ -28,10 +28,17 @@ import type { Logger } from './logger.ts';
  * final ✅/❌ state (the durable home for links), swaps the root reaction,
  * and wakes the session through the SAME input pipe as a human message —
  * the session's voice writes the short summary; the daemon only posts one
- * itself when no session can take the wake. A `decision_gate`/`escalation`
- * arriving before the relay slice (#21) is surfaced crudely but verbatim —
- * never lost — and the wake gives the session the context to relay the
- * human's answer back down.
+ * itself when no session can take the wake.
+ *
+ * A `decision_gate`/`escalation` is relayed up in full (issue #21): the
+ * daemon itself posts the fixed-contract gate message — the worker's
+ * question VERBATIM, numbered options, the reply instruction — registers it
+ * in the `pending_gates` table and sets the ❓/🚨 root reaction. Posting it
+ * daemon-side is what makes the contract a guarantee: no paraphrase can
+ * drift in, the registry captures the relay ts (spec §9), and a gate landing
+ * on a closed or dead session is still never lost. No session turn runs at
+ * relay time — the mock shows none — the session thinks at ANSWER time,
+ * anchored on the registry through its turn context (relay.ts).
  *
  * At boot `rearmFromStore` re-arms a watcher for every thread the ledger
  * still shows in flight — which is also what makes a daemon crash safe: the
@@ -40,20 +47,23 @@ import type { Logger } from './logger.ts';
  * unread when the re-armed check asks for it.
  */
 
-/** The coordinator's Slack surface plus removal — how a stale root
- * reaction comes off when the state swaps (spec §8). */
-export interface WatcherSurface extends DelegationSurface {
+/** The reaction half of the Slack surface — add one, take a stale one off. */
+export interface ReactionSurface {
+  /** reactions.add on a message (the root: ts === threadTs). */
+  react(ts: string, name: string): Promise<void>;
   /** reactions.remove on a message (the root: ts === threadTs). */
   unreact(ts: string, name: string): Promise<void>;
 }
+
+/** The coordinator's Slack surface plus removal — how a stale root
+ * reaction comes off when the state swaps (spec §8). */
+export interface WatcherSurface extends DelegationSurface, ReactionSurface {}
 
 export type WakeResult = 'turn' | 'skipped';
 
 export interface GateWatcherOptions {
   store: DelegationStore;
   surface: WatcherSurface;
-  /** The single pinned channel — where wakes land when a row carries none. */
-  channelId: string;
   /** Wakes the thread's session through the human-message pipe (spec §6). */
   wake: (threadTs: string, channelId: string, text: string) => WakeResult;
   /** A delegation left the in-flight set — frees a worker-cap slot (#19). */
@@ -82,20 +92,49 @@ const WATCHED_TYPES = 'worker_done,escalation,decision_gate';
 /** The root reactions the daemon manages (spec §8) — one on, the rest off. */
 const ROOT_REACTIONS = ['eyes', 'white_check_mark', 'x', 'question', 'rotating_light'] as const;
 
-type RootReaction = (typeof ROOT_REACTIONS)[number];
+export type RootReaction = (typeof ROOT_REACTIONS)[number];
+
+/**
+ * Adds the new root reaction, then clears the other managed ones — the
+ * shared move behind every coarse-state swap (here and in the gate relay's
+ * answer path). Both halves are best-effort: reactions are ambient state,
+ * never worth failing an event over.
+ */
+export async function applyRootReaction(
+  surface: ReactionSurface,
+  logger: Logger,
+  threadTs: string,
+  name: RootReaction,
+): Promise<void> {
+  try {
+    await surface.react(threadTs, name);
+  } catch (error) {
+    logger.debug({ err: error, threadTs, name }, 'root reaction add failed');
+  }
+  for (const stale of ROOT_REACTIONS) {
+    if (stale === name) continue;
+    try {
+      await surface.unreact(threadTs, stale);
+    } catch (error) {
+      // Usually Slack's no_reaction — the stale one simply wasn't set.
+      logger.debug({ err: error, threadTs, stale }, 'stale reaction removal skipped');
+    }
+  }
+}
 
 interface OrchestrationMessage {
   id: string;
   type: string;
   subject: string;
   body: string;
-  payload: { taskId?: string; dispatchId?: string };
+  /** The sending terminal — the asking worker, for a gate's route-back. */
+  fromHandle?: string;
+  payload: { taskId?: string; dispatchId?: string; question?: string; options?: string[] };
 }
 
 export class GateWatcher {
   private readonly store: DelegationStore;
   private readonly surface: WatcherSurface;
-  private readonly channelId: string;
   private readonly wake: GateWatcherOptions['wake'];
   private readonly onDelegationClosed: () => void;
   private readonly logger: Logger;
@@ -111,7 +150,6 @@ export class GateWatcher {
   constructor(options: GateWatcherOptions) {
     this.store = options.store;
     this.surface = options.surface;
-    this.channelId = options.channelId;
     this.wake = options.wake;
     this.onDelegationClosed = options.onDelegationClosed;
     this.logger = options.logger;
@@ -293,45 +331,79 @@ export class GateWatcher {
   }
 
   /**
-   * `decision_gate`/`escalation` before the relay slice (#21): the daemon's
-   * own verbatim post is the never-lost guarantee; the wake is best-effort
-   * context so the session can relay the human's answer back down.
+   * `decision_gate`/`escalation` — the relay up (issue #21): the fixed
+   * gate message posted as a NEW message, the `pending_gates` row written
+   * at relay time, the ❓/🚨 root reaction set. The registry row is the
+   * never-lost guarantee — recorded even when the Slack post fails, so the
+   * question stays routable and recoverable.
    */
   private async handleGateOrEscalation(
     threadTs: string,
     kind: 'decision_gate' | 'escalation',
     message: OrchestrationMessage,
   ): Promise<void> {
+    if (this.store.getGate(message.id) !== undefined) {
+      this.logger.info(
+        { threadTs, msgId: message.id, kind },
+        'gate already in the registry — replayed event ignored',
+      );
+      return;
+    }
     const row = this.findRow(threadTs, message);
-    const posted = await this.postSafe(
-      threadTs,
-      crudeWorkerEventLine({
-        kind,
-        worktreeName: row?.worktreeName ?? null,
-        repo: row?.repo ?? null,
-        issueNumber: row?.issueNumber ?? null,
-        subject: message.subject,
-        body: message.body,
-        msgId: message.id,
-      }),
-    );
-    await this.setRootReaction(threadTs, kind === 'escalation' ? 'rotating_light' : 'question');
-    const woken = this.wake(threadTs, row?.channelId ?? this.channelId, gateWakeText(kind, row, message));
-    if (!posted && woken === 'skipped') {
-      // The check already consumed the bus message: with Slack down and no
-      // session either, this error line is the payload's last home.
+    // The row's thread owns the delegation — the human answers there.
+    const gateThread = row?.threadTs ?? threadTs;
+    // The payload's question is canonical for an `ask`; body/subject cover
+    // escalations and any bus producer that skipped the payload.
+    const question = firstNonEmpty(message.payload.question, message.body, message.subject);
+    const options = message.payload.options ?? [];
+
+    let relayTs: string | null = null;
+    try {
+      relayTs = await this.surface.post(
+        gateThread,
+        gateRelayMessage({
+          kind,
+          worktreeName: row?.worktreeName ?? null,
+          repo: row?.repo ?? null,
+          issueNumber: row?.issueNumber ?? null,
+          issueUrl: row === undefined ? undefined : await this.issueUrl(row),
+          question,
+          options,
+        }),
+      );
+    } catch (error) {
       this.logger.error(
-        { threadTs, msgId: message.id, kind, subject: message.subject, body: message.body },
-        'gate reached neither the thread nor a session — recover it from this log',
+        { err: error, threadTs: gateThread, msgId: message.id, kind, question },
+        'gate relay post failed — the registry row below still holds the question',
       );
     }
+    this.store.recordGate({
+      msgId: message.id,
+      threadTs: gateThread,
+      taskId: message.payload.taskId ?? row?.taskId ?? null,
+      workerHandle: message.fromHandle ?? row?.workerHandle ?? null,
+      worktreeName: row?.worktreeName ?? null,
+      kind,
+      question,
+      options,
+      relayTs,
+    });
+    // A pending escalation outranks a plain question on the root (spec §8):
+    // a ❓ arriving while a 🚨 waits must not soften the coarse state.
+    const escalated =
+      kind === 'escalation' ||
+      this.store.listPendingGates(gateThread).some((gate) => gate.kind === 'escalation');
+    await this.setRootReaction(gateThread, escalated ? 'rotating_light' : 'question');
   }
 
   /**
    * The ledger row behind an event: the payload's dispatch id (authoritative
-   * — the preamble makes workers echo it) with the task id as fallback,
-   * scoped to the thread. A row living in another thread is trusted over the
-   * arrival mailbox — the card to edit lives where the row says.
+   * — the preamble makes workers echo it on worker_done) with the task id as
+   * a fallback, then the sending terminal — a worker's `ask` carries neither
+   * id, so the asking handle is a decision_gate's usual identity (issue
+   * #21). Fallbacks are scoped to the thread. A row living in another thread
+   * is trusted over the arrival mailbox — the card to edit lives where the
+   * row says.
    */
   private findRow(threadTs: string, message: OrchestrationMessage): DelegationRow | undefined {
     const byDispatch =
@@ -347,8 +419,16 @@ export class GateWatcher {
       }
       return byDispatch;
     }
-    if (message.payload.taskId === undefined) return undefined;
-    return this.store.inFlightByTaskId(threadTs, message.payload.taskId);
+    if (message.payload.taskId !== undefined) {
+      return this.store.inFlightByTaskId(threadTs, message.payload.taskId);
+    }
+    // The handle fallback only covers id-LESS payloads (an `ask`): a message
+    // that names ids pointing nowhere is a stale straggler — matching it by
+    // handle would let a failed retry's worker_done close the live dispatch.
+    if (message.payload.dispatchId !== undefined || message.fromHandle === undefined) {
+      return undefined;
+    }
+    return this.store.inFlightByWorkerHandle(threadTs, message.fromHandle);
   }
 
   // ── the ✅/❌ card ──────────────────────────────────────────────────────────
@@ -418,22 +498,8 @@ export class GateWatcher {
     await this.setRootReaction(threadTs, failed ? 'x' : 'white_check_mark');
   }
 
-  /** Adds the new root reaction, then clears the other managed ones. */
   private async setRootReaction(threadTs: string, name: RootReaction): Promise<void> {
-    try {
-      await this.surface.react(threadTs, name);
-    } catch (error) {
-      this.logger.debug({ err: error, threadTs, name }, 'root reaction add failed');
-    }
-    for (const stale of ROOT_REACTIONS) {
-      if (stale === name) continue;
-      try {
-        await this.surface.unreact(threadTs, stale);
-      } catch (error) {
-        // Usually Slack's no_reaction — the stale one simply wasn't set.
-        this.logger.debug({ err: error, threadTs, stale }, 'stale reaction removal skipped');
-      }
-    }
+    await applyRootReaction(this.surface, this.logger, threadTs, name);
   }
 
   private async postSafe(threadTs: string, text: string): Promise<boolean> {
@@ -482,30 +548,6 @@ export function workerDoneWakeText(
   ].join('\n');
 }
 
-/**
- * The gate/escalation wake (crude slice): the daemon posted the question
- * verbatim already — the session acknowledges and, when the human answers,
- * relays it back down with `orchestration reply`.
- */
-export function gateWakeText(
-  kind: 'decision_gate' | 'escalation',
-  row: DelegationRow | undefined,
-  message: { id: string; subject: string; body: string },
-): string {
-  const from = row === undefined ? 'a worker' : `the delegation ${delegationRef(row)}`;
-  return [
-    `[orchestration event — not a human message] A ${kind} arrived from ${from}.`,
-    `Subject: ${message.subject}`,
-    `Body:\n${message.body}`,
-    '',
-    'The daemon already posted the worker’s message verbatim in the thread and set the root ' +
-      'reaction — do NOT repeat the question. Reply with ONE short line telling the user you ' +
-      'will relay their answer. When their answer arrives as the next thread message, relay it ' +
-      `verbatim (an option number becomes that option’s full text) with:\n` +
-      `orca orchestration reply --id ${message.id} --body "<their answer>"`,
-  ].join('\n');
-}
-
 // ── message reading ──────────────────────────────────────────────────────────
 
 /** One raw bus message → the watcher's shape; unreadable entries drop, logged upstream. */
@@ -515,6 +557,7 @@ function readMessage(raw: unknown): OrchestrationMessage[] {
     type?: unknown;
     subject?: unknown;
     body?: unknown;
+    from_handle?: unknown;
     payload?: unknown;
   };
   if (typeof record.id !== 'string' || typeof record.type !== 'string') return [];
@@ -524,23 +567,42 @@ function readMessage(raw: unknown): OrchestrationMessage[] {
       type: record.type,
       subject: typeof record.subject === 'string' ? record.subject : '',
       body: typeof record.body === 'string' ? record.body : '',
+      ...(typeof record.from_handle === 'string' && { fromHandle: record.from_handle }),
       payload: readPayload(record.payload),
     },
   ];
 }
 
-/** The bus serializes `payload` as a JSON string — `{taskId, dispatchId}`. */
-function readPayload(raw: unknown): { taskId?: string; dispatchId?: string } {
+/**
+ * The bus serializes `payload` as a JSON string — `{taskId, dispatchId}` on
+ * worker events, plus `{question, options}` on an `ask` (issue #21).
+ */
+function readPayload(raw: unknown): OrchestrationMessage['payload'] {
   if (typeof raw !== 'string') return {};
   try {
-    const parsed = JSON.parse(raw) as { taskId?: unknown; dispatchId?: unknown };
+    const parsed = JSON.parse(raw) as {
+      taskId?: unknown;
+      dispatchId?: unknown;
+      question?: unknown;
+      options?: unknown;
+    };
+    const options = Array.isArray(parsed.options)
+      ? parsed.options.filter((option): option is string => typeof option === 'string')
+      : undefined;
     return {
       ...(typeof parsed.taskId === 'string' && { taskId: parsed.taskId }),
       ...(typeof parsed.dispatchId === 'string' && { dispatchId: parsed.dispatchId }),
+      ...(typeof parsed.question === 'string' && { question: parsed.question }),
+      ...(options !== undefined && options.length > 0 && { options }),
     };
   } catch {
     return {};
   }
+}
+
+/** The first candidate with content — how the relay picks the question text. */
+function firstNonEmpty(...candidates: Array<string | undefined>): string {
+  return candidates.find((text) => text !== undefined && text.trim() !== '') ?? '';
 }
 
 function sleep(ms: number): Promise<void> {

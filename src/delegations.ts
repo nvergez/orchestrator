@@ -26,14 +26,37 @@ export interface DelegationRow {
   closedAt: string | null;
 }
 
+/** One row of the `pending_gates` registry (spec §9) — written at relay time. */
+export interface PendingGateRow {
+  /** The bus message id (`msg_…`) — what `orchestration reply --id` targets. */
+  msgId: string;
+  threadTs: string;
+  taskId: string | null;
+  /** The asking terminal — where a `terminal send` fallback/correction lands. */
+  workerHandle: string | null;
+  worktreeName: string | null;
+  kind: 'decision_gate' | 'escalation';
+  /** The worker's question, verbatim — the relay never paraphrases it. */
+  question: string;
+  /** The `ask --options` list, in order; empty when the ask was free-form. */
+  options: string[];
+  /** Slack ts of the relayed gate message; null when the post failed. */
+  relayTs: string | null;
+  status: 'pending' | 'answered';
+  relayedAt: string;
+  answeredAt: string | null;
+}
+
 /**
- * The `delegations` + `mailboxes` half of the orchestrator state database
- * (spec §9), sharing the SQLite file with SessionStore — same synchronous
- * single-writer design. The delegations ledger is written at dispatch and
- * closed on `worker_done` (slice #20); it is what boot reconciliation and
- * the worker-cap count survive restarts on. The mailboxes table remembers
- * each thread's coordinator terminal (`slack-<thread_ts>`, issue #9) so a
- * thread's dispatches all share one origin handle across daemon restarts.
+ * The `delegations` + `mailboxes` + `pending_gates` share of the orchestrator
+ * state database (spec §9), sharing the SQLite file with SessionStore — same
+ * synchronous single-writer design. The delegations ledger is written at
+ * dispatch and closed on `worker_done` (slice #20); it is what boot
+ * reconciliation and the worker-cap count survive restarts on. The mailboxes
+ * table remembers each thread's coordinator terminal (`slack-<thread_ts>`,
+ * issue #9) so a thread's dispatches all share one origin handle across
+ * daemon restarts. The pending_gates registry is written by the daemon at
+ * relay time (issue #21) and anchors the routing of human answers back down.
  *
  * Unlike `sessions`, both tables key on `thread_ts` alone — deliberate: the
  * daemon serves the single pinned channel (spec §2), and the coordinator
@@ -75,6 +98,22 @@ export class DelegationStore {
         channel_id TEXT NOT NULL,
         handle     TEXT NOT NULL,
         created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS pending_gates (
+        msg_id        TEXT PRIMARY KEY,
+        thread_ts     TEXT NOT NULL,
+        task_id       TEXT,
+        worker_handle TEXT,
+        worktree_name TEXT,
+        kind          TEXT NOT NULL
+                      CHECK (kind IN ('decision_gate', 'escalation')),
+        question      TEXT NOT NULL,
+        options       TEXT NOT NULL,
+        relay_ts      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'answered')),
+        relayed_at    TEXT NOT NULL,
+        answered_at   TEXT
       ) STRICT;
     `);
   }
@@ -153,6 +192,23 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
+  /**
+   * Fallback association for a `decision_gate` (issue #21): a worker's `ask`
+   * carries no task or dispatch id in its payload — the asking terminal
+   * (`from_handle`) is the only identity it has. Same thread scoping as the
+   * task-id fallback, newest first.
+   */
+  inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched'
+         ORDER BY dispatched_at DESC LIMIT 1`,
+      )
+      .get(threadTs, workerHandle) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
   listInFlightForThread(threadTs: string): DelegationRow[] {
     const rows = this.db
@@ -216,8 +272,102 @@ export class DelegationStore {
       .run(threadTs, channelId, handle, this.now());
   }
 
+  /**
+   * Registers a relayed gate (issue #21). First relay wins — the bus id is
+   * runtime-unique, so a replayed event must neither re-post nor flip an
+   * already-answered gate back to pending; the boolean says whether this
+   * call inserted the row.
+   */
+  recordGate(
+    row: Omit<PendingGateRow, 'status' | 'relayedAt' | 'answeredAt'>,
+  ): boolean {
+    const { changes } = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO pending_gates
+           (msg_id, thread_ts, task_id, worker_handle, worktree_name,
+            kind, question, options, relay_ts, status, relayed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(
+        row.msgId,
+        row.threadTs,
+        row.taskId,
+        row.workerHandle,
+        row.worktreeName,
+        row.kind,
+        row.question,
+        JSON.stringify(row.options),
+        row.relayTs,
+        this.now(),
+      );
+    return Number(changes) > 0;
+  }
+
+  getGate(msgId: string): PendingGateRow | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM pending_gates WHERE msg_id = ?')
+      .get(msgId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toPendingGateRow(row);
+  }
+
+  /** All of a thread's relayed gates, oldest first — the turn-context list. */
+  listGatesForThread(threadTs: string): PendingGateRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id')
+      .all(threadTs) as Array<Record<string, unknown>>;
+    return rows.map(toPendingGateRow);
+  }
+
+  /** The thread's unanswered gates — what the root reaction and routing read. */
+  listPendingGates(threadTs: string): PendingGateRow[] {
+    return this.listGatesForThread(threadTs).filter((gate) => gate.status === 'pending');
+  }
+
+  /**
+   * Flips a gate to answered when its reply went down (issue #21). Only a
+   * pending gate flips — the boolean says whether this call won, which is
+   * what "an answered gate never re-routes" rests on.
+   */
+  answerGate(msgId: string): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE pending_gates SET status = 'answered', answered_at = ?
+         WHERE msg_id = ? AND status = 'pending'`,
+      )
+      .run(this.now(), msgId);
+    return Number(changes) > 0;
+  }
+
   close(): void {
     this.db.close();
+  }
+}
+
+function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {
+  return {
+    msgId: row.msg_id as string,
+    threadTs: row.thread_ts as string,
+    taskId: row.task_id as string | null,
+    workerHandle: row.worker_handle as string | null,
+    worktreeName: row.worktree_name as string | null,
+    kind: row.kind as PendingGateRow['kind'],
+    question: row.question as string,
+    options: readOptions(row.options),
+    relayTs: row.relay_ts as string | null,
+    status: row.status as PendingGateRow['status'],
+    relayedAt: row.relayed_at as string,
+    answeredAt: row.answered_at as string | null,
+  };
+}
+
+/** The options column is JSON we wrote ourselves; anything else reads empty. */
+function readOptions(raw: unknown): string[] {
+  if (typeof raw !== 'string') return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+  } catch {
+    return [];
   }
 }
 

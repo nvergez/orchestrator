@@ -120,36 +120,53 @@ export function workerDoneFallbackLine(subject: string, failed: boolean): string
 }
 
 /**
- * Issue #20 — a `decision_gate`/`escalation` arriving before the relay slice
- * (#21): surfaced crudely but verbatim, with the raw message id and the
- * exact command that answers it, so nothing is lost even without the
- * registry-backed routing.
+ * Scenario C / "Worker escalation" — the relayed gate message (issue #21,
+ * content contract fixed by issue #9): who is asking (worktree + issue
+ * link), the question VERBATIM in a blockquote — never paraphrased — the
+ * numbered options inside the same quote, and the fixed reply instruction.
+ * An escalation is the same mold marked 🚨; the "a number or free text"
+ * tail appears only when there are options to number.
  */
-export function crudeWorkerEventLine(opts: {
+export function gateRelayMessage(opts: {
   kind: 'decision_gate' | 'escalation';
   worktreeName: string | null;
   repo: string | null;
   issueNumber: number | null;
-  subject: string;
-  body: string;
-  msgId: string;
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+  question: string;
+  options: string[];
 }): string {
-  const emoji = opts.kind === 'escalation' ? '🚨' : '❓';
-  const verb = opts.kind === 'escalation' ? 'escalates' : 'asks';
-  const name = opts.worktreeName === null ? 'a worker' : `\`${opts.worktreeName}\``;
+  const escalation = opts.kind === 'escalation';
+  const who = opts.worktreeName === null ? '*A worker*' : `*\`${opts.worktreeName}\`*`;
+  const plainRef =
+    opts.repo !== null && opts.issueNumber !== null ? `${opts.repo}#${opts.issueNumber}` : null;
   const ref =
-    opts.repo !== null && opts.issueNumber !== null ? ` (${opts.repo}#${opts.issueNumber})` : '';
-  const quoted = [opts.subject, opts.body]
-    .filter((part) => part.trim() !== '')
-    .join('\n')
-    .split('\n')
-    .map((line) => `> ${line}`)
-    .join('\n');
+    plainRef === null
+      ? ''
+      : ` (${opts.issueUrl === undefined ? plainRef : `<${opts.issueUrl}|${plainRef}>`})`;
+  const quoted = [
+    ...opts.question.split('\n'),
+    ...opts.options.map((option, index) => `*${index + 1}.* ${option}`),
+  ].map((line) => `> ${line}`);
   return [
-    `${emoji} *${name}*${ref} ${verb} (raw relay — the full gate flow lands in a later slice):`,
-    quoted,
-    `Answer with: \`orca orchestration reply --id ${opts.msgId} --body "<answer>"\``,
+    `${escalation ? '🚨' : '❓'} ${who}${ref} ${escalation ? 'escalates' : 'asks'}:`,
+    '',
+    ...quoted,
+    '',
+    opts.options.length > 0
+      ? 'Reply in this thread — a number or free text.'
+      : 'Reply in this thread.',
   ].join('\n');
+}
+
+/**
+ * Scenario C end — the fixed acknowledgment after an answer went back down.
+ * Rendered by the session's voice (the routing turn's one visible line); the
+ * template lives here so the system prompt and the tests share one source.
+ */
+export function gateAnswerAck(ref: string, forwardedText: string): string {
+  return `✅ Relayed to \`${ref}\` — "${forwardedText}"`;
 }
 
 /** `27 min`, `1 h 05 min`, `under a minute` — the card's duration wording. */

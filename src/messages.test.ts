@@ -4,12 +4,13 @@ import {
   closingSummary,
   completedCard,
   costWarningLine,
-  crudeWorkerEventLine,
   delegationCard,
   delegationGateLine,
   extractPullRequestLinks,
   formatDuration,
+  gateAnswerAck,
   gateLine,
+  gateRelayMessage,
   milestoneLine,
   orcaUnavailableLine,
   queuedLine,
@@ -250,36 +251,85 @@ describe('workerDoneFallbackLine', () => {
   });
 });
 
-describe('crudeWorkerEventLine — pre-#21 gate surfacing', () => {
-  it('quotes the payload verbatim and names the reply command', () => {
-    const line = crudeWorkerEventLine({
+describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
+  it('renders the mock exactly: who asks, verbatim blockquote, numbered options, tail', () => {
+    const message = gateRelayMessage({
       kind: 'decision_gate',
       worktreeName: 'orca-53-lint-ci',
       repo: 'orca',
       issueNumber: 53,
-      subject: 'Which lint config?',
-      body: 'Two configs coexist.\n1. root\n2. app/',
-      msgId: 'msg_1',
+      issueUrl: 'https://github.com/nvergez/orca/issues/53',
+      question:
+        'Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in\n' +
+        '`app/`). Which one is authoritative for CI?',
+      options: ['`.eslintrc.cjs` (root)', '`eslint.config.mjs` (app/)', 'Merge both into flat config'],
     });
-    expect(line).toContain('❓ *`orca-53-lint-ci`* (orca#53) asks');
-    expect(line).toContain('> Which lint config?');
-    expect(line).toContain('> Two configs coexist.');
-    expect(line).toContain('> 2. app/');
-    expect(line).toContain('`orca orchestration reply --id msg_1 --body "<answer>"`');
+    expect(message).toBe(
+      [
+        '❓ *`orca-53-lint-ci`* (<https://github.com/nvergez/orca/issues/53|orca#53>) asks:',
+        '',
+        '> Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in',
+        '> `app/`). Which one is authoritative for CI?',
+        '> *1.* `.eslintrc.cjs` (root)',
+        '> *2.* `eslint.config.mjs` (app/)',
+        '> *3.* Merge both into flat config',
+        '',
+        'Reply in this thread — a number or free text.',
+      ].join('\n'),
+    );
   });
 
-  it('marks an escalation 🚨 and survives a row the ledger never matched', () => {
-    const line = crudeWorkerEventLine({
+  it('marks an escalation 🚨, drops the number tail without options', () => {
+    const message = gateRelayMessage({
       kind: 'escalation',
+      worktreeName: 'forwardly-84-csv-export',
+      repo: 'forwardly',
+      issueNumber: 84,
+      issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+      question:
+        'The e2e tests break on `main` even without my changes — I’m pausing until further notice.',
+      options: [],
+    });
+    expect(message).toBe(
+      [
+        '🚨 *`forwardly-84-csv-export`* (<https://github.com/lemlist/forwardly/issues/84|forwardly#84>) escalates:',
+        '',
+        '> The e2e tests break on `main` even without my changes — I’m pausing until further notice.',
+        '',
+        'Reply in this thread.',
+      ].join('\n'),
+    );
+  });
+
+  it('degrades to a plain ref without a GitHub remote, to "A worker" without a row', () => {
+    const linked = gateRelayMessage({
+      kind: 'decision_gate',
+      worktreeName: 'scratch-21-bench',
+      repo: 'scratch',
+      issueNumber: 21,
+      question: 'Overwrite bench.json?',
+      options: [],
+    });
+    expect(linked).toContain('❓ *`scratch-21-bench`* (scratch#21) asks:');
+
+    const unmatched = gateRelayMessage({
+      kind: 'decision_gate',
       worktreeName: null,
       repo: null,
       issueNumber: null,
-      subject: 'Blocked: main is broken',
-      body: '',
-      msgId: 'msg_2',
+      question: 'Anyone there?',
+      options: [],
     });
-    expect(line).toContain('🚨 *a worker* escalates');
-    expect(line).toContain('> Blocked: main is broken');
+    expect(unmatched).toContain('❓ *A worker* asks:');
+    expect(unmatched).toContain('> Anyone there?');
+  });
+});
+
+describe('gateAnswerAck — scenario C, the relayed-answer acknowledgment', () => {
+  it('renders the mock verbatim', () => {
+    expect(gateAnswerAck('orca#53', 'Merge both into flat config')).toBe(
+      '✅ Relayed to `orca#53` — "Merge both into flat config"',
+    );
   });
 });
 

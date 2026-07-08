@@ -10,6 +10,7 @@ import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
 import { GateWatcher } from './watcher.ts';
+import { GateRelay } from './relay.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
@@ -127,6 +128,11 @@ try {
     logger,
   });
 
+  // The gate relay (issue #21): route-back enforcement anchored on the
+  // pending_gates registry — reply provenance, answer fidelity, the
+  // sanctioned terminal-send fallback, and the turn-context decoration.
+  const relay = new GateRelay({ store: delegationStore, surface, logger });
+
   const sessions = new SessionManager({
     store,
     spawn: createProcessFactory({
@@ -134,6 +140,7 @@ try {
       gates,
       allowList,
       delegations,
+      relay,
       systemPromptAppend: routingInstructions(hints),
       logger,
     }),
@@ -165,7 +172,6 @@ try {
   const watcher = new GateWatcher({
     store: delegationStore,
     surface,
-    channelId: config.slackChannelId,
     wake: (threadTs, channelId, text) => sessions.wake(threadTs, channelId, text),
     onDelegationClosed: () => {
       delegations.onDelegationClosed();
@@ -181,7 +187,7 @@ try {
     logger.info({ threads: rearmed }, 'gate watchers re-armed from the delegations ledger');
   }
 
-  registerHandlers(app, guard, sessions, gates, logger);
+  registerHandlers(app, guard, sessions, gates, relay, logger);
   await app.start();
   logger.info(
     { botUserId: guard.botUserId, channelId: guard.channelId },

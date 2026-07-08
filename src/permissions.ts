@@ -10,6 +10,7 @@ import { gateLine } from './messages.ts';
 import type { GateRequester } from './gate.ts';
 import type { DelegationVerdict } from './routing.ts';
 import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
+import type { RelayObserver, RelayPolicy } from './relay.ts';
 import type { Logger } from './logger.ts';
 
 /** The slice of RepoAllowList this hook consults for every delegation. */
@@ -22,18 +23,22 @@ export interface DelegationPolicy {
  * The `canUseTool` enforcement hook (spec §7): the bridge between the pure
  * tier classifier and the SDK's permission protocol. One instance per
  * session, bound to its Slack thread so CONFIRM gates land in the right
- * place. The delegation coordinator (issue #19) gets the last word on an
- * approved command: it holds the worker cap on `worktree create` and
- * rewrites `orchestration dispatch` to origin from the thread mailbox.
+ * place. Two coordinators get a word on an approved command: the gate relay
+ * (issue #21) lifts a registry-anchored `terminal send` past the 🚦, checks
+ * every `orchestration reply` against the pending-gates registry and pins
+ * answer fidelity; the delegation coordinator (issue #19) holds the worker
+ * cap on `worktree create` and rewrites `orchestration dispatch` to origin
+ * from the thread mailbox.
  */
 export function buildCanUseTool(opts: {
   threadTs: string;
   gates: GateRequester;
   allowList: DelegationPolicy;
   delegations: DispatchPreparer;
+  relay: RelayPolicy;
   logger: Logger;
 }): CanUseTool {
-  const { threadTs, gates, allowList, delegations, logger } = opts;
+  const { threadTs, gates, allowList, delegations, relay, logger } = opts;
   return async (toolName, input, { signal }) => {
     // The session's base tool set is Bash-only, but fail closed anyway: the
     // orchestrator routes/delegates/supervises, it never codes (spec §7).
@@ -89,6 +94,16 @@ export function buildCanUseTool(opts: {
             'and do not ask the user to approve it.',
         };
       case 'confirm': {
+        // A `terminal send` carrying a human answer down to a worker this
+        // thread relayed a gate for is AUTO (spec §7) — the pending-gates
+        // registry is the provenance the tier classifier cannot see.
+        if (relay.sanctionsSend(threadTs, command)) {
+          logger.info(
+            { threadTs, command },
+            'terminal send sanctioned by the pending-gates registry — runs without a 🚦',
+          );
+          break;
+        }
         const gate = describeGate(command);
         const answer = await gates.request(threadTs, gateLine(gate.command, gate.worktree), signal);
         if (!answer.approved) {
@@ -103,9 +118,18 @@ export function buildCanUseTool(opts: {
       }
     }
 
-    // The delegation seam runs last, on an already-classified-and-approved
+    // The coordinator seams run last, on an already-classified-and-approved
     // command: a wave wait must not start for a command a gate then refuses.
-    const prepared = await delegations.prepare(threadTs, command, signal);
+    // Relay first — a reply the registry refuses must never reach a worker.
+    const relayed = relay.prepare(threadTs, command);
+    if (relayed.action === 'deny') {
+      logger.warn(
+        { threadTs, command, reason: relayed.message },
+        'command denied by the gate relay',
+      );
+      return { behavior: 'deny', message: `Relay refused: ${relayed.message}.` };
+    }
+    const prepared = await delegations.prepare(threadTs, relayed.command, signal);
     if (prepared.action === 'deny') {
       logger.warn(
         { threadTs, command, reason: prepared.message },
@@ -135,24 +159,29 @@ const FORCE_ASK: HookJSONOutput = {
  * ~/.claude/settings.json on the VPS) can never route a command around the
  * classifier — `canUseTool` stays the single enforcement point. PostToolUse
  * (and its failure twin) feed every finished Bash command to the delegation
- * observer, which is how the card, the 👀 and the `delegations` row happen
- * without trusting the session to report its own outputs.
+ * and relay observers, which is how the card, the 👀, the `delegations` row
+ * and the pending→answered gate flip happen without trusting the session to
+ * report its own outputs.
  */
 export function guardrailHooks(opts: {
   threadTs: string;
   delegations: DispatchObserver;
+  relay: RelayObserver;
   logger: Logger;
 }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
-  const { threadTs, delegations, logger } = opts;
+  const { threadTs, delegations, relay, logger } = opts;
   const observe = async (input: HookInput): Promise<HookJSONOutput> => {
     if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
       const command = (input.tool_input as { command?: unknown } | null)?.command;
       if (typeof command === 'string') {
         const stdout =
           input.hook_event_name === 'PostToolUse' ? bashStdout(input.tool_response) : '';
-        // observe never throws; a hook rejection would fail the whole turn.
+        // observers never throw; a hook rejection would fail the whole turn.
         await delegations.observe(threadTs, command, stdout).catch((error: unknown) => {
           logger.warn({ err: error, threadTs }, 'delegation observer hook failed');
+        });
+        await relay.observe(threadTs, command, stdout).catch((error: unknown) => {
+          logger.warn({ err: error, threadTs }, 'relay observer hook failed');
         });
       }
     }

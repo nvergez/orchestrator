@@ -9,6 +9,7 @@ import { TurnCostMeter } from './cost.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
 import type { SessionGates } from './gate.ts';
+import type { SessionRelay } from './relay.ts';
 
 /** The coordinator slice a session process holds (issue #19). */
 export type SessionDelegations = DispatchPreparer & DispatchObserver;
@@ -71,6 +72,7 @@ class ClaudeProcess {
     gates: SessionGates;
     allowList: DelegationPolicy;
     delegations: SessionDelegations;
+    relay: SessionRelay;
     systemPromptAppend: string;
     logger: Logger;
   }) {
@@ -106,11 +108,13 @@ class ClaudeProcess {
           gates: opts.gates,
           allowList: opts.allowList,
           delegations: opts.delegations,
+          relay: opts.relay,
           logger: opts.logger,
         }),
         hooks: guardrailHooks({
           threadTs: opts.threadTs,
           delegations: opts.delegations,
+          relay: opts.relay,
           logger: opts.logger,
         }),
         // settingSources and env are deliberately NOT set: omitting them keeps
@@ -217,6 +221,7 @@ export function createProcessFactory(opts: {
   gates: SessionGates;
   allowList: DelegationPolicy;
   delegations: SessionDelegations;
+  relay: SessionRelay;
   systemPromptAppend: string;
   logger: Logger;
 }): ProcessFactory {
@@ -228,6 +233,7 @@ export function createProcessFactory(opts: {
       gates: opts.gates,
       allowList: opts.allowList,
       delegations: opts.delegations,
+      relay: opts.relay,
       systemPromptAppend: opts.systemPromptAppend,
       logger: opts.logger,
     });
