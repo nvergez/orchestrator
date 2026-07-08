@@ -83,8 +83,8 @@ describe('SessionStore', () => {
     const store = memoryStore(() => timestamps.shift() ?? '2026-07-08T23:59:59.000Z');
     store.register(THREAD, CHANNEL, USER);
 
-    store.recordTurn(THREAD, CHANNEL);
-    store.recordTurn(THREAD, CHANNEL);
+    store.recordTurn(THREAD, CHANNEL, 0);
+    store.recordTurn(THREAD, CHANNEL, 0);
 
     const row = store.get(THREAD, CHANNEL);
     expect(row?.turnCount).toBe(2);
@@ -92,12 +92,22 @@ describe('SessionStore', () => {
     expect(row?.createdAt).toBe('2026-07-08T10:00:00.000Z');
   });
 
+  it('recordTurn accumulates the per-turn cost into cost_usd_total (spec §7)', () => {
+    const store = memoryStore();
+    store.register(THREAD, CHANNEL, USER);
+
+    store.recordTurn(THREAD, CHANNEL, 0.42);
+    store.recordTurn(THREAD, CHANNEL, 1.08);
+
+    expect(store.get(THREAD, CHANNEL)?.costUsdTotal).toBeCloseTo(1.5);
+  });
+
   it('rows survive a close-and-reopen — the restart of the demo scenario', () => {
     const dbPath = tempDbPath('orchestrator.db');
     const first = new SessionStore(dbPath);
     first.register(THREAD, CHANNEL, USER);
     first.setSessionId(THREAD, CHANNEL, 'sess-persisted');
-    first.recordTurn(THREAD, CHANNEL);
+    first.recordTurn(THREAD, CHANNEL, 3.21);
     first.close();
 
     const reopened = new SessionStore(dbPath);
@@ -106,6 +116,7 @@ describe('SessionStore', () => {
     const row = reopened.get(THREAD, CHANNEL);
     expect(row?.sessionId).toBe('sess-persisted');
     expect(row?.turnCount).toBe(1);
+    expect(row?.costUsdTotal).toBeCloseTo(3.21);
   });
 
   it('creates missing parent directories for the database path (spec §9 home)', () => {

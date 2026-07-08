@@ -17,6 +17,8 @@ export interface Config {
   dbPath: string;
   /** How long a finished-turn session keeps its live process (spec §3). */
   warmTtlMs: number;
+  /** Per-session 💸 warning thresholds, ascending USD (spec §7: 5 then 10). */
+  costWarnThresholdsUsd: number[];
 }
 
 export class ConfigError extends Error {}
@@ -24,6 +26,8 @@ export class ConfigError extends Error {}
 const PINO_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'];
 
 const DEFAULT_WARM_TTL_MINUTES = 30;
+
+const DEFAULT_COST_WARN_THRESHOLDS_USD = [5, 10];
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const problems: string[] = [];
@@ -46,6 +50,19 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     problems.push('SESSION_WARM_TTL_MINUTES must be a positive number of minutes');
   }
 
+  let costWarnThresholdsUsd = [...DEFAULT_COST_WARN_THRESHOLDS_USD];
+  if (env.COST_WARN_THRESHOLDS_USD !== undefined) {
+    const parsed = env.COST_WARN_THRESHOLDS_USD.split(',').map((v) => Number(v.trim()));
+    const ascending = parsed.every((n, i) => i === 0 || n > (parsed[i - 1] ?? NaN));
+    if (parsed.some((n) => !Number.isFinite(n) || n <= 0) || !ascending) {
+      problems.push(
+        'COST_WARN_THRESHOLDS_USD must be ascending positive dollar amounts, e.g. "5,10"',
+      );
+    } else {
+      costWarnThresholdsUsd = parsed;
+    }
+  }
+
   const config: Config = {
     slackBotToken: required('SLACK_BOT_TOKEN', 'xoxb-'),
     slackAppToken: required('SLACK_APP_TOKEN', 'xapp-'),
@@ -57,6 +74,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       env.ORCHESTRATOR_DB_PATH ??
       join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
     warmTtlMs: warmTtlMinutes * 60_000,
+    costWarnThresholdsUsd,
   };
   if (!PINO_LEVELS.includes(config.logLevel)) {
     problems.push(`LOG_LEVEL must be one of ${PINO_LEVELS.join(', ')}`);

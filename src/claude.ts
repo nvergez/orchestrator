@@ -5,6 +5,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from './logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
+import { TurnCostMeter } from './cost.ts';
 
 /**
  * The Claude Agent SDK adapter behind `OrchestratorProcess` (spec §1/§3):
@@ -51,6 +52,8 @@ class ClaudeProcess {
   private readonly input = new Pushable<SDKUserMessage>();
   private readonly session: Query;
   private readonly logger: Logger;
+  // One meter per process — see TurnCostMeter for the cumulative semantics.
+  private readonly costMeter = new TurnCostMeter();
 
   constructor(opts: { resumeSessionId: string | null; cwd: string; logger: Logger }) {
     this.logger = opts.logger;
@@ -108,8 +111,14 @@ class ClaudeProcess {
         }
       } else if (message.type === 'result') {
         if (message.subtype === 'success') {
-          return { status: 'success', resultText: message.result };
+          return {
+            status: 'success',
+            resultText: message.result,
+            costUsd: this.costMeter.turnCost(message.total_cost_usd),
+          };
         }
+        // A failed turn's spend is not ledgered (spec §7 counts completed
+        // turns) and the meter dies with the dropped process — accepted loss.
         return {
           status: 'error',
           errors: message.errors.length > 0 ? message.errors : [message.subtype],

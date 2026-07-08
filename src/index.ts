@@ -58,29 +58,36 @@ try {
     botUserId: auth.user_id,
   };
 
+  const postToThread = async (threadTs: string, text: string): Promise<string> => {
+    const result = await app.client.chat.postMessage({
+      channel: config.slackChannelId,
+      thread_ts: threadTs,
+      text,
+    });
+    if (result.ts === undefined) {
+      throw new Error('chat.postMessage returned no ts');
+    }
+    return result.ts;
+  };
+
   const sessions = new SessionManager({
     store,
     spawn: createProcessFactory({ cwd: process.cwd(), logger }),
     voiceFor: (threadTs) =>
       new Voice(
         {
-          post: async (text) => {
-            const result = await app.client.chat.postMessage({
-              channel: config.slackChannelId,
-              thread_ts: threadTs,
-              text,
-            });
-            if (result.ts === undefined) {
-              throw new Error('chat.postMessage returned no ts');
-            }
-            return result.ts;
-          },
+          post: (text) => postToThread(threadTs, text),
           update: async (ts, text) => {
             await app.client.chat.update({ channel: config.slackChannelId, ts, text });
           },
         },
         { onError: (err) => logger.warn({ err, threadTs }, 'voice flush failed') },
       ),
+    // 💸 warnings are events, not status: always a fresh message (spec §8).
+    notify: async (threadTs, text) => {
+      await postToThread(threadTs, text);
+    },
+    costThresholdsUsd: config.costWarnThresholdsUsd,
     warmTtlMs: config.warmTtlMs,
     logger,
   });

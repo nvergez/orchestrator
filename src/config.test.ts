@@ -24,6 +24,7 @@ describe('loadConfig', () => {
       logLevel: 'info',
       dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
       warmTtlMs: 30 * 60_000,
+      costWarnThresholdsUsd: [5, 10],
     });
   });
 
@@ -82,6 +83,26 @@ describe('loadConfig', () => {
 
       expect(() => loadConfig(env)).toThrowError(ConfigError);
       expect(() => loadConfig(env)).toThrowError(/SESSION_WARM_TTL_MINUTES/);
+    },
+  );
+
+  it('defaults the cost warning thresholds to $5 then $10 (spec §7)', () => {
+    expect(loadConfig(validEnv).costWarnThresholdsUsd).toEqual([5, 10]);
+  });
+
+  it('honors COST_WARN_THRESHOLDS_USD when provided', () => {
+    const config = loadConfig({ ...validEnv, COST_WARN_THRESHOLDS_USD: '2.5, 20, 100' });
+
+    expect(config.costWarnThresholdsUsd).toEqual([2.5, 20, 100]);
+  });
+
+  it.each([['ten'], ['0'], ['-5,10'], ['10,5'], ['5,5'], ['']])(
+    'rejects a COST_WARN_THRESHOLDS_USD of "%s" (ascending positive amounts only)',
+    (badValue) => {
+      const env = { ...validEnv, COST_WARN_THRESHOLDS_USD: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/COST_WARN_THRESHOLDS_USD/);
     },
   );
 });

@@ -1,5 +1,7 @@
 import type { Logger } from './logger.ts';
 import type { SessionStore } from './db.ts';
+import { crossedThresholds } from './cost.ts';
+import { costWarningLine } from './messages.ts';
 
 /**
  * The session manager — one Claude Code session per Slack thread (spec §3).
@@ -16,7 +18,8 @@ export interface TurnEvents {
 }
 
 export type TurnOutcome =
-  | { status: 'success'; resultText: string }
+  /** `costUsd` is this turn's SDK-reported cost, feeding the ledger (spec §7). */
+  | { status: 'success'; resultText: string; costUsd: number }
   | { status: 'error'; errors: string[] }
   /** The subprocess exited without delivering a result for this turn. */
   | { status: 'process_ended' };
@@ -40,6 +43,9 @@ export interface VoiceHandle {
 
 export type VoiceFactory = (threadTs: string) => VoiceHandle;
 
+/** Posts a standalone message to a thread — 💸 warnings "post the event" (spec §8). */
+export type Notifier = (threadTs: string, text: string) => Promise<void>;
+
 interface ThreadState {
   threadTs: string;
   channelId: string;
@@ -53,6 +59,9 @@ export interface SessionManagerOptions {
   store: SessionStore;
   spawn: ProcessFactory;
   voiceFor: VoiceFactory;
+  notify: Notifier;
+  /** Ascending USD totals at which to warn once each (spec §7, default 5 then 10). */
+  costThresholdsUsd: number[];
   warmTtlMs: number;
   logger: Logger;
 }
@@ -61,6 +70,8 @@ export class SessionManager {
   private readonly store: SessionStore;
   private readonly spawn: ProcessFactory;
   private readonly voiceFor: VoiceFactory;
+  private readonly notify: Notifier;
+  private readonly costThresholdsUsd: number[];
   private readonly warmTtlMs: number;
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
@@ -69,6 +80,8 @@ export class SessionManager {
     this.store = options.store;
     this.spawn = options.spawn;
     this.voiceFor = options.voiceFor;
+    this.notify = options.notify;
+    this.costThresholdsUsd = options.costThresholdsUsd;
     this.warmTtlMs = options.warmTtlMs;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
@@ -159,8 +172,10 @@ export class SessionManager {
     }
 
     if (outcome.status === 'success') {
-      this.store.recordTurn(state.threadTs, state.channelId);
+      const beforeUsd = this.store.get(state.threadTs, state.channelId)?.costUsdTotal ?? 0;
+      this.store.recordTurn(state.threadTs, state.channelId, outcome.costUsd);
       await voice.finalize(outcome.resultText);
+      await this.warnOnCostThresholds(state, beforeUsd);
       return;
     }
 
@@ -174,6 +189,33 @@ export class SessionManager {
     voice.append(reason);
     await voice.finalize();
     await this.dropProcess(state);
+  }
+
+  /**
+   * 💸 threshold warnings (spec §7/§8): compare the persisted total before
+   * and after the turn — a threshold fires exactly when the total reaches
+   * it, so each fires once per session, restarts included. Measure-only: a
+   * failed post is logged and forgotten, the session never blocks on cost.
+   */
+  private async warnOnCostThresholds(state: ThreadState, beforeUsd: number): Promise<void> {
+    const afterUsd = this.store.get(state.threadTs, state.channelId)?.costUsdTotal ?? beforeUsd;
+    for (const threshold of crossedThresholds(beforeUsd, afterUsd, this.costThresholdsUsd)) {
+      // "Next warning at $N" must be a live promise: when one turn jumps
+      // several thresholds at once, don't announce one that just fired too.
+      const next = this.costThresholdsUsd.find((t) => t > threshold && t > afterUsd);
+      this.logger.info(
+        { threadTs: state.threadTs, threshold, costUsdTotal: afterUsd },
+        'cost threshold crossed',
+      );
+      try {
+        await this.notify(state.threadTs, costWarningLine(afterUsd, threshold, next));
+      } catch (error) {
+        this.logger.warn(
+          { err: error, threadTs: state.threadTs, threshold },
+          'cost warning post failed',
+        );
+      }
+    }
   }
 
   private armWarmTimer(state: ThreadState): void {
