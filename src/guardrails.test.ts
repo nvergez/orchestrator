@@ -66,11 +66,15 @@ describe('classifyCommand — orca tiers', () => {
     expect(tierOf(command)).toBe('auto');
   });
 
+  it('AUTO relay of a human reply: orchestration reply (provenance enforced in relay.ts)', () => {
+    expect(tierOf('orca orchestration reply --id m1 --body "2"')).toBe('auto');
+  });
+
   it.each([
-    'orca orchestration reply --id m1 --body "2"',
     'orca orchestration gate-resolve --id g1 --choice 1',
-  ])('AUTO relay of a human reply: %s', (command) => {
-    expect(tierOf(command)).toBe('auto');
+    'orca orchestration gate-create --title "ship it?"',
+  ])('CONFIRM: DAG gate commands never ride the relay silently — %s', (command) => {
+    expect(tierOf(command)).toBe('confirm');
   });
 
   it('CONFIRM: orca worktree delete', () => {

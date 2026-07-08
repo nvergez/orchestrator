@@ -1,4 +1,4 @@
-import { commandSegments } from './guardrails.ts';
+import { commandSegments, flagValue, hasFlag, shellQuote } from './guardrails.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from './messages.ts';
 import {
   createTerminal,
@@ -652,26 +652,6 @@ function isOrca(tokens: string[], topic: string, action: string): boolean {
     tokens[0] === 'orca' &&
     tokens.some((token, index) => token === topic && tokens[index + 1] === action)
   );
-}
-
-function hasFlag(tokens: string[], flag: string): boolean {
-  return tokens.some((token) => token === flag || token.startsWith(`${flag}=`));
-}
-
-function flagValue(tokens: string[], flag: string): string | undefined {
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i] as string;
-    if (token === flag) return tokens[i + 1];
-    if (token.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
-  }
-  return undefined;
-}
-
-const SAFE_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/;
-
-function shellQuote(token: string): string {
-  if (token !== '' && SAFE_TOKEN.test(token)) return token;
-  return `'${token.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 /** `<repo>-<issue#>-<slug>` → the repo prefix; the whole name when unconventional. */

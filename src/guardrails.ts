@@ -116,12 +116,44 @@ export function extractDelegationRepoRefs(command: string): Array<string | null>
 
 /**
  * The quote-stripped tokens of each top-level command segment — the shell
- * surface the delegation coordinator (issue #19) reads commands and flag
- * values through, so it can never disagree with the classifier about where
- * a segment starts or what is quoted.
+ * surface the delegation coordinator (issue #19) and the gate relay (issue
+ * #21) read commands and flag values through, so they can never disagree
+ * with the classifier about where a segment starts or what is quoted.
  */
 export function commandSegments(command: string): string[][] {
   return parse(command).segments;
+}
+
+// ── token helpers over a parsed segment ──────────────────────────────────────
+
+/** Adjacent `<topic> <action>` anywhere in an orca segment — value-carrying
+ * flags ahead of the subcommand cannot hide it. */
+export function isOrcaCommand(tokens: string[], topic: string, action: string): boolean {
+  return (
+    tokens[0] === 'orca' &&
+    tokens.some((token, index) => token === topic && tokens[index + 1] === action)
+  );
+}
+
+export function hasFlag(tokens: string[], flag: string): boolean {
+  return tokens.some((token) => token === flag || token.startsWith(`${flag}=`));
+}
+
+export function flagValue(tokens: string[], flag: string): string | undefined {
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i] as string;
+    if (token === flag) return tokens[i + 1];
+    if (token.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
+  }
+  return undefined;
+}
+
+const SAFE_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** Re-quotes one stripped token for a rebuilt command line. */
+export function shellQuote(token: string): string {
+  if (token !== '' && SAFE_TOKEN.test(token)) return token;
+  return `'${token.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 // ── shell surface parsing ────────────────────────────────────────────────────
@@ -322,17 +354,17 @@ const ORCA_AUTO: Record<string, Set<string>> = {
   // the routing gate of #10 already covers inferred delegations).
   worktree: new Set(['ps', 'create']),
   terminal: new Set(['list', 'wait']),
-  // reply/gate-resolve are AUTO for relays carrying a human reply (spec §7).
-  // The "carrying a human reply" condition is not checkable from the command
-  // string alone; the #9 relay slice anchors it on the pending_gates
-  // registry once that exists. Until then the enumerated commands are AUTO.
+  // `reply` is AUTO for relays carrying a human reply (spec §7). The
+  // "carrying a human reply" half is not checkable from the command string —
+  // the relay coordinator (issue #21) enforces it on the pending_gates
+  // registry: a reply whose --id is not one of the thread's pending gates is
+  // denied there before it runs.
   orchestration: new Set([
     'check',
     'task-list',
     'task-create',
     'dispatch',
     'reply',
-    'gate-resolve',
   ]),
 };
 
@@ -351,9 +383,16 @@ function classifyOrca(args: string[]): Verdict {
   }
   if (topic === 'terminal' && action === 'send') {
     // Spec §7's AUTO list is `terminal list/wait` only: send types arbitrary
-    // input into a worker terminal, so it gates until the #9 relay slice can
-    // anchor "carries a human reply" on the pending_gates registry.
+    // input into a worker terminal. The relay coordinator (issue #21) lifts
+    // the one sanctioned case — a send targeting the worker terminal of a
+    // gate this thread relayed — back to AUTO inside canUseTool.
     return confirm('`orca terminal send` types into a worker terminal');
+  }
+  if (topic === 'orchestration' && (action === 'gate-resolve' || action === 'gate-create')) {
+    // Issue #9: DAG gates are reserved for coordinator DAG decisions; none of
+    // the worker↔human relay goes through them, so the relay path can never
+    // emit one silently.
+    return confirm('DAG gate commands are never part of the worker relay (spec §6)');
   }
   if (topic !== undefined && action !== undefined && ORCA_AUTO[topic]?.has(action) === true) {
     return auto('orca read/delegation/relay');

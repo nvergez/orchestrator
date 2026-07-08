@@ -194,3 +194,76 @@ describe('DelegationStore — mailboxes', () => {
     expect(store.getMailbox('1751970099.000900')).toBeUndefined();
   });
 });
+
+describe('DelegationStore — pending_gates registry (issue #21)', () => {
+  const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
+    msgId: 'msg_6a8c14d55c7d',
+    threadTs: THREAD,
+    taskId: 'task_13c700f151b3',
+    workerHandle: 'term_300035ab',
+    worktreeName: 'scratch-21-bench',
+    kind: 'decision_gate' as const,
+    question: 'Which lint config is authoritative for CI?',
+    options: ['root', 'app/', 'merge both'],
+    relayTs: '1751970002.000300',
+    ...overrides,
+  });
+
+  it('records a relayed gate and reads it back pending, options intact', () => {
+    const store = openStore();
+
+    expect(store.recordGate(gateRow())).toBe(true);
+
+    expect(store.getGate('msg_6a8c14d55c7d')).toEqual({
+      ...gateRow(),
+      status: 'pending',
+      relayedAt: '2026-07-08T12:00:00.000Z',
+      answeredAt: null,
+    });
+  });
+
+  it('first relay wins — a replayed gate neither duplicates nor resets', () => {
+    const store = openStore();
+
+    store.recordGate(gateRow());
+    store.answerGate('msg_6a8c14d55c7d');
+
+    expect(store.recordGate(gateRow({ question: 'rewritten?' }))).toBe(false);
+    expect(store.getGate('msg_6a8c14d55c7d')).toMatchObject({
+      question: 'Which lint config is authoritative for CI?',
+      status: 'answered',
+    });
+  });
+
+  it('answers a gate exactly once — the second flip reports it lost', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+
+    expect(store.answerGate('msg_6a8c14d55c7d')).toBe(true);
+    expect(store.answerGate('msg_6a8c14d55c7d')).toBe(false);
+    expect(store.answerGate('msg_unknown')).toBe(false);
+
+    expect(store.getGate('msg_6a8c14d55c7d')?.answeredAt).toBe('2026-07-08T12:00:01.000Z');
+  });
+
+  it('lists a thread’s gates oldest first, pending view filtered', () => {
+    const store = openStore();
+    store.recordGate(gateRow({ msgId: 'msg_1' }));
+    store.recordGate(gateRow({ msgId: 'msg_2', kind: 'escalation', options: [] }));
+    store.recordGate(gateRow({ msgId: 'msg_other', threadTs: '1751970099.000900' }));
+    store.answerGate('msg_1');
+
+    expect(store.listGatesForThread(THREAD).map((gate) => gate.msgId)).toEqual([
+      'msg_1',
+      'msg_2',
+    ]);
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_2']);
+  });
+
+  it('degrades unreadable options to an empty list instead of throwing', () => {
+    const store = openStore();
+    store.recordGate(gateRow({ options: [] }));
+
+    expect(store.getGate('msg_6a8c14d55c7d')?.options).toEqual([]);
+  });
+});

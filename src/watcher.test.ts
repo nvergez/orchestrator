@@ -46,9 +46,11 @@ class FakeSurface implements WatcherSurface {
   updates: Array<{ ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
+  failPosts = false;
   private counter = 0;
 
   post(threadTs: string, text: string): Promise<string> {
+    if (this.failPosts) return Promise.reject(new Error('slack down'));
     this.posts.push({ threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
@@ -126,7 +128,6 @@ const makeWatcher = (options: HarnessOptions = {}) => {
   const watcher = new GateWatcher({
     store,
     surface,
-    channelId: CHANNEL,
     wake: (threadTs, channelId, text) => {
       wakes.push({ threadTs, channelId, text });
       return options.wakeResult ?? 'turn';
@@ -340,18 +341,75 @@ describe('worker_done — failure', () => {
   });
 });
 
-describe('decision_gate / escalation — the crude pre-#21 surface', () => {
-  it.each([
-    ['decision_gate', '❓', 'question'],
-    ['escalation', '🚨', 'rotating_light'],
-  ] as const)('%s posts the verbatim payload, sets %s, wakes with relay instructions', async (kind, emoji, reaction) => {
+describe('decision_gate / escalation — the relay up (issue #21)', () => {
+  const gateMessage = (over: Partial<Record<string, unknown>> = {}) =>
+    busMessage({
+      type: 'decision_gate',
+      subject: 'Question',
+      body: 'Which lint config is authoritative for CI?',
+      payload: JSON.stringify({
+        taskId: 'task_3f81',
+        dispatchId: 'ctx_d1',
+        question: 'Which lint config is authoritative for CI?',
+        options: ['root', 'app/', 'merge both'],
+      }),
+      ...over,
+    });
+
+  it('posts the fixed gate message, registers the pending gate, sets ❓ — and never wakes', async () => {
     const { watcher, store, surface, wakes, slotsFreed } = makeWatcher({
+      checks: [checkOut(gateMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(1);
+    });
+
+    expect(surface.posts[0]?.text).toBe(
+      [
+        '❓ *`forwardly-84-csv-export`* (<https://github.com/lemlist/forwardly/issues/84|forwardly#84>) asks:',
+        '',
+        '> Which lint config is authoritative for CI?',
+        '> *1.* root',
+        '> *2.* app/',
+        '> *3.* merge both',
+        '',
+        'Reply in this thread — a number or free text.',
+      ].join('\n'),
+    );
+    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'question' }]);
+
+    // The registry row — spec §9, written by the daemon at relay time.
+    expect(store.getGate('msg_a8f37bac632f')).toMatchObject({
+      msgId: 'msg_a8f37bac632f',
+      threadTs: THREAD,
+      taskId: 'task_3f81',
+      workerHandle: 'term_w1',
+      worktreeName: 'forwardly-84-csv-export',
+      kind: 'decision_gate',
+      question: 'Which lint config is authoritative for CI?',
+      options: ['root', 'app/', 'merge both'],
+      relayTs: 'msg-ts-1',
+      status: 'pending',
+    });
+
+    // The session thinks at ANSWER time; the relay itself burns no turn.
+    expect(wakes).toHaveLength(0);
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    expect(slotsFreed()).toBe(0);
+    expect(watcher.isArmed(THREAD)).toBe(true);
+  });
+
+  it('relays an escalation 🚨 from its body, without options or a number tail', async () => {
+    const { watcher, store, surface, wakes } = makeWatcher({
       checks: [
         checkOut(
           busMessage({
-            type: kind,
-            subject: 'Which lint config is authoritative?',
-            body: 'Two configs coexist. 1. root 2. app/',
+            type: 'escalation',
+            subject: 'Blocked',
+            body: 'The e2e tests break on `main` — pausing.',
           }),
         ),
       ],
@@ -364,19 +422,95 @@ describe('decision_gate / escalation — the crude pre-#21 surface', () => {
     });
 
     const post = surface.posts[0]?.text ?? '';
-    expect(post).toContain(emoji);
-    expect(post).toContain('`forwardly-84-csv-export`');
-    expect(post).toContain('> Which lint config is authoritative?');
-    expect(post).toContain('> Two configs coexist. 1. root 2. app/');
-    expect(post).toContain('orca orchestration reply --id msg_a8f37bac632f');
-    expect(surface.reactions).toEqual([{ ts: THREAD, name: reaction }]);
+    expect(post).toContain('🚨 *`forwardly-84-csv-export`*');
+    expect(post).toContain('escalates:');
+    expect(post).toContain('> The e2e tests break on `main` — pausing.');
+    expect(post).toContain('Reply in this thread.');
+    expect(post).not.toContain('a number or free text');
+    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
+    expect(store.getGate('msg_a8f37bac632f')?.kind).toBe('escalation');
+    expect(wakes).toHaveLength(0);
+  });
 
-    // Best-effort wake with the relay instructions; nothing closes.
-    expect(wakes).toHaveLength(1);
-    expect(wakes[0]?.text).toContain('orca orchestration reply --id msg_a8f37bac632f');
-    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
-    expect(slotsFreed()).toBe(0);
-    expect(watcher.isArmed(THREAD)).toBe(true);
+  it('a ❓ arriving while a 🚨 is pending keeps the root at 🚨', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({ id: 'msg_esc', type: 'escalation', body: 'main is broken' }),
+          gateMessage({ id: 'msg_ask' }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(2);
+    });
+    expect(surface.reactions.map((reaction) => reaction.name)).toEqual([
+      'rotating_light',
+      'rotating_light',
+    ]);
+  });
+
+  it('ignores a replayed gate event — one post, one registry row', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(gateMessage()), checkOut(gateMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(1);
+    });
+    // Both windows consumed; the replay changed nothing.
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(1);
+      expect(store.listGatesForThread(THREAD)).toHaveLength(1);
+    });
+  });
+
+  it('still registers the gate when the Slack post fails — never lost', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(gateMessage())],
+    });
+    surface.failPosts = true;
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getGate('msg_a8f37bac632f')).toBeDefined();
+    });
+    expect(store.getGate('msg_a8f37bac632f')).toMatchObject({
+      question: 'Which lint config is authoritative for CI?',
+      relayTs: null,
+      status: 'pending',
+    });
+  });
+
+  it('relays an unmatched gate as "A worker", keeping the asking handle for the route back', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          gateMessage({
+            from_handle: 'term_stray',
+            payload: JSON.stringify({ question: 'Anyone there?' }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(1);
+    });
+    expect(surface.posts[0]?.text).toContain('❓ *A worker* asks:');
+    expect(store.getGate('msg_a8f37bac632f')).toMatchObject({
+      workerHandle: 'term_stray',
+      worktreeName: null,
+      taskId: null,
+    });
   });
 });
 
@@ -486,7 +620,6 @@ describe('arming and stopping', () => {
     const watcher = new GateWatcher({
       store,
       surface: new FakeSurface(),
-      channelId: CHANNEL,
       wake: () => 'turn',
       onDelegationClosed: () => undefined,
       logger: createLogger('silent'),

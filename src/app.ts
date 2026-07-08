@@ -12,6 +12,12 @@ export interface SessionGateway {
   close(threadTs: string, channelId: string): CloseResult;
 }
 
+/** The slice of the gate relay the reply path decorates turns through (#21). */
+export interface ReplyDecorator {
+  /** Prepends the thread's relayed-gates registry; a no-op without gates. */
+  decorateReply(threadTs: string, text: string): string;
+}
+
 const REPLY_LOG_LINES: Record<ReplyResult, string> = {
   turn: 'thread reply — resuming session',
   closed: 'reply in closed thread — fixed line posted',
@@ -30,6 +36,7 @@ export function registerHandlers(
   guard: Guard,
   sessions: SessionGateway,
   gates: GateResolver,
+  relay: ReplyDecorator,
   logger: Logger,
 ): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
@@ -75,7 +82,13 @@ export function registerHandlers(
           logger.info({ threadTs: decision.threadTs }, 'thread reply resolved a pending 🚦 gate');
           return;
         }
-        const result = sessions.reply(decision.threadTs, guard.channelId, decision.text);
+        // A thread that relayed worker gates carries its registry into the
+        // turn (spec §6): the session routes the reply anchored on it.
+        const result = sessions.reply(
+          decision.threadTs,
+          guard.channelId,
+          relay.decorateReply(decision.threadTs, decision.text),
+        );
         // Fixed-line posts are user-visible events (info); the rest is
         // ambient routing (debug).
         if (result === 'closed') {

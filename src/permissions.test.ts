@@ -4,6 +4,7 @@ import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permis
 import type { GateVerdict } from './gate.ts';
 import type { DispatchObserver, DispatchPreparer, PrepareVerdict } from './dispatch.ts';
 import type { DelegationVerdict } from './routing.ts';
+import type { SessionRelay } from './relay.ts';
 
 const THREAD = '1751970000.000100';
 
@@ -62,6 +63,34 @@ class FakeDelegations implements DispatchPreparer, DispatchObserver {
   abandonThread(): void {}
 }
 
+/** A scriptable stand-in for the GateRelay. */
+class FakeRelay implements SessionRelay {
+  prepared: Array<{ threadTs: string; command: string }> = [];
+  observed: Array<{ threadTs: string; command: string; stdout: string }> = [];
+  sanctioned: string[] = [];
+  sendSanctioned = false;
+  private readonly verdict: PrepareVerdict | 'passthrough';
+
+  constructor(verdict: PrepareVerdict | 'passthrough' = 'passthrough') {
+    this.verdict = verdict;
+  }
+
+  sanctionsSend(_threadTs: string, command: string): boolean {
+    this.sanctioned.push(command);
+    return this.sendSanctioned;
+  }
+
+  prepare(threadTs: string, command: string): PrepareVerdict {
+    this.prepared.push({ threadTs, command });
+    return this.verdict === 'passthrough' ? { action: 'proceed', command } : this.verdict;
+  }
+
+  observe(threadTs: string, command: string, stdout: string): Promise<void> {
+    this.observed.push({ threadTs, command, stdout });
+    return Promise.resolve();
+  }
+}
+
 const callOptions = () => ({
   signal: new AbortController().signal,
   toolUseID: 'toolu_01',
@@ -72,8 +101,16 @@ const makeCanUseTool = (
   gates: FakeGates,
   allowList: DelegationPolicy = new FakeAllowList(),
   delegations: FakeDelegations = new FakeDelegations(),
+  relay: FakeRelay = new FakeRelay(),
 ) =>
-  buildCanUseTool({ threadTs: THREAD, gates, allowList, delegations, logger: createLogger('silent') });
+  buildCanUseTool({
+    threadTs: THREAD,
+    gates,
+    allowList,
+    delegations,
+    relay,
+    logger: createLogger('silent'),
+  });
 
 describe('buildCanUseTool', () => {
   it('denies any tool that is not Bash — the orchestrator never codes', async () => {
@@ -253,9 +290,59 @@ describe('buildCanUseTool — the delegation coordinator seam (issue #19)', () =
   });
 });
 
+describe('buildCanUseTool — the gate relay seam (issue #21)', () => {
+  const REPLY = 'orca orchestration reply --id msg_1 --body "2" --json';
+  const SEND = 'orca terminal send --terminal term_w1 --text "app/" --enter --json';
+
+  it('runs a registry-sanctioned terminal send without the 🚦 gate', async () => {
+    const gates = new FakeGates();
+    const relay = new FakeRelay();
+    relay.sendSanctioned = true;
+    const canUseTool = makeCanUseTool(gates, new FakeAllowList(), new FakeDelegations(), relay);
+    const input = { command: SEND };
+    const result = await canUseTool('Bash', input, callOptions());
+    expect(result).toEqual({ behavior: 'allow', updatedInput: input });
+    expect(gates.requests).toEqual([]);
+    expect(relay.sanctioned).toEqual([SEND]);
+  });
+
+  it('keeps an unsanctioned terminal send behind the 🚦 gate', async () => {
+    const gates = new FakeGates({ approved: true, reply: 'go' });
+    const canUseTool = makeCanUseTool(gates);
+    await canUseTool('Bash', { command: SEND }, callOptions());
+    expect(gates.requests).toHaveLength(1);
+  });
+
+  it('turns a relay deny into a tool denial before the delegation seam runs', async () => {
+    const relay = new FakeRelay({ action: 'deny', message: 'an answered gate never re-routes' });
+    const delegations = new FakeDelegations();
+    const canUseTool = makeCanUseTool(new FakeGates(), new FakeAllowList(), delegations, relay);
+    const result = await canUseTool('Bash', { command: REPLY }, callOptions());
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect((result as { message: string }).message).toContain('never re-routes');
+    expect(delegations.prepared).toEqual([]);
+  });
+
+  it('carries the fidelity-rewritten reply out through updatedInput', async () => {
+    const rewritten = 'orca orchestration reply --id msg_1 --body app/ --json';
+    const relay = new FakeRelay({ action: 'proceed', command: rewritten });
+    const canUseTool = makeCanUseTool(new FakeGates(), new FakeAllowList(), new FakeDelegations(), relay);
+    const result = await canUseTool('Bash', { command: REPLY }, callOptions());
+    expect(result).toEqual({ behavior: 'allow', updatedInput: { command: rewritten } });
+  });
+
+  it('never consults the relay for a command the 🚦 gate refused', async () => {
+    const relay = new FakeRelay();
+    const gates = new FakeGates({ approved: false, reply: 'no' });
+    const canUseTool = makeCanUseTool(gates, new FakeAllowList(), new FakeDelegations(), relay);
+    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    expect(relay.prepared).toEqual([]);
+  });
+});
+
 describe('guardrailHooks', () => {
-  const makeHooks = (delegations = new FakeDelegations()) =>
-    guardrailHooks({ threadTs: THREAD, delegations, logger: createLogger('silent') });
+  const makeHooks = (delegations = new FakeDelegations(), relay = new FakeRelay()) =>
+    guardrailHooks({ threadTs: THREAD, delegations, relay, logger: createLogger('silent') });
 
   const baseHookFields = {
     session_id: 's1',
@@ -304,6 +391,32 @@ describe('guardrailHooks', () => {
     );
     expect(delegations.observed).toEqual([
       { threadTs: THREAD, command: 'orca worktree create --json', stdout: '{"ok":true}' },
+    ]);
+  });
+
+  it('feeds finished commands to the relay observer too — even when the delegation one throws', async () => {
+    const delegations = new FakeDelegations();
+    delegations.observe = () => Promise.reject(new Error('boom'));
+    const relay = new FakeRelay();
+    const hook = makeHooks(delegations, relay).PostToolUse?.[0]?.hooks[0];
+    await hook?.(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'orca orchestration reply --id msg_1 --body app/ --json' },
+        tool_response: { stdout: '{"ok":true}', stderr: '' },
+        tool_use_id: 'toolu_01',
+        ...baseHookFields,
+      },
+      'toolu_01',
+      { signal: new AbortController().signal },
+    );
+    expect(relay.observed).toEqual([
+      {
+        threadTs: THREAD,
+        command: 'orca orchestration reply --id msg_1 --body app/ --json',
+        stdout: '{"ok":true}',
+      },
     ]);
   });
 
