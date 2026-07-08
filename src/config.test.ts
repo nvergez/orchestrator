@@ -26,6 +26,7 @@ describe('loadConfig', () => {
       warmTtlMs: 30 * 60_000,
       costWarnThresholdsUsd: [5, 10],
       liveSessionCap: 5,
+      workerCap: 3,
       autoCloseAfterMs: 7 * 24 * 60 * 60_000,
       sweepIntervalMs: 60 * 60_000,
     });
@@ -124,6 +125,20 @@ describe('loadConfig', () => {
 
       expect(() => loadConfig(env)).toThrowError(ConfigError);
       expect(() => loadConfig(env)).toThrowError(/SESSION_LIVE_CAP/);
+    },
+  );
+
+  it('honors WORKER_CAP when provided', () => {
+    expect(loadConfig({ ...validEnv, WORKER_CAP: '5' }).workerCap).toBe(5);
+  });
+
+  it.each([['0'], ['-1'], ['2.5'], ['many']])(
+    'rejects a WORKER_CAP of %s (must be a positive integer)',
+    (badValue) => {
+      const env = { ...validEnv, WORKER_CAP: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/WORKER_CAP/);
     },
   );
 

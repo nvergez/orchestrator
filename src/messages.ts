@@ -48,6 +48,54 @@ export function zeroMatchLine(repoNames: string[]): string {
 }
 
 /**
+ * Scenario A — the delegation card (issue #19): one message per delegation,
+ * posted when the worktree is ready and edited at milestones only, never a
+ * token stream. GitHub links rich (`<url|repo#n>`), worktree name as code;
+ * a repo without a GitHub remote (folder repos) degrades to plain `repo#n`.
+ */
+export function delegationCard(opts: {
+  repo: string;
+  issueNumber: number;
+  title: string;
+  worktreeName: string;
+  agent: string;
+  /** `https://github.com/<owner>/<repo>/issues/<n>` when the repo has one. */
+  issueUrl?: string;
+  /** Rendered milestone lines, oldest first (`• 14:04 — worktree ready`). */
+  milestones: string[];
+}): string {
+  const ref = `${opts.repo}#${opts.issueNumber}`;
+  const issue = opts.issueUrl === undefined ? ref : `<${opts.issueUrl}|${ref}>`;
+  return [
+    `⚙️ *${ref} — ${opts.title}*`,
+    `\`${opts.worktreeName}\` · ${opts.agent} · issue ${issue}`,
+    ...opts.milestones,
+  ].join('\n');
+}
+
+/** A delegation-card milestone line; `at` is a local wall-clock HH:MM. */
+export function milestoneLine(at: string, text: string): string {
+  return `• ${at} — ${text}`;
+}
+
+/**
+ * Issue #19 — the global concurrent-worker cap is full: the delegation waits
+ * its wave (the `worktree create` call stays suspended until a slot frees).
+ */
+export function workerCapLine(inFlight: number): string {
+  const noun = inFlight === 1 ? 'worker' : 'workers';
+  return `⏳ Worker cap reached (${inFlight} ${noun} in flight) — this delegation waits for a free slot.`;
+}
+
+/**
+ * Spec §10: every daemon-side orca call is wrapped — when the runtime is
+ * down the thread gets this line, and the daemon carries on.
+ */
+export function orcaUnavailableLine(detail: string): string {
+  return `⚠️ Orca runtime unavailable — ${detail}`;
+}
+
+/**
  * Scenario F′ — live-session cap reached with every session mid-turn: the
  * message waits its turn instead of being rejected (spec §3).
  */
@@ -63,8 +111,8 @@ export const CLOSED_THREAD_LINE =
 /**
  * "Brief moments" — the 🔚 closing summary, posted by an explicit
  * `@orchestrator close` or by the dormancy auto-close (which names its
- * reason). The delegation count stays a bare number until #19 lands the
- * delegations ledger that lets each one be listed like the mock does.
+ * reason). The count now comes from the delegations ledger (#19); listing
+ * each delegation with its PR link like the mock waits for #20's results.
  */
 export function closingSummary(opts: {
   delegations: number;

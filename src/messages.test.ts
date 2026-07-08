@@ -3,10 +3,14 @@ import {
   CLOSED_THREAD_LINE,
   closingSummary,
   costWarningLine,
+  delegationCard,
   delegationGateLine,
   gateLine,
+  milestoneLine,
+  orcaUnavailableLine,
   queuedLine,
   refusalLine,
+  workerCapLine,
   zeroMatchLine,
 } from './messages.ts';
 
@@ -117,6 +121,71 @@ describe('zeroMatchLine', () => {
     expect(zeroMatchLine(['forwardly', 'orca', 'scratch', 'orchestrator'])).toBe(
       'No repo I drive matches. I know: `forwardly`, `orca`, `scratch`, ' +
         '`orchestrator`. Rephrase targeting one of them.',
+    );
+  });
+});
+
+describe('delegationCard — scenario A (issue #19)', () => {
+  it('renders the ⚙️ card with a rich GitHub issue link and code-formatted worktree', () => {
+    expect(
+      delegationCard({
+        repo: 'forwardly',
+        issueNumber: 84,
+        title: 'CSV export of send metrics',
+        worktreeName: 'forwardly-84-csv-export',
+        agent: 'claude',
+        issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+        milestones: [
+          '• 14:04 — issue linked, worktree ready',
+          '• 14:05 — brief handed off (task `t-3f81`)',
+        ],
+      }),
+    ).toBe(
+      '⚙️ *forwardly#84 — CSV export of send metrics*\n' +
+        '`forwardly-84-csv-export` · claude · issue ' +
+        '<https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+        '• 14:04 — issue linked, worktree ready\n' +
+        '• 14:05 — brief handed off (task `t-3f81`)',
+    );
+  });
+
+  it('degrades to plain repo#n when the repo has no GitHub issue URL', () => {
+    const card = delegationCard({
+      repo: 'scratch',
+      issueNumber: 21,
+      title: 'bench',
+      worktreeName: 'scratch-21-bench',
+      agent: 'claude',
+      milestones: ['• 16:20 — issue linked, worktree ready'],
+    });
+
+    expect(card).toContain('issue scratch#21');
+    expect(card).not.toContain('<');
+  });
+});
+
+describe('milestoneLine', () => {
+  it('renders the bullet-time-dash shape of the mock', () => {
+    expect(milestoneLine('14:04', 'worktree ready')).toBe('• 14:04 — worktree ready');
+  });
+});
+
+describe('workerCapLine', () => {
+  it('announces the wave wait with the in-flight count', () => {
+    expect(workerCapLine(3)).toBe(
+      '⏳ Worker cap reached (3 workers in flight) — this delegation waits for a free slot.',
+    );
+  });
+
+  it('says "worker", singular, for one', () => {
+    expect(workerCapLine(1)).toContain('(1 worker in flight)');
+  });
+});
+
+describe('orcaUnavailableLine', () => {
+  it('prefixes the ⚠️ and carries the detail', () => {
+    expect(orcaUnavailableLine('nothing was dispatched.')).toBe(
+      '⚠️ Orca runtime unavailable — nothing was dispatched.',
     );
   });
 });

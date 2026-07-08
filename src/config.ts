@@ -21,6 +21,8 @@ export interface Config {
   costWarnThresholdsUsd: number[];
   /** Global cap on live sessions — dormant ones don't count (spec §3: 5). */
   liveSessionCap: number;
+  /** Global cap on concurrent Orca workers (spec §5) — fan-out waves beyond it. */
+  workerCap: number;
   /** Dormancy span after which the sweep auto-closes a session (spec §3: 7 days). */
   autoCloseAfterMs: number;
   /** How often the dormancy sweep runs. */
@@ -36,6 +38,8 @@ const DEFAULT_WARM_TTL_MINUTES = 30;
 const DEFAULT_COST_WARN_THRESHOLDS_USD = [5, 10];
 
 const DEFAULT_LIVE_SESSION_CAP = 5;
+
+const DEFAULT_WORKER_CAP = 3;
 
 const DEFAULT_AUTO_CLOSE_DAYS = 7;
 
@@ -78,6 +82,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     problems.push('SESSION_LIVE_CAP must be a positive integer');
   }
 
+  const workerCap = Number(env.WORKER_CAP ?? DEFAULT_WORKER_CAP);
+  if (!Number.isInteger(workerCap) || workerCap <= 0) {
+    problems.push('WORKER_CAP must be a positive integer');
+  }
+
   const autoCloseDays = positiveNumber(
     'SESSION_AUTO_CLOSE_DAYS',
     DEFAULT_AUTO_CLOSE_DAYS,
@@ -116,6 +125,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     warmTtlMs: warmTtlMinutes * 60_000,
     costWarnThresholdsUsd,
     liveSessionCap,
+    workerCap,
     autoCloseAfterMs: autoCloseDays * DAY_MS,
     sweepIntervalMs: sweepIntervalMinutes * 60_000,
   };

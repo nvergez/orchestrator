@@ -114,6 +114,16 @@ export function extractDelegationRepoRefs(command: string): Array<string | null>
   return refs;
 }
 
+/**
+ * The quote-stripped tokens of each top-level command segment — the shell
+ * surface the delegation coordinator (issue #19) reads commands and flag
+ * values through, so it can never disagree with the classifier about where
+ * a segment starts or what is quoted.
+ */
+export function commandSegments(command: string): string[][] {
+  return parse(command).segments;
+}
+
 // ── shell surface parsing ────────────────────────────────────────────────────
 
 interface ParsedCommand {
@@ -373,6 +383,12 @@ function classifyGh(args: string[]): Verdict {
     }
     if (action === 'view' || action === 'list') return auto('gh read');
     return confirm('unrecognized gh repo command — gated');
+  }
+  if (topic === 'issue' && action === 'create') {
+    // Delegation is issue-linked (#4): creating the target-repo issue is step
+    // zero of the AUTO delegation sequence (spec §7) — the mock shows no 🚦
+    // between the routing gate's "go" and the delegation card.
+    return auto('issue-linked delegation (spec §5)');
   }
   if (topic === 'status' || topic === 'search') {
     return auto('gh read');

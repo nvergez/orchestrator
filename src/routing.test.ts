@@ -202,7 +202,18 @@ describe('routingInstructions', () => {
     expect(prompt).toMatch(/explicitly named[\s\S]*default agent from the hints[\s\S]*\*claude\*/);
   });
 
-  it('stops at the routing decision — dispatch is the next slice', () => {
-    expect(prompt).toContain('Do not run `orca worktree create` yet.');
+  it('spells out the dispatch sequence in order, with the #4 invariants', () => {
+    expect(prompt).toMatch(
+      /gh issue create[\s\S]*worktree create[\s\S]*terminal list[\s\S]*terminal wait[\s\S]*task-create[\s\S]*dispatch/,
+    );
+    expect(prompt).toContain('NEVER pass `--prompt`');
+    expect(prompt).toContain('--inject');
+    expect(prompt).toContain('never pass `--from`');
+    expect(prompt).toContain('--no-parent');
+  });
+
+  it('tells the session the daemon owns the card and to end its turn after dispatch', () => {
+    expect(prompt).toContain('never repeat the card');
+    expect(prompt).toContain('end your turn');
   });
 });

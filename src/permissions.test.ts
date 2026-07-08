@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createLogger } from './logger.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { GateVerdict } from './gate.ts';
+import type { DispatchObserver, DispatchPreparer, PrepareVerdict } from './dispatch.ts';
 import type { DelegationVerdict } from './routing.ts';
 
 const THREAD = '1751970000.000100';
@@ -36,14 +37,43 @@ class FakeAllowList implements DelegationPolicy {
   }
 }
 
+/** A scriptable stand-in for the DelegationCoordinator. */
+class FakeDelegations implements DispatchPreparer, DispatchObserver {
+  prepared: Array<{ threadTs: string; command: string }> = [];
+  observed: Array<{ threadTs: string; command: string; stdout: string }> = [];
+  private readonly verdict: PrepareVerdict | 'passthrough';
+
+  constructor(verdict: PrepareVerdict | 'passthrough' = 'passthrough') {
+    this.verdict = verdict;
+  }
+
+  prepare(threadTs: string, command: string): Promise<PrepareVerdict> {
+    this.prepared.push({ threadTs, command });
+    return Promise.resolve(
+      this.verdict === 'passthrough' ? { action: 'proceed', command } : this.verdict,
+    );
+  }
+
+  observe(threadTs: string, command: string, stdout: string): Promise<void> {
+    this.observed.push({ threadTs, command, stdout });
+    return Promise.resolve();
+  }
+
+  abandonThread(): void {}
+}
+
 const callOptions = () => ({
   signal: new AbortController().signal,
   toolUseID: 'toolu_01',
   requestId: 'req_01',
 });
 
-const makeCanUseTool = (gates: FakeGates, allowList: DelegationPolicy = new FakeAllowList()) =>
-  buildCanUseTool({ threadTs: THREAD, gates, allowList, logger: createLogger('silent') });
+const makeCanUseTool = (
+  gates: FakeGates,
+  allowList: DelegationPolicy = new FakeAllowList(),
+  delegations: FakeDelegations = new FakeDelegations(),
+) =>
+  buildCanUseTool({ threadTs: THREAD, gates, allowList, delegations, logger: createLogger('silent') });
 
 describe('buildCanUseTool', () => {
   it('denies any tool that is not Bash — the orchestrator never codes', async () => {
@@ -185,9 +215,56 @@ describe('buildCanUseTool — repo allow-list on delegations (spec §4/§7, issu
   });
 });
 
+describe('buildCanUseTool — the delegation coordinator seam (issue #19)', () => {
+  it('carries the coordinator-rewritten command out through updatedInput', async () => {
+    const rewritten = 'orca orchestration dispatch --task t1 --to term_w --inject --json --from term_mb';
+    const delegations = new FakeDelegations({ action: 'proceed', command: rewritten });
+    const canUseTool = makeCanUseTool(new FakeGates(), new FakeAllowList(), delegations);
+    const input = { command: 'orca orchestration dispatch --task t1 --to term_w --inject --json' };
+    const result = await canUseTool('Bash', input, callOptions());
+    expect(result).toEqual({ behavior: 'allow', updatedInput: { command: rewritten } });
+  });
+
+  it('turns a coordinator deny into a tool denial', async () => {
+    const delegations = new FakeDelegations({ action: 'deny', message: 'never pass --from' });
+    const canUseTool = makeCanUseTool(new FakeGates(), new FakeAllowList(), delegations);
+    const result = await canUseTool(
+      'Bash',
+      { command: 'orca orchestration dispatch --task t1 --to term_w --from term_x --inject --json' },
+      callOptions(),
+    );
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect((result as { message: string }).message).toContain('never pass --from');
+  });
+
+  it('never starts a wave wait for a command the 🚦 gate refused', async () => {
+    const delegations = new FakeDelegations();
+    const gates = new FakeGates({ approved: false, reply: 'no' });
+    const canUseTool = makeCanUseTool(gates, new FakeAllowList(), delegations);
+    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    expect(delegations.prepared).toEqual([]);
+  });
+
+  it('prepares AUTO commands too — the cap and rewrite see every command', async () => {
+    const delegations = new FakeDelegations();
+    const canUseTool = makeCanUseTool(new FakeGates(), new FakeAllowList(), delegations);
+    await canUseTool('Bash', { command: 'orca worktree ps' }, callOptions());
+    expect(delegations.prepared).toEqual([{ threadTs: THREAD, command: 'orca worktree ps' }]);
+  });
+});
+
 describe('guardrailHooks', () => {
+  const makeHooks = (delegations = new FakeDelegations()) =>
+    guardrailHooks({ threadTs: THREAD, delegations, logger: createLogger('silent') });
+
+  const baseHookFields = {
+    session_id: 's1',
+    transcript_path: '/tmp/t',
+    cwd: '/tmp',
+  };
+
   it('forces the ask path for every Bash call so settings allow-rules cannot bypass the classifier', async () => {
-    const hooks = guardrailHooks();
+    const hooks = makeHooks();
     const matchers = hooks.PreToolUse;
     expect(matchers).toHaveLength(1);
     expect(matchers?.[0]?.matcher).toBe('Bash');
@@ -208,5 +285,65 @@ describe('guardrailHooks', () => {
     expect(output).toMatchObject({
       hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' },
     });
+  });
+
+  it('feeds every finished Bash command and its stdout to the delegation observer', async () => {
+    const delegations = new FakeDelegations();
+    const hook = makeHooks(delegations).PostToolUse?.[0]?.hooks[0];
+    await hook?.(
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'orca worktree create --json' },
+        tool_response: { stdout: '{"ok":true}', stderr: '' },
+        tool_use_id: 'toolu_01',
+        ...baseHookFields,
+      },
+      'toolu_01',
+      { signal: new AbortController().signal },
+    );
+    expect(delegations.observed).toEqual([
+      { threadTs: THREAD, command: 'orca worktree create --json', stdout: '{"ok":true}' },
+    ]);
+  });
+
+  it('reports a failed Bash command as empty output — how a lost slot gets released', async () => {
+    const delegations = new FakeDelegations();
+    const hook = makeHooks(delegations).PostToolUseFailure?.[0]?.hooks[0];
+    await hook?.(
+      {
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'orca worktree create --json' },
+        error: 'exit 1',
+        tool_use_id: 'toolu_01',
+        ...baseHookFields,
+      },
+      'toolu_01',
+      { signal: new AbortController().signal },
+    );
+    expect(delegations.observed).toEqual([
+      { threadTs: THREAD, command: 'orca worktree create --json', stdout: '' },
+    ]);
+  });
+
+  it('swallows observer failures — a hook rejection must never fail the turn', async () => {
+    const delegations = new FakeDelegations();
+    delegations.observe = () => Promise.reject(new Error('boom'));
+    const hook = makeHooks(delegations).PostToolUse?.[0]?.hooks[0];
+    await expect(
+      hook?.(
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'orca worktree ps' },
+          tool_response: 'plain text',
+          tool_use_id: 'toolu_01',
+          ...baseHookFields,
+        },
+        'toolu_01',
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({});
   });
 });

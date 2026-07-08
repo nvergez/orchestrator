@@ -64,7 +64,13 @@ interface Harness {
 
 const makeHarness = (
   script?: (text: string, events: TurnEvents) => TurnOutcome,
-  options: { store?: SessionStore; notify?: Notifier; cap?: number; autoCloseMs?: number } = {},
+  options: {
+    store?: SessionStore;
+    notify?: Notifier;
+    cap?: number;
+    autoCloseMs?: number;
+    countDelegations?: (threadTs: string) => number;
+  } = {},
 ): Harness => {
   const store = options.store ?? new SessionStore(':memory:');
   const spawns: Harness['spawns'] = [];
@@ -92,6 +98,7 @@ const makeHarness = (
     warmTtlMs: TTL,
     liveSessionCap: options.cap ?? 5,
     autoCloseAfterMs: options.autoCloseMs ?? 7 * DAY,
+    countDelegations: options.countDelegations ?? (() => 0),
     logger: createLogger('silent'),
   });
   return { manager, store, spawns, voices, notices };
@@ -216,6 +223,7 @@ describe('SessionManager', () => {
       warmTtlMs: TTL,
       liveSessionCap: 5,
       autoCloseAfterMs: 7 * DAY,
+      countDelegations: () => 0,
       logger: createLogger('silent'),
     });
 
@@ -529,6 +537,19 @@ describe('SessionManager close (spec §3)', () => {
     expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
     expect(spawns[0]?.proc.ended).toBe(true);
     expect(manager.liveProcessCount()).toBe(0);
+  });
+
+  it('the 🔚 summary counts the thread delegations from the #19 ledger', async () => {
+    const { manager, notices } = makeHarness(costedScript, {
+      countDelegations: (threadTs) => (threadTs === THREAD ? 2 : 0),
+    });
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+
+    manager.close(THREAD, CHANNEL);
+    await flush();
+
+    expect(notices.at(-1)?.text).toContain('• 2 delegations');
   });
 
   it('close during a turn waits for the turn to finish — never a mid-turn kill', async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyCommand,
+  commandSegments,
   describeGate,
   extractDelegationRepoRefs,
   type Tier,
@@ -113,6 +114,12 @@ describe('classifyCommand — gh tiers', () => {
     'gh search issues "flaky test"',
   ])('AUTO view/list reads: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
+  });
+
+  it('AUTO issue creation — step zero of the issue-linked delegation sequence (spec §5)', () => {
+    expect(tierOf('gh issue create --repo l3mpire/forwardly --title "CSV export" --body "brief"')).toBe(
+      'auto',
+    );
   });
 
   it.each([
@@ -410,5 +417,20 @@ describe('extractDelegationRepoRefs — the allow-list enforcement seam (issue #
     expect(extractDelegationRepoRefs("orca worktree create --repo 'id:abc' --json")).toEqual([
       'id:abc',
     ]);
+  });
+});
+
+describe('commandSegments — the shell surface the delegation coordinator reads', () => {
+  it('splits compound commands into quote-stripped token lists', () => {
+    expect(commandSegments('orca repo list --json && orca worktree ps')).toEqual([
+      ['orca', 'repo', 'list', '--json'],
+      ['orca', 'worktree', 'ps'],
+    ]);
+  });
+
+  it('keeps quoted arguments as single tokens', () => {
+    expect(
+      commandSegments('orca orchestration task-create --spec "multi word brief" --json'),
+    ).toEqual([['orca', 'orchestration', 'task-create', '--spec', 'multi word brief', '--json']]);
   });
 });

@@ -6,6 +6,8 @@ import { createLogger, toBoltLogger } from './logger.ts';
 import { registerHandlers } from './app.ts';
 import { reportOrcaHealth } from './orca-health.ts';
 import { SessionStore } from './db.ts';
+import { DelegationStore } from './delegations.ts';
+import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
@@ -39,10 +41,11 @@ try {
   );
 
   const store = new SessionStore(config.dbPath);
+  const delegationStore = new DelegationStore(config.dbPath);
   // Boot rule (spec §3): rows survive the restart, every session comes back
   // dormant, and nothing below wakes one — the next human message does.
   logger.info(
-    { dbPath: config.dbPath, sessions: store.count() },
+    { dbPath: config.dbPath, sessions: store.count(), inFlight: delegationStore.inFlightCount() },
     'state database open — all sessions dormant',
   );
 
@@ -91,12 +94,34 @@ try {
 
   const allowList = new RepoAllowList({ hints, logger });
 
+  // The delegation coordinator (issue #19): worker cap, mailbox terminals,
+  // delegation cards and the `delegations` ledger — the daemon half of §5.
+  const delegations = new DelegationCoordinator({
+    store: delegationStore,
+    surface: {
+      post: postToThread,
+      update: async (ts, text) => {
+        await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+      },
+      react: async (ts, name) => {
+        await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
+      },
+    },
+    channelId: config.slackChannelId,
+    workerCap: config.workerCap,
+    // Mailbox terminals live in the daemon's own checkout — the one worktree
+    // that always exists and never gets archived with a delegation.
+    mailboxWorktreePath: process.cwd(),
+    logger,
+  });
+
   const sessions = new SessionManager({
     store,
     spawn: createProcessFactory({
       cwd: process.cwd(),
       gates,
       allowList,
+      delegations,
       systemPromptAppend: routingInstructions(hints),
       logger,
     }),
@@ -118,6 +143,7 @@ try {
     warmTtlMs: config.warmTtlMs,
     liveSessionCap: config.liveSessionCap,
     autoCloseAfterMs: config.autoCloseAfterMs,
+    countDelegations: (threadTs) => delegationStore.countForThread(threadTs),
     logger,
   });
 
