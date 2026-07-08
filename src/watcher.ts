@@ -12,6 +12,7 @@ import {
   type CommandRunner,
 } from './orca.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
+import type { DelegationSurface } from './dispatch.ts';
 import type { Logger } from './logger.ts';
 
 /**
@@ -39,15 +40,10 @@ import type { Logger } from './logger.ts';
  * unread when the re-armed check asks for it.
  */
 
-/** What the watcher needs from Slack — posts, card edits, root reactions. */
-export interface WatcherSurface {
-  /** chat.postMessage into the thread; resolves with the message ts. */
-  post(threadTs: string, text: string): Promise<string>;
-  /** chat.update on an earlier card. */
-  update(ts: string, text: string): Promise<void>;
-  /** reactions.add on the root message (ts === threadTs). */
-  react(ts: string, name: string): Promise<void>;
-  /** reactions.remove — how the stale root reaction comes off (spec §8). */
+/** The coordinator's Slack surface plus removal — how a stale root
+ * reaction comes off when the state swaps (spec §8). */
+export interface WatcherSurface extends DelegationSurface {
+  /** reactions.remove on a message (the root: ts === threadTs). */
   unreact(ts: string, name: string): Promise<void>;
 }
 
@@ -108,7 +104,9 @@ export class GateWatcher {
   private readonly runCheck: CommandRunner;
   private readonly run: CommandRunner;
   private readonly now: () => Date;
-  private readonly armed = new Set<string>();
+  /** One live loop per thread, keyed by its own token so a crash-path
+   * cleanup can never clobber a successor loop armed in the meantime. */
+  private readonly loops = new Map<string, object>();
 
   constructor(options: GateWatcherOptions) {
     this.store = options.store;
@@ -126,17 +124,23 @@ export class GateWatcher {
 
   /** Starts the thread's watch loop; a no-op while one is already running. */
   arm(threadTs: string): void {
-    if (this.armed.has(threadTs)) return;
-    this.armed.add(threadTs);
+    if (this.loops.has(threadTs)) return;
+    const token = {};
+    this.loops.set(threadTs, token);
     void this.watch(threadTs)
       .catch((error: unknown) => {
         this.logger.error({ err: error, threadTs }, 'gate watcher loop crashed');
       })
-      .finally(() => this.armed.delete(threadTs));
+      .finally(() => {
+        // Clean exits already un-armed themselves, synchronously with their
+        // stop decision — this only mops up after a crash, and never a
+        // successor loop that armed while this callback sat in the queue.
+        if (this.loops.get(threadTs) === token) this.loops.delete(threadTs);
+      });
   }
 
   isArmed(threadTs: string): boolean {
-    return this.armed.has(threadTs);
+    return this.loops.has(threadTs);
   }
 
   /** Boot re-arm (spec §6): one watcher per thread the ledger shows in flight. */
@@ -152,6 +156,10 @@ export class GateWatcher {
     this.logger.info({ threadTs }, 'gate watcher armed');
     while (true) {
       if (this.store.listInFlightForThread(threadTs).length === 0) {
+        // Un-arm in the same synchronous block as the stop decision: a
+        // dispatch interleaving after this line finds the thread un-armed
+        // and starts a fresh loop instead of no-opping into a lost watcher.
+        this.loops.delete(threadTs);
         this.logger.info({ threadTs }, 'no in-flight delegations left — gate watcher stops');
         return;
       }
@@ -159,6 +167,7 @@ export class GateWatcher {
       if (mailbox === undefined) {
         // Unreachable on the normal path — a dispatch cannot happen without
         // the mailbox — but a hand-edited ledger must not spin this loop.
+        this.loops.delete(threadTs);
         this.logger.warn(
           { threadTs },
           'in-flight delegations but no mailbox terminal — gate watcher stops',
@@ -202,7 +211,15 @@ export class GateWatcher {
     if (!Array.isArray(messages)) {
       throw new Error('unexpected `orca orchestration check` response shape');
     }
-    return messages.flatMap(readMessage);
+    const readable = messages.flatMap(readMessage);
+    if (readable.length < messages.length) {
+      // The check marked them read, so this log line is their last trace.
+      this.logger.error(
+        { mailbox, dropped: messages.length - readable.length, raw: messages },
+        'unreadable bus messages dropped',
+      );
+    }
+    return readable;
   }
 
   // ── event handling ─────────────────────────────────────────────────────────
@@ -286,7 +303,7 @@ export class GateWatcher {
     message: OrchestrationMessage,
   ): Promise<void> {
     const row = this.findRow(threadTs, message);
-    await this.postSafe(
+    const posted = await this.postSafe(
       threadTs,
       crudeWorkerEventLine({
         kind,
@@ -299,7 +316,15 @@ export class GateWatcher {
       }),
     );
     await this.setRootReaction(threadTs, kind === 'escalation' ? 'rotating_light' : 'question');
-    this.wake(threadTs, row?.channelId ?? this.channelId, gateWakeText(kind, row, message));
+    const woken = this.wake(threadTs, row?.channelId ?? this.channelId, gateWakeText(kind, row, message));
+    if (!posted && woken === 'skipped') {
+      // The check already consumed the bus message: with Slack down and no
+      // session either, this error line is the payload's last home.
+      this.logger.error(
+        { threadTs, msgId: message.id, kind, subject: message.subject, body: message.body },
+        'gate reached neither the thread nor a session — recover it from this log',
+      );
+    }
   }
 
   /**
@@ -383,7 +408,10 @@ export class GateWatcher {
   /**
    * Spec §8 coarse state: a failure surfaces as ❌ immediately; a success
    * flips the root to ✅ only once the thread has no other in-flight work —
-   * with siblings still running, 👀 stays the honest state.
+   * with siblings still running, 👀 stays the honest state. The reaction is
+   * the CURRENT state, latest terminal event wins: a sibling success after
+   * a failure does replace the ❌ — the failure keeps its ❌ card and its
+   * summary message in the thread, which are the log; the root is not.
    */
   private async swapRootReaction(threadTs: string, failed: boolean): Promise<void> {
     if (!failed && this.store.listInFlightForThread(threadTs).length > 0) return;
@@ -408,11 +436,13 @@ export class GateWatcher {
     }
   }
 
-  private async postSafe(threadTs: string, text: string): Promise<void> {
+  private async postSafe(threadTs: string, text: string): Promise<boolean> {
     try {
       await this.surface.post(threadTs, text);
+      return true;
     } catch (error) {
       this.logger.warn({ err: error, threadTs }, 'watcher thread post failed');
+      return false;
     }
   }
 }
@@ -423,17 +453,21 @@ export class GateWatcher {
  * The worker_done wake: the worker's report plus what is left for the LLM to
  * do — only the summary; the daemon already did the mechanical part.
  */
+/** `repo#n (worktree)`, degrading to the task id — the wake texts' name for a row. */
+function delegationRef(row: DelegationRow): string {
+  const ref =
+    row.repo !== null && row.issueNumber !== null ? `${row.repo}#${row.issueNumber}` : row.taskId;
+  return row.worktreeName === null ? ref : `${ref} (\`${row.worktreeName}\`)`;
+}
+
 export function workerDoneWakeText(
   row: DelegationRow,
   message: { subject: string; body: string },
   failed: boolean,
 ): string {
-  const ref =
-    row.repo !== null && row.issueNumber !== null ? `${row.repo}#${row.issueNumber}` : row.taskId;
-  const name = row.worktreeName === null ? '' : ` (\`${row.worktreeName}\`)`;
   const report = message.body.trim() === '' ? message.subject : message.body;
   return [
-    `[orchestration event — not a human message] worker_done: the delegation ${ref}${name} ` +
+    `[orchestration event — not a human message] worker_done: the delegation ${delegationRef(row)} ` +
       (failed ? 'FAILED.' : 'completed.'),
     `Worker subject: ${message.subject}`,
     `Worker report:\n${report}`,
@@ -458,10 +492,7 @@ export function gateWakeText(
   row: DelegationRow | undefined,
   message: { id: string; subject: string; body: string },
 ): string {
-  const from =
-    row === undefined
-      ? 'a worker'
-      : `the delegation ${row.repo ?? '?'}#${row.issueNumber ?? '?'} (\`${row.worktreeName ?? row.taskId}\`)`;
+  const from = row === undefined ? 'a worker' : `the delegation ${delegationRef(row)}`;
   return [
     `[orchestration event — not a human message] A ${kind} arrived from ${from}.`,
     `Subject: ${message.subject}`,

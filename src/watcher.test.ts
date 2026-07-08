@@ -444,6 +444,42 @@ describe('arming and stopping', () => {
     expect(watcher.isArmed(THREAD)).toBe(true);
   });
 
+  it('re-arms for a dispatch landing right after a stop — un-arm is atomic with the stop', async () => {
+    const second = busMessage({ payload: JSON.stringify({ taskId: 'task_9999', dispatchId: 'ctx_d2' }) });
+    const { watcher, store, checkRunner } = makeWatcher({
+      checks: [checkOut(busMessage()), checkOut(second)],
+    });
+    seedDispatch(store);
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    expect(checkRunner.calls).toHaveLength(2);
+    expect(store.getByDispatchId('ctx_d2')?.status).toBe('completed');
+  });
+
+  it('keeps watching when a new dispatch lands while an event is being handled', async () => {
+    const { watcher, store, checkRunner, wakes } = makeWatcher({
+      checks: [checkOut(busMessage())],
+    });
+    seedDispatch(store);
+    // The wake fires mid-handling — a session turn dispatching again right
+    // then must find the loop still alive for its next window.
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(wakes).toHaveLength(1);
+    });
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
+    watcher.arm(THREAD); // what onDispatched does — must not double-loop
+    await vi.waitFor(() => {
+      expect(checkRunner.calls).toHaveLength(2);
+    });
+    expect(watcher.isArmed(THREAD)).toBe(true);
+  });
+
   it('stops when the mailbox is missing instead of spinning', async () => {
     const store = new DelegationStore(':memory:');
     const checkRunner = makeCheckRunner([]);
