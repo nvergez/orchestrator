@@ -19,6 +19,12 @@ export interface Config {
   warmTtlMs: number;
   /** Per-session 💸 warning thresholds, ascending USD (spec §7: 5 then 10). */
   costWarnThresholdsUsd: number[];
+  /** Global cap on live sessions — dormant ones don't count (spec §3: 5). */
+  liveSessionCap: number;
+  /** Dormancy span after which the sweep auto-closes a session (spec §3: 7 days). */
+  autoCloseAfterMs: number;
+  /** How often the dormancy sweep runs. */
+  sweepIntervalMs: number;
 }
 
 export class ConfigError extends Error {}
@@ -28,6 +34,14 @@ const PINO_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent
 const DEFAULT_WARM_TTL_MINUTES = 30;
 
 const DEFAULT_COST_WARN_THRESHOLDS_USD = [5, 10];
+
+const DEFAULT_LIVE_SESSION_CAP = 5;
+
+const DEFAULT_AUTO_CLOSE_DAYS = 7;
+
+const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
+
+export const DAY_MS = 24 * 60 * 60_000;
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const problems: string[] = [];
@@ -45,10 +59,36 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     return value;
   };
 
-  const warmTtlMinutes = Number(env.SESSION_WARM_TTL_MINUTES ?? DEFAULT_WARM_TTL_MINUTES);
-  if (!Number.isFinite(warmTtlMinutes) || warmTtlMinutes <= 0) {
-    problems.push('SESSION_WARM_TTL_MINUTES must be a positive number of minutes');
+  const positiveNumber = (key: string, fallback: number, unit: string): number => {
+    const value = Number(env[key] ?? fallback);
+    if (!Number.isFinite(value) || value <= 0) {
+      problems.push(`${key} must be a positive number of ${unit}`);
+    }
+    return value;
+  };
+
+  const warmTtlMinutes = positiveNumber(
+    'SESSION_WARM_TTL_MINUTES',
+    DEFAULT_WARM_TTL_MINUTES,
+    'minutes',
+  );
+
+  const liveSessionCap = Number(env.SESSION_LIVE_CAP ?? DEFAULT_LIVE_SESSION_CAP);
+  if (!Number.isInteger(liveSessionCap) || liveSessionCap <= 0) {
+    problems.push('SESSION_LIVE_CAP must be a positive integer');
   }
+
+  const autoCloseDays = positiveNumber(
+    'SESSION_AUTO_CLOSE_DAYS',
+    DEFAULT_AUTO_CLOSE_DAYS,
+    'days',
+  );
+
+  const sweepIntervalMinutes = positiveNumber(
+    'SESSION_SWEEP_INTERVAL_MINUTES',
+    DEFAULT_SWEEP_INTERVAL_MINUTES,
+    'minutes',
+  );
 
   let costWarnThresholdsUsd = [...DEFAULT_COST_WARN_THRESHOLDS_USD];
   if (env.COST_WARN_THRESHOLDS_USD !== undefined) {
@@ -75,6 +115,9 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
     warmTtlMs: warmTtlMinutes * 60_000,
     costWarnThresholdsUsd,
+    liveSessionCap,
+    autoCloseAfterMs: autoCloseDays * DAY_MS,
+    sweepIntervalMs: sweepIntervalMinutes * 60_000,
   };
   if (!PINO_LEVELS.includes(config.logLevel)) {
     problems.push(`LOG_LEVEL must be one of ${PINO_LEVELS.join(', ')}`);

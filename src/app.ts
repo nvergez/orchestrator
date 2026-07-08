@@ -3,12 +3,26 @@ import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
 import { refusalLine } from './messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from './logger.ts';
+import type { CloseResult, ReplyResult } from './sessions.ts';
 
 /** The slice of SessionManager the event handlers drive. */
 export interface SessionGateway {
   open(threadTs: string, channelId: string, rootUser: string, text: string): void;
-  reply(threadTs: string, channelId: string, text: string): boolean;
+  reply(threadTs: string, channelId: string, text: string): ReplyResult;
+  close(threadTs: string, channelId: string): CloseResult;
 }
+
+const REPLY_LOG_LINES: Record<ReplyResult, string> = {
+  turn: 'thread reply — resuming session',
+  closed: 'reply in closed thread — fixed line posted',
+  unregistered: 'reply in unregistered thread ignored',
+};
+
+const CLOSE_LOG_LINES: Record<CloseResult, string> = {
+  closing: 'close command — closing session',
+  closed: 'close in already-closed thread — fixed line posted',
+  unregistered: 'close in unregistered thread ignored',
+};
 
 /** Routes every subscribed event (app_mention, message.channels) through the filter. */
 export function registerHandlers(
@@ -61,11 +75,32 @@ export function registerHandlers(
           logger.info({ threadTs: decision.threadTs }, 'thread reply resolved a pending 🚦 gate');
           return;
         }
-        const handled = sessions.reply(decision.threadTs, guard.channelId, decision.text);
-        logger.debug(
-          { threadTs: decision.threadTs, handled },
-          handled ? 'thread reply — resuming session' : 'reply in unregistered thread ignored',
-        );
+        const result = sessions.reply(decision.threadTs, guard.channelId, decision.text);
+        // Fixed-line posts are user-visible events (info); the rest is
+        // ambient routing (debug).
+        if (result === 'closed') {
+          logger.info({ threadTs: decision.threadTs, result }, REPLY_LOG_LINES[result]);
+        } else {
+          logger.debug({ threadTs: decision.threadTs, result }, REPLY_LOG_LINES[result]);
+        }
+        return;
+      }
+      case 'close': {
+        // "@orchestrator close" while a 🚦 gate is pending denies the gate
+        // first (the word travels back verbatim), so the suspended turn can
+        // wrap up before the queued close runs — never a mid-turn kill.
+        if (
+          incoming.user !== undefined &&
+          gates.tryResolve(decision.threadTs, incoming.user, 'close')
+        ) {
+          logger.info({ threadTs: decision.threadTs }, 'close command denied a pending 🚦 gate');
+        }
+        const result = sessions.close(decision.threadTs, guard.channelId);
+        if (result === 'unregistered') {
+          logger.debug({ threadTs: decision.threadTs, result }, CLOSE_LOG_LINES[result]);
+        } else {
+          logger.info({ threadTs: decision.threadTs, result }, CLOSE_LOG_LINES[result]);
+        }
         return;
       }
     }

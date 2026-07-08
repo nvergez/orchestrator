@@ -116,6 +116,8 @@ try {
     },
     costThresholdsUsd: config.costWarnThresholdsUsd,
     warmTtlMs: config.warmTtlMs,
+    liveSessionCap: config.liveSessionCap,
+    autoCloseAfterMs: config.autoCloseAfterMs,
     logger,
   });
 
@@ -125,6 +127,16 @@ try {
     { botUserId: guard.botUserId, channelId: guard.channelId },
     'connected to Slack over Socket Mode',
   );
+
+  // Dormancy sweep (spec §3: auto-close after 7 days dormant). One pass at
+  // boot catches sessions that crossed the span while the daemon was down.
+  const sweep = (): void => {
+    sessions.sweepDormant().catch((error: unknown) => {
+      logger.error({ err: error }, 'dormancy sweep failed');
+    });
+  };
+  sweep();
+  setInterval(sweep, config.sweepIntervalMs).unref();
 } catch (error) {
   logger.fatal({ err: error }, 'boot failed');
   process.exit(1);
