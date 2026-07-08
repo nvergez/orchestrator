@@ -342,14 +342,14 @@ describe('worker_done — failure', () => {
 });
 
 describe('decision_gate / escalation — the relay up (issue #21)', () => {
+  // The real `ask` payload names NO task or dispatch id — the asking
+  // terminal (from_handle) is the gate's only identity.
   const gateMessage = (over: Partial<Record<string, unknown>> = {}) =>
     busMessage({
       type: 'decision_gate',
       subject: 'Question',
       body: 'Which lint config is authoritative for CI?',
       payload: JSON.stringify({
-        taskId: 'task_3f81',
-        dispatchId: 'ctx_d1',
         question: 'Which lint config is authoritative for CI?',
         options: ['root', 'app/', 'merge both'],
       }),

@@ -267,3 +267,20 @@ describe('DelegationStore — pending_gates registry (issue #21)', () => {
     expect(store.getGate('msg_6a8c14d55c7d')?.options).toEqual([]);
   });
 });
+
+describe('DelegationStore — the asking-handle fallback (issue #21)', () => {
+  it('finds the thread’s newest in-flight row by worker handle, never a closed one', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_old', workerHandle: 'term_w' }));
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_new', workerHandle: 'term_w' }));
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_other', workerHandle: 'term_w', threadTs: '1751970099.000900' }),
+    );
+
+    expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_new');
+    expect(store.inFlightByWorkerHandle(THREAD, 'term_unknown')).toBeUndefined();
+
+    store.closeDelegation('ctx_new', 'completed');
+    expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_old');
+  });
+});

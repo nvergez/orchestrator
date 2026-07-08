@@ -398,9 +398,12 @@ export class GateWatcher {
 
   /**
    * The ledger row behind an event: the payload's dispatch id (authoritative
-   * — the preamble makes workers echo it) with the task id as fallback,
-   * scoped to the thread. A row living in another thread is trusted over the
-   * arrival mailbox — the card to edit lives where the row says.
+   * — the preamble makes workers echo it on worker_done) with the task id as
+   * a fallback, then the sending terminal — a worker's `ask` carries neither
+   * id, so the asking handle is a decision_gate's usual identity (issue
+   * #21). Fallbacks are scoped to the thread. A row living in another thread
+   * is trusted over the arrival mailbox — the card to edit lives where the
+   * row says.
    */
   private findRow(threadTs: string, message: OrchestrationMessage): DelegationRow | undefined {
     const byDispatch =
@@ -416,8 +419,16 @@ export class GateWatcher {
       }
       return byDispatch;
     }
-    if (message.payload.taskId === undefined) return undefined;
-    return this.store.inFlightByTaskId(threadTs, message.payload.taskId);
+    if (message.payload.taskId !== undefined) {
+      return this.store.inFlightByTaskId(threadTs, message.payload.taskId);
+    }
+    // The handle fallback only covers id-LESS payloads (an `ask`): a message
+    // that names ids pointing nowhere is a stale straggler — matching it by
+    // handle would let a failed retry's worker_done close the live dispatch.
+    if (message.payload.dispatchId !== undefined || message.fromHandle === undefined) {
+      return undefined;
+    }
+    return this.store.inFlightByWorkerHandle(threadTs, message.fromHandle);
   }
 
   // ── the ✅/❌ card ──────────────────────────────────────────────────────────

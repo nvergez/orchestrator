@@ -192,6 +192,23 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
+  /**
+   * Fallback association for a `decision_gate` (issue #21): a worker's `ask`
+   * carries no task or dispatch id in its payload — the asking terminal
+   * (`from_handle`) is the only identity it has. Same thread scoping as the
+   * task-id fallback, newest first.
+   */
+  inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched'
+         ORDER BY dispatched_at DESC LIMIT 1`,
+      )
+      .get(threadTs, workerHandle) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
   listInFlightForThread(threadTs: string): DelegationRow[] {
     const rows = this.db
