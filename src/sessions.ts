@@ -402,6 +402,14 @@ export class SessionManager {
   }
 
   private async runOneTurn(state: ThreadState, text: string): Promise<void> {
+    // A turn must be observable from start to finish (issue #39): a warm turn
+    // used to emit nothing until completion, making "running" and "never
+    // started" indistinguishable in the logs.
+    const turnStartedAt = Date.now();
+    this.logger.info(
+      { threadTs: state.threadTs, mode: state.proc === null ? 'cold' : 'warm' },
+      'turn started',
+    );
     if (state.proc === null) {
       await this.acquireSlot(state);
       const row = this.store.get(state.threadTs, state.channelId);
@@ -435,6 +443,15 @@ export class SessionManager {
     if (outcome.status === 'success') {
       const beforeUsd = this.store.get(state.threadTs, state.channelId)?.costUsdTotal ?? 0;
       this.store.recordTurn(state.threadTs, state.channelId, outcome.costUsd);
+      this.logger.info(
+        {
+          threadTs: state.threadTs,
+          status: outcome.status,
+          durationMs: Date.now() - turnStartedAt,
+          costUsd: outcome.costUsd,
+        },
+        'turn finished',
+      );
       await voice.finalize(outcome.resultText);
       await this.warnOnCostThresholds(state, beforeUsd);
       return;
@@ -446,7 +463,10 @@ export class SessionManager {
       outcome.status === 'error'
         ? `⚠️ Turn failed (${outcome.errors.join('; ')}) — reply to retry.`
         : '⚠️ The session process ended unexpectedly — reply to resume.';
-    this.logger.warn({ threadTs: state.threadTs, outcome }, 'turn did not complete');
+    this.logger.warn(
+      { threadTs: state.threadTs, outcome, durationMs: Date.now() - turnStartedAt },
+      'turn did not complete',
+    );
     // A failed turn is still human activity: reset the dormancy clock so the
     // sweep can't auto-close a thread whose last messages all errored.
     this.store.touch(state.threadTs, state.channelId);
