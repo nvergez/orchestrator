@@ -776,3 +776,65 @@ describe('SessionManager auto-close sweep (spec §3)', () => {
     );
   });
 });
+
+describe('SessionManager orchestration wakes (spec §6, issue #20)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('wakes an open thread with a turn through the same pipe as a human message', async () => {
+    const { manager, spawns } = makeHarness(chattyScript('sess-1'));
+    manager.open(THREAD, CHANNEL, USER, 'delegate this');
+    await flush();
+
+    const result = manager.wake(THREAD, CHANNEL, '[orchestration event] worker_done …');
+    await flush();
+
+    expect(result).toBe('turn');
+    expect(spawns).toHaveLength(1); // warm process reused — same pipe, next turn
+  });
+
+  it('wakes a dormant thread by cold-resuming its persisted session', async () => {
+    const { manager, store, spawns } = makeHarness(chattyScript('sess-1'));
+    manager.open(THREAD, CHANNEL, USER, 'delegate this');
+    await flush();
+    await vi.advanceTimersByTimeAsync(TTL + 1); // warmth TTL — session dozes off
+
+    const result = manager.wake(THREAD, CHANNEL, '[orchestration event] worker_done …');
+    await flush();
+
+    expect(result).toBe('turn');
+    expect(store.get(THREAD, CHANNEL)?.turnCount).toBe(2);
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.resumeSessionId).toBe('sess-1');
+  });
+
+  it('skips a closed thread silently — no turn, no fixed line', async () => {
+    const { manager, spawns, notices } = makeHarness(chattyScript('sess-1'));
+    manager.open(THREAD, CHANNEL, USER, 'delegate this');
+    await flush();
+    manager.close(THREAD, CHANNEL);
+    await flush();
+    const before = notices.length;
+
+    const result = manager.wake(THREAD, CHANNEL, '[orchestration event] worker_done …');
+    await flush();
+
+    expect(result).toBe('skipped');
+    expect(spawns).toHaveLength(1);
+    expect(notices).toHaveLength(before);
+  });
+
+  it('skips an unregistered thread — never a ghost session', async () => {
+    const { manager, spawns } = makeHarness(chattyScript('sess-1'));
+
+    const result = manager.wake(THREAD, CHANNEL, '[orchestration event] worker_done …');
+    await flush();
+
+    expect(result).toBe('skipped');
+    expect(spawns).toHaveLength(0);
+  });
+});

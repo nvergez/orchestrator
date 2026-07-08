@@ -155,6 +155,21 @@ export class SessionManager {
   }
 
   /**
+   * Orchestration-event wake (spec §6): the event enters the SAME pipe as a
+   * human message — same FIFO, same turn, same voice — so wakes stay
+   * uniform. Unlike `reply` it is silent when the thread is closed or
+   * unregistered: a worker completing under a closed thread is the daemon's
+   * to surface (the card and reaction are already updated), and the fixed
+   * closed-thread line would only confuse.
+   */
+  wake(threadTs: string, channelId: string, text: string): 'turn' | 'skipped' {
+    const row = this.store.get(threadTs, channelId);
+    if (row === undefined || row.status === 'closed') return 'skipped';
+    this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    return 'turn';
+  }
+
+  /**
    * `@orchestrator close` (spec §3): queued FIFO like any message, so an
    * in-flight turn — including one suspended on a 🚦 gate — always settles
    * before the session is finalized; a session is never killed mid-turn.

@@ -102,6 +102,7 @@ const makeCoordinator = (
     store?: DelegationStore;
     surface?: FakeSurface;
     script?: Record<string, string | Error>;
+    onDispatched?: (threadTs: string) => void;
   } = {},
 ) => {
   const store = options.store ?? new DelegationStore(':memory:');
@@ -113,6 +114,7 @@ const makeCoordinator = (
     channelId: CHANNEL,
     workerCap: options.workerCap ?? 3,
     mailboxWorktreePath: DAEMON_WT,
+    ...(options.onDispatched !== undefined && { onDispatched: options.onDispatched }),
     logger: createLogger('silent'),
     run: runner.run,
     now: () => new Date(2026, 6, 8, 14, 4),
@@ -514,6 +516,19 @@ describe('observe — the card, the 👀 and the ledger', () => {
         closedAt: null,
       },
     ]);
+  });
+
+  it('fires onDispatched once the row is ledgered — the gate watcher’s arming seam (#20)', async () => {
+    const armed: string[] = [];
+    const { coordinator, store } = makeCoordinator({
+      onDispatched: (threadTs) => armed.push(threadTs),
+    });
+
+    await runSequence(coordinator);
+
+    expect(armed).toEqual([THREAD]);
+    // The row is already in flight when the callback fires.
+    expect(store.listInFlightForThread(THREAD)).toHaveLength(1);
   });
 
   it('degrades to plain repo#n when the repo has no GitHub remote', async () => {

@@ -107,6 +107,66 @@ describe('DelegationStore — delegations ledger', () => {
   });
 });
 
+describe('DelegationStore — closing and the in-flight views (issue #20)', () => {
+  it('closes an in-flight row exactly once — the duplicate reports false', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+
+    expect(store.closeDelegation('ctx_8b685db09a47', 'completed')).toBe(true);
+    expect(store.closeDelegation('ctx_8b685db09a47', 'failed')).toBe(false);
+
+    const row = store.getByDispatchId('ctx_8b685db09a47');
+    expect(row?.status).toBe('completed');
+    expect(row?.closedAt).not.toBeNull();
+    expect(store.inFlightCount()).toBe(0);
+  });
+
+  it('finds a row by dispatch id, or by task id among the thread’s in-flight', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_other_thread', threadTs: '1751970099.000900' }),
+    );
+
+    expect(store.getByDispatchId('ctx_8b685db09a47')?.threadTs).toBe(THREAD);
+    expect(store.getByDispatchId('ctx_nope')).toBeUndefined();
+    // Task-id fallback is thread-scoped: the other thread's row never matches.
+    expect(store.inFlightByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe(
+      'ctx_8b685db09a47',
+    );
+    expect(store.inFlightByTaskId('1751970098.000000', 'task_13c700f151b3')).toBeUndefined();
+  });
+
+  it('the task-id fallback skips closed rows and prefers the newest', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'failed');
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_retry' }));
+
+    expect(store.inFlightByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_retry');
+  });
+
+  it('lists a thread’s in-flight rows and the threads needing a watcher', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_2' }));
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_3', threadTs: '1751970099.000900' }));
+    store.closeDelegation('ctx_2', 'completed');
+
+    expect(store.listInFlightForThread(THREAD).map((row) => row.dispatchId)).toEqual([
+      'ctx_8b685db09a47',
+    ]);
+    expect(store.threadsWithInFlight()).toEqual([
+      { threadTs: THREAD, channelId: CHANNEL },
+      { threadTs: '1751970099.000900', channelId: CHANNEL },
+    ]);
+
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+    store.closeDelegation('ctx_3', 'failed');
+    expect(store.threadsWithInFlight()).toEqual([]);
+  });
+});
+
 describe('DelegationStore — mailboxes', () => {
   it('remembers a thread mailbox handle across lookups', () => {
     const store = openStore();

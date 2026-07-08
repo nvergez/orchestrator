@@ -18,8 +18,13 @@ const ORCA_CLI_TIMEOUT_MS = 10_000;
 
 const execFileAsync = promisify(execFile);
 
-export const execFileRunner: CommandRunner = (command, args) =>
-  execFileAsync(command, args, { timeout: ORCA_CLI_TIMEOUT_MS });
+/** A runner with its own deadline — the gate watcher's blocking `check
+ * --wait` child needs its window plus grace, not the default 10s. */
+export function makeExecFileRunner(timeoutMs: number): CommandRunner {
+  return (command, args) => execFileAsync(command, args, { timeout: timeoutMs });
+}
+
+export const execFileRunner: CommandRunner = makeExecFileRunner(ORCA_CLI_TIMEOUT_MS);
 
 export interface RegistryRepo {
   id: string;

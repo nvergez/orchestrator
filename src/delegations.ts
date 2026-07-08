@@ -114,14 +114,65 @@ export class DelegationStore {
   }
 
   /**
-   * Closes the ledger row when the delegation leaves the in-flight set —
-   * `worker_done` lands in slice #20, which pairs this with the
-   * coordinator's `onDelegationClosed()` so the freed slot starts a wave.
+   * Closes the ledger row when the delegation leaves the in-flight set (a
+   * `worker_done`, issue #20). Only an in-flight row closes — the boolean
+   * says whether this call won, so a duplicated worker_done can neither
+   * double-close nor release a second worker slot.
    */
-  closeDelegation(dispatchId: string, status: 'completed' | 'failed'): void {
-    this.db
-      .prepare('UPDATE delegations SET status = ?, closed_at = ? WHERE dispatch_id = ?')
+  closeDelegation(dispatchId: string, status: 'completed' | 'failed'): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE delegations SET status = ?, closed_at = ?
+         WHERE dispatch_id = ? AND status = 'dispatched'`,
+      )
       .run(status, this.now(), dispatchId);
+    return Number(changes) > 0;
+  }
+
+  getByDispatchId(dispatchId: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM delegations WHERE dispatch_id = ?')
+      .get(dispatchId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
+  /**
+   * Fallback association for a worker_done whose payload lost the dispatch
+   * id: the thread's newest in-flight row for that task. Scoped to the
+   * thread — the mailbox the event arrived on — so the runtime-global bus
+   * can never close another thread's delegation.
+   */
+  inFlightByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND task_id = ? AND status = 'dispatched'
+         ORDER BY dispatched_at DESC LIMIT 1`,
+      )
+      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
+  /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
+  listInFlightForThread(threadTs: string): DelegationRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND status = 'dispatched' ORDER BY dispatched_at`,
+      )
+      .all(threadTs) as Array<Record<string, unknown>>;
+    return rows.map(toDelegationRow);
+  }
+
+  /** Every thread with in-flight work — the boot re-arm reads this (#20). */
+  threadsWithInFlight(): Array<{ threadTs: string; channelId: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT thread_ts, channel_id FROM delegations
+         WHERE status = 'dispatched' ORDER BY thread_ts`,
+      )
+      .all() as Array<{ thread_ts: string; channel_id: string }>;
+    return rows.map((row) => ({ threadTs: row.thread_ts, channelId: row.channel_id }));
   }
 
   /** Delegations still in flight — what the worker cap counts at boot. */

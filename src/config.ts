@@ -23,6 +23,8 @@ export interface Config {
   liveSessionCap: number;
   /** Global cap on concurrent Orca workers (spec §5) — fan-out waves beyond it. */
   workerCap: number;
+  /** One gate-watcher `check --wait` window before it rolls (spec §6, #20). */
+  watchWindowMs: number;
   /** Dormancy span after which the sweep auto-closes a session (spec §3: 7 days). */
   autoCloseAfterMs: number;
   /** How often the dormancy sweep runs. */
@@ -42,6 +44,8 @@ const DEFAULT_LIVE_SESSION_CAP = 5;
 const DEFAULT_WORKER_CAP = 3;
 
 const DEFAULT_AUTO_CLOSE_DAYS = 7;
+
+const DEFAULT_WATCH_WINDOW_MINUTES = 15;
 
 const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
 
@@ -93,6 +97,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     'days',
   );
 
+  const watchWindowMinutes = positiveNumber(
+    'WATCH_WINDOW_MINUTES',
+    DEFAULT_WATCH_WINDOW_MINUTES,
+    'minutes',
+  );
+
   const sweepIntervalMinutes = positiveNumber(
     'SESSION_SWEEP_INTERVAL_MINUTES',
     DEFAULT_SWEEP_INTERVAL_MINUTES,
@@ -126,6 +136,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     costWarnThresholdsUsd,
     liveSessionCap,
     workerCap,
+    watchWindowMs: watchWindowMinutes * 60_000,
     autoCloseAfterMs: autoCloseDays * DAY_MS,
     sweepIntervalMs: sweepIntervalMinutes * 60_000,
   };

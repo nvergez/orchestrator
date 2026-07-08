@@ -2,15 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   CLOSED_THREAD_LINE,
   closingSummary,
+  completedCard,
   costWarningLine,
+  crudeWorkerEventLine,
   delegationCard,
   delegationGateLine,
+  extractPullRequestLinks,
+  formatDuration,
   gateLine,
   milestoneLine,
   orcaUnavailableLine,
   queuedLine,
   refusalLine,
   workerCapLine,
+  workerDoneFallbackLine,
   zeroMatchLine,
 } from './messages.ts';
 
@@ -187,5 +192,120 @@ describe('orcaUnavailableLine', () => {
     expect(orcaUnavailableLine('nothing was dispatched.')).toBe(
       '⚠️ Orca runtime unavailable — nothing was dispatched.',
     );
+  });
+});
+
+describe('completedCard — the ✅/❌ final state (issue #20)', () => {
+  const base = {
+    repo: 'forwardly',
+    issueNumber: 84,
+    title: 'CSV export of send metrics',
+    worktreePath: '/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export',
+    durationMs: 27 * 60_000,
+    issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+    prLinks: [{ url: 'https://github.com/lemlist/forwardly/pull/87', label: 'forwardly#87' }],
+  };
+
+  it('renders the mock’s delivered card: header, PR, issue, worktree', () => {
+    expect(completedCard(base)).toBe(
+      [
+        '✅ *forwardly#84 — CSV export of send metrics — delivered in 27 min*',
+        '• PR: <https://github.com/lemlist/forwardly/pull/87|forwardly#87>',
+        '• issue: <https://github.com/lemlist/forwardly/issues/84|forwardly#84>',
+        '• worktree: `/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export`',
+      ].join('\n'),
+    );
+  });
+
+  it('renders a failure with the reason first, verbatim', () => {
+    const card = completedCard({ ...base, failureReason: 'Failed: e2e tests break on main' });
+    expect(card).toContain('❌ *forwardly#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card.split('\n')[1]).toBe('• reason: Failed: e2e tests break on main');
+  });
+
+  it('degrades gracefully: no PR, no issue URL, no worktree path', () => {
+    const card = completedCard({
+      ...base,
+      issueUrl: undefined,
+      prLinks: [],
+      worktreePath: null,
+    });
+    expect(card).toBe(
+      [
+        '✅ *forwardly#84 — CSV export of send metrics — delivered in 27 min*',
+        '• issue: forwardly#84',
+      ].join('\n'),
+    );
+  });
+});
+
+describe('workerDoneFallbackLine', () => {
+  it('delivers and fails with the subject and the card pointer', () => {
+    expect(workerDoneFallbackLine('CSV export shipped', false)).toBe(
+      '✅ Delivered — CSV export shipped. Details in the card ⤴',
+    );
+    expect(workerDoneFallbackLine('Failed: broke', true)).toBe(
+      '❌ Failed — Failed: broke. Details in the card ⤴',
+    );
+  });
+});
+
+describe('crudeWorkerEventLine — pre-#21 gate surfacing', () => {
+  it('quotes the payload verbatim and names the reply command', () => {
+    const line = crudeWorkerEventLine({
+      kind: 'decision_gate',
+      worktreeName: 'orca-53-lint-ci',
+      repo: 'orca',
+      issueNumber: 53,
+      subject: 'Which lint config?',
+      body: 'Two configs coexist.\n1. root\n2. app/',
+      msgId: 'msg_1',
+    });
+    expect(line).toContain('❓ *`orca-53-lint-ci`* (orca#53) asks');
+    expect(line).toContain('> Which lint config?');
+    expect(line).toContain('> Two configs coexist.');
+    expect(line).toContain('> 2. app/');
+    expect(line).toContain('`orca orchestration reply --id msg_1 --body "<answer>"`');
+  });
+
+  it('marks an escalation 🚨 and survives a row the ledger never matched', () => {
+    const line = crudeWorkerEventLine({
+      kind: 'escalation',
+      worktreeName: null,
+      repo: null,
+      issueNumber: null,
+      subject: 'Blocked: main is broken',
+      body: '',
+      msgId: 'msg_2',
+    });
+    expect(line).toContain('🚨 *a worker* escalates');
+    expect(line).toContain('> Blocked: main is broken');
+  });
+});
+
+describe('formatDuration', () => {
+  it('rounds to minutes, speaks hours past 60', () => {
+    expect(formatDuration(20_000)).toBe('under a minute');
+    expect(formatDuration(27 * 60_000)).toBe('27 min');
+    expect(formatDuration(60 * 60_000)).toBe('1 h');
+    expect(formatDuration(65 * 60_000)).toBe('1 h 05 min');
+    expect(formatDuration(125 * 60_000)).toBe('2 h 05 min');
+  });
+});
+
+describe('extractPullRequestLinks', () => {
+  it('finds GitHub PR urls, labels them repo#n, deduplicates in order', () => {
+    const text =
+      'Opened https://github.com/lemlist/forwardly/pull/87 (see ' +
+      'https://github.com/lemlist/forwardly/pull/87) and ' +
+      'https://github.com/nvergez/scratch/pull/3.';
+    expect(extractPullRequestLinks(text)).toEqual([
+      { url: 'https://github.com/lemlist/forwardly/pull/87', label: 'forwardly#87' },
+      { url: 'https://github.com/nvergez/scratch/pull/3', label: 'scratch#3' },
+    ]);
+  });
+
+  it('returns nothing when the report names no PR', () => {
+    expect(extractPullRequestLinks('all done, nothing to link')).toEqual([]);
   });
 });
