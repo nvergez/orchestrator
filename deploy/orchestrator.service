@@ -4,8 +4,10 @@
 [Unit]
 Description=Slack-driven orchestrator-dispatcher daemon
 Documentation=https://github.com/nvergez/orchestrator
-After=network-online.target
-Wants=network-online.target
+# No After=/Wants= ordering: network-online.target has no provider in the
+# user manager (it would be silently ignored), and spec §10 forbids ordering
+# against the Orca system unit. Restart=always + the tolerant boot
+# healthcheck cover anything not yet up when we start.
 
 [Service]
 Type=simple

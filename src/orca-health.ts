@@ -17,11 +17,11 @@ export interface HealthLogger {
 }
 
 /** A probe that hangs must not linger forever; generous, since nothing waits on it. */
-export const ORCA_PROBE_TIMEOUT_MS = 10_000;
+const ORCA_PROBE_TIMEOUT_MS = 10_000;
 
 const execFileAsync = promisify(execFile);
 
-export const execFileRunner: CommandRunner = (command, args) =>
+const execFileRunner: CommandRunner = (command, args) =>
   execFileAsync(command, args, { timeout: ORCA_PROBE_TIMEOUT_MS });
 
 export type HealthReport =
@@ -31,8 +31,12 @@ export type HealthReport =
 export async function probeOrca(run: CommandRunner): Promise<HealthReport> {
   try {
     const { stdout } = await run('orca', ['repo', 'list', '--json']);
-    const envelope = JSON.parse(stdout) as { result: { repos: unknown[] } };
-    return { status: 'reachable', repoCount: envelope.result.repos.length };
+    const envelope = JSON.parse(stdout) as { ok?: boolean; result?: { repos?: unknown } };
+    const repos = envelope.result?.repos;
+    if (envelope.ok !== true || !Array.isArray(repos)) {
+      return { status: 'unreachable', reason: 'unexpected `orca repo list` response shape' };
+    }
+    return { status: 'reachable', repoCount: repos.length };
   } catch (error) {
     return { status: 'unreachable', reason: describeFailure(error) };
   }
@@ -47,11 +51,16 @@ export async function reportOrcaHealth(
   logger: HealthLogger,
   run: CommandRunner = execFileRunner,
 ): Promise<void> {
-  const report = await probeOrca(run);
-  if (report.status === 'reachable') {
-    logger.info({ repoCount: report.repoCount }, 'boot healthcheck: Orca runtime reachable');
-  } else {
-    logger.warn({ reason: report.reason }, 'boot healthcheck: Orca runtime unavailable');
+  try {
+    const report = await probeOrca(run);
+    if (report.status === 'reachable') {
+      logger.info({ repoCount: report.repoCount }, 'boot healthcheck: Orca runtime reachable');
+    } else {
+      logger.warn({ reason: report.reason }, 'boot healthcheck: Orca runtime unavailable');
+    }
+  } catch {
+    // Even a throwing logger must not become an unhandled rejection — the
+    // healthcheck is strictly best-effort, and there is nothing left to log with.
   }
 }
 

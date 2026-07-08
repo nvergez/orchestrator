@@ -53,6 +53,24 @@ describe('probeOrca', () => {
 
     expect(report.status).toBe('unreachable');
   });
+
+  it('does not call an ok:false envelope reachable', async () => {
+    const report = await probeOrca(succeedWith(JSON.stringify({ ok: false, error: 'boom' })));
+
+    expect(report).toEqual({
+      status: 'unreachable',
+      reason: 'unexpected `orca repo list` response shape',
+    });
+  });
+
+  it('reports a clear reason when the envelope has no repo list', async () => {
+    const report = await probeOrca(succeedWith(JSON.stringify({ ok: true, result: {} })));
+
+    expect(report).toEqual({
+      status: 'unreachable',
+      reason: 'unexpected `orca repo list` response shape',
+    });
+  });
 });
 
 describe('reportOrcaHealth', () => {

@@ -16,8 +16,9 @@ comes back after a VPS reboot.
 cd /home/dev/projects/orchestrator
 npm ci
 
-# Secrets: .env lives next to the checkout root, git-ignored, owner-only.
-# Template: .env.example. The unit loads it via EnvironmentFile.
+# Secrets: .env lives at the checkout root, git-ignored, owner-only.
+# The unit loads it via EnvironmentFile.
+cp .env.example .env   # then fill in the real values (ticket #2)
 chmod 600 .env
 
 cp deploy/orchestrator.service ~/.config/systemd/user/orchestrator.service
