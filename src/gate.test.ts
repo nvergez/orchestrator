@@ -152,14 +152,14 @@ describe('GateKeeper.cancelThread', () => {
 });
 
 describe('isApproval', () => {
-  it.each(['go', 'Go', 'GO', 'go!', 'go ahead', 'yes', 'y', 'yep', 'ok', 'okay', 'sure', 'do it', 'proceed', 'approve', 'approved', 'ship it', 'lgtm', '👍', '✅'])(
+  it.each(['go', 'Go', 'GO', 'go!', 'go ahead', 'yes', 'y', 'yep', 'yeah', 'ok', 'okay', 'approve', 'approved', '👍', '✅'])(
     'approves %j',
     (text) => {
       expect(isApproval(text)).toBe(true);
     },
   );
 
-  it.each(['no', 'No', 'nope', 'stop', 'cancel', "don't", 'not yet', 'go later maybe', 'gopher', 'push to prod instead', ''])(
+  it.each(['no', 'No', 'nope', 'stop', 'cancel', "don't", 'not yet', 'go later maybe', 'gopher', 'push to prod instead', 'sure, but rebase first', ''])(
     'anything else denies, fail-closed: %j',
     (text) => {
       expect(isApproval(text)).toBe(false);

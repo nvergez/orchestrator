@@ -63,13 +63,16 @@ describe('classifyCommand — orca tiers', () => {
   it.each([
     'orca orchestration reply --id m1 --body "2"',
     'orca orchestration gate-resolve --id g1 --choice 1',
-    'orca terminal send --terminal h1 --text "1" --enter',
   ])('AUTO relay of a human reply: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
   });
 
   it('CONFIRM: orca worktree delete', () => {
     expect(tierOf('orca worktree delete forwardly-84-csv-export')).toBe('confirm');
+  });
+
+  it('CONFIRM: terminal send types into a worker terminal — spec §7 AUTO is list/wait only', () => {
+    expect(tierOf('orca terminal send --terminal h1 --text "1" --enter')).toBe('confirm');
   });
 
   it('CONFIRM: unknown orca subcommands fail toward the gate, not silence', () => {
@@ -319,6 +322,12 @@ describe('describeGate — what the 🚦 line shows', () => {
 
   it('leaves compound commands verbatim', () => {
     expect(describeGate('git fetch && git push')).toEqual({ command: 'git fetch && git push' });
+  });
+
+  it('never lifts a -C that only appears inside a quoted argument', () => {
+    expect(describeGate('git commit -m "x -C /a/b"')).toEqual({
+      command: 'git commit -m "x -C /a/b"',
+    });
   });
 
   it('collapses internal newlines so the gate stays one line', () => {

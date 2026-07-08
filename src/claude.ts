@@ -7,7 +7,7 @@ import type { Logger } from './logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
 import { buildCanUseTool, guardrailHooks } from './permissions.ts';
-import type { GateKeeper } from './gate.ts';
+import type { SessionGates } from './gate.ts';
 
 /**
  * The Claude Agent SDK adapter behind `OrchestratorProcess` (spec §1/§3):
@@ -56,14 +56,14 @@ class ClaudeProcess {
   private readonly logger: Logger;
   // One meter per process — see TurnCostMeter for the cumulative semantics.
   private readonly costMeter = new TurnCostMeter();
-  private readonly gates: GateKeeper;
+  private readonly gates: SessionGates;
   private readonly threadTs: string;
 
   constructor(opts: {
     resumeSessionId: string | null;
     threadTs: string;
     cwd: string;
-    gates: GateKeeper;
+    gates: SessionGates;
     logger: Logger;
   }) {
     this.logger = opts.logger;
@@ -110,8 +110,7 @@ class ClaudeProcess {
     while (true) {
       const { value: message, done } = await this.session.next();
       if (done === true || message === undefined) {
-        // A gate nobody can release anymore must not swallow the next reply.
-        this.gates.cancelThread(this.threadTs);
+        this.releaseGates();
         return { status: 'process_ended' };
       }
       if (message.type === 'system' && message.subtype === 'init') {
@@ -143,9 +142,7 @@ class ClaudeProcess {
         }
         // A failed turn's spend is not ledgered (spec §7 counts completed
         // turns) and the meter dies with the dropped process — accepted loss.
-        // An errored turn can strand a suspended gate (e.g. interrupt while
-        // one is pending); its reply must go back to being an ordinary turn.
-        this.gates.cancelThread(this.threadTs);
+        this.releaseGates();
         return {
           status: 'error',
           errors: message.errors.length > 0 ? message.errors : [message.subtype],
@@ -156,8 +153,17 @@ class ClaudeProcess {
     }
   }
 
-  async end(): Promise<void> {
+  /**
+   * A dead or dying process can never release a suspended gate, and a
+   * stranded gate would swallow the thread's next reply — deny whatever is
+   * still pending whenever this process stops being able to answer.
+   */
+  private releaseGates(): void {
     this.gates.cancelThread(this.threadTs);
+  }
+
+  async end(): Promise<void> {
+    this.releaseGates();
     this.input.end();
     const drained = (async () => {
       while (!(await this.session.next()).done) {
@@ -182,7 +188,7 @@ class ClaudeProcess {
 
 export function createProcessFactory(opts: {
   cwd: string;
-  gates: GateKeeper;
+  gates: SessionGates;
   logger: Logger;
 }): ProcessFactory {
   return ({ resumeSessionId, threadTs }) =>

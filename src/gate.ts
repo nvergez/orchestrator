@@ -27,8 +27,14 @@ export interface GateResolver {
   tryResolve(threadTs: string, userId: string, text: string): boolean;
 }
 
+/** The slice a session process holds: suspend on gates, release them at death. */
+export interface SessionGates extends GateRequester {
+  cancelThread(threadTs: string): void;
+}
+
 /**
- * Replies that count as approval, normalized. Deliberately a closed set:
+ * Replies that count as approval, normalized. The mock fixes "go"; the rest
+ * are its everyday equivalents, kept to a deliberately small closed set:
  * anything unrecognized denies (fail-closed) but travels back verbatim, so a
  * "wait, rebase first" both cancels the call and tells the session why.
  */
@@ -41,14 +47,8 @@ const APPROVALS = new Set([
   'yeah',
   'ok',
   'okay',
-  'sure',
-  'do it',
-  'proceed',
   'approve',
   'approved',
-  'allow',
-  'lgtm',
-  'ship it',
   '👍',
   '✅',
 ]);
@@ -69,7 +69,7 @@ export interface GateKeeperOptions {
   logger: Logger;
 }
 
-export class GateKeeper implements GateRequester, GateResolver {
+export class GateKeeper implements SessionGates, GateResolver {
   private readonly allowedUserId: string;
   private readonly post: (threadTs: string, text: string) => Promise<unknown>;
   private readonly logger: Logger;

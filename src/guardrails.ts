@@ -59,10 +59,14 @@ export function classifyCommand(command: string): Verdict {
 export function describeGate(command: string): GateDescription {
   const oneLine = command.trim().replace(/\s+/g, ' ');
   const parsed = parse(command);
-  if (parsed.segments.length === 1 && parsed.segments[0]?.[0] === 'git') {
+  const tokens = parsed.segments.length === 1 ? (parsed.segments[0] as string[]) : [];
+  // The parsed tokens are the ground truth for "-C is really the global
+  // flag" — a `-C` inside a quoted argument never appears as its own token.
+  const path = tokens[0] === 'git' && tokens[1] === '-C' ? tokens[2] : undefined;
+  if (path !== undefined) {
     const match = oneLine.match(/(^|\s)-C\s+([^\s'"]+)(?=\s|$)/);
-    if (match !== null && match[2] !== undefined) {
-      const parts = match[2].split('/').filter((part) => part !== '');
+    if (match !== null && match[2] === path) {
+      const parts = path.split('/').filter((part) => part !== '');
       if (parts.length > 0) {
         return {
           command: oneLine.replace(match[0], match[1] ?? '').replace(/\s+/g, ' ').trim(),
@@ -271,10 +275,11 @@ const ORCA_AUTO: Record<string, Set<string>> = {
   // Reads plus the full delegation sequence (issue #8: no double ceremony —
   // the routing gate of #10 already covers inferred delegations).
   worktree: new Set(['ps', 'create']),
-  // list/wait are reads; send only exists to relay a human's reply down to a
-  // worker stalled at a TUI prompt (spec §6) — and only the authorized user's
-  // messages ever reach a session in the first place.
-  terminal: new Set(['list', 'wait', 'send']),
+  terminal: new Set(['list', 'wait']),
+  // reply/gate-resolve are AUTO for relays carrying a human reply (spec §7).
+  // The "carrying a human reply" condition is not checkable from the command
+  // string alone; the #9 relay slice anchors it on the pending_gates
+  // registry once that exists. Until then the enumerated commands are AUTO.
   orchestration: new Set([
     'check',
     'task-list',
@@ -297,6 +302,12 @@ function classifyOrca(args: string[]): Verdict {
   }
   if (topic === 'worktree' && (action === 'delete' || action === 'remove' || action === 'rm')) {
     return confirm('worktree deletion');
+  }
+  if (topic === 'terminal' && action === 'send') {
+    // Spec §7's AUTO list is `terminal list/wait` only: send types arbitrary
+    // input into a worker terminal, so it gates until the #9 relay slice can
+    // anchor "carries a human reply" on the pending_gates registry.
+    return confirm('`orca terminal send` types into a worker terminal');
   }
   if (topic !== undefined && action !== undefined && ORCA_AUTO[topic]?.has(action) === true) {
     return auto('orca read/delegation/relay');
@@ -363,6 +374,22 @@ const GIT_READ_SUBCOMMANDS = new Set([
   'help',
 ]);
 
+/**
+ * Subcommands that are reads only in specific first-argument forms — bare
+ * `git stash` pushes, `git stash list` reads. `bareIsRead` says whether the
+ * argument-less form is one of the read forms.
+ */
+const GIT_READ_FORMS: Record<string, { forms: Set<string>; bareIsRead: boolean }> = {
+  remote: { forms: new Set(['show', 'get-url', '-v']), bareIsRead: true },
+  stash: { forms: new Set(['list', 'show']), bareIsRead: false },
+  worktree: { forms: new Set(['list']), bareIsRead: false },
+  config: {
+    forms: new Set(['--get', '--get-all', '--get-regexp', '--list', '-l']),
+    bareIsRead: false,
+  },
+  reflog: { forms: new Set(['show']), bareIsRead: true },
+};
+
 function classifyGit(args: string[]): Verdict {
   let i = 0;
   while (i < args.length && (args[i] as string).startsWith('-')) {
@@ -373,6 +400,13 @@ function classifyGit(args: string[]): Verdict {
 
   if (sub === undefined) return auto('bare git prints usage');
   if (GIT_READ_SUBCOMMANDS.has(sub)) return auto('git read');
+
+  const readForms = GIT_READ_FORMS[sub];
+  if (readForms !== undefined) {
+    const first = rest[0];
+    const isRead = first === undefined ? readForms.bareIsRead : readForms.forms.has(first);
+    return isRead ? auto('git read') : confirm(`\`git ${sub}\` mutation`);
+  }
 
   switch (sub) {
     case 'push':
@@ -385,26 +419,6 @@ function classifyGit(args: string[]): Verdict {
       return classifyRefListing(rest, 'branch');
     case 'tag':
       return classifyRefListing(rest, 'tag');
-    case 'remote':
-      if (rest.length === 0 || rest[0] === 'show' || rest[0] === 'get-url' || rest[0] === '-v') {
-        return auto('git read');
-      }
-      return confirm('`git remote` mutation');
-    case 'stash':
-      return rest[0] === 'list' || rest[0] === 'show'
-        ? auto('git read')
-        : confirm('`git stash` mutates the working tree');
-    case 'worktree':
-      return rest[0] === 'list' ? auto('git read') : confirm('`git worktree` mutation');
-    case 'config':
-      return rest[0] === '--get' || rest[0] === '--get-all' || rest[0] === '--get-regexp' ||
-        rest[0] === '--list' || rest[0] === '-l'
-        ? auto('git read')
-        : confirm('`git config` write');
-    case 'reflog':
-      return rest.length === 0 || rest[0] === 'show'
-        ? auto('git read')
-        : confirm('`git reflog` mutation');
     default:
       return confirm(`\`git ${sub}\` mutates state — gated`);
   }
