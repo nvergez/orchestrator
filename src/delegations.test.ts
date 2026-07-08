@@ -62,6 +62,18 @@ describe('DelegationStore — delegations ledger', () => {
     expect(store.inFlightCount()).toBe(2);
   });
 
+  it('close flips the status and stamps closed_at — the #20 seam', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    const row = store.listForThread(THREAD)[0];
+    expect(row?.status).toBe('completed');
+    expect(row?.closedAt).not.toBeNull();
+    expect(store.inFlightCount()).toBe(0);
+  });
+
   it('accepts a dispatch the daemon could not fully associate — nulls, not a crash', () => {
     const store = openStore();
 

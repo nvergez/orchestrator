@@ -34,6 +34,11 @@ export interface DelegationRow {
  * the worker-cap count survive restarts on. The mailboxes table remembers
  * each thread's coordinator terminal (`slack-<thread_ts>`, issue #9) so a
  * thread's dispatches all share one origin handle across daemon restarts.
+ *
+ * Unlike `sessions`, both tables key on `thread_ts` alone — deliberate: the
+ * daemon serves the single pinned channel (spec §2), and the coordinator
+ * side only ever sees a thread ts. `channel_id` is stored so the rows stay
+ * self-describing, not to disambiguate.
  */
 export class DelegationStore {
   private readonly db: DatabaseSync;
@@ -106,6 +111,17 @@ export class DelegationStore {
         row.title,
         this.now(),
       );
+  }
+
+  /**
+   * Closes the ledger row when the delegation leaves the in-flight set —
+   * `worker_done` lands in slice #20, which pairs this with the
+   * coordinator's `onDelegationClosed()` so the freed slot starts a wave.
+   */
+  closeDelegation(dispatchId: string, status: 'completed' | 'failed'): void {
+    this.db
+      .prepare('UPDATE delegations SET status = ?, closed_at = ? WHERE dispatch_id = ?')
+      .run(status, this.now(), dispatchId);
   }
 
   /** Delegations still in flight — what the worker cap counts at boot. */

@@ -1,6 +1,13 @@
 import { commandSegments } from './guardrails.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from './messages.ts';
-import { execFileRunner, listRegistryRepos, type CommandRunner } from './orca.ts';
+import {
+  createTerminal,
+  execFileRunner,
+  listLiveTerminalHandles,
+  listRegistryRepos,
+  parseOrcaEnvelope,
+  type CommandRunner,
+} from './orca.ts';
 import type { DelegationStore } from './delegations.ts';
 import type { Logger } from './logger.ts';
 
@@ -86,6 +93,8 @@ interface ThreadTracker {
   pending: Map<string, PendingDelegation>;
   /** Worker terminal handle → worktree id, learned from `terminal list`. */
   handles: Map<string, string>;
+  /** Handles whose TUI reached idle (`terminal wait --for tui-idle` succeeded). */
+  waited: Set<string>;
   /** Task id → title, learned from `task-create`. */
   taskTitles: Map<string, string>;
   /** Slots acquired in prepare but not yet claimed by an observed create. */
@@ -157,7 +166,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
     const name = flagValue(tokens, '--name');
     const issue = flagValue(tokens, '--issue');
-    if (name === undefined || issue === undefined || !name.includes(`-${issue}-`)) {
+    if (name === undefined || issue === undefined || issueFromName(name) !== Number(issue)) {
       return deny(
         'the worktree name must follow `<repo>-<issue#>-<slug>` with the same ' +
           'issue number as --issue (spec §5) — fix the --name and retry',
@@ -180,7 +189,11 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     return { action: 'proceed', command };
   }
 
-  /** Enforces --inject, then rewrites the dispatch to origin from the mailbox. */
+  /**
+   * Enforces the tail of the §5 order — the dispatch may only target a
+   * handle this thread has listed and awaited to TUI-idle — plus --inject,
+   * then rewrites the dispatch to origin from the mailbox.
+   */
   private async prepareDispatch(threadTs: string, tokens: string[]): Promise<PrepareVerdict> {
     if (hasFlag(tokens, '--from')) {
       return deny('never pass --from — the daemon supplies the thread mailbox terminal itself');
@@ -193,6 +206,27 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
     if (!hasFlag(tokens, '--json')) {
       return deny('`orca orchestration dispatch` must carry --json here — add it and retry');
+    }
+    if (tokens.some((token) => token.includes('$'))) {
+      return deny(
+        'shell variables cannot travel through the dispatch rewrite — ' +
+          'spell out the literal task id and terminal handle',
+      );
+    }
+    const tracker = this.tracker(threadTs);
+    const toHandle = flagValue(tokens, '--to');
+    if (toHandle === undefined || !tracker.handles.has(toHandle)) {
+      return deny(
+        'this thread has not listed that worker terminal — run ' +
+          '`orca terminal list --worktree id:<worktreeId> --json` first (spec §5 order)',
+      );
+    }
+    if (!tracker.waited.has(toHandle)) {
+      return deny(
+        'the worker TUI has not been awaited — run ' +
+          '`orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json` ' +
+          'first, so the injection lands on an idle prompt (spec §5 order)',
+      );
     }
     let mailbox: string;
     try {
@@ -223,41 +257,16 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    */
   private async ensureMailbox(threadTs: string): Promise<string> {
     const stored = this.store.getMailbox(threadTs);
-    if (stored !== undefined && (await this.liveTerminalHandles()).has(stored)) {
+    if (stored !== undefined && (await listLiveTerminalHandles(this.run)).has(stored)) {
       return stored;
     }
-    const { stdout } = await this.run('orca', [
-      'terminal',
-      'create',
-      '--worktree',
-      `path:${this.mailboxWorktreePath}`,
-      '--title',
-      `slack-${threadTs}`,
-      '--json',
-    ]);
-    const result = parseEnvelope(stdout);
-    const terminal = result?.terminal as { handle?: unknown } | undefined;
-    if (typeof terminal?.handle !== 'string') {
-      throw new Error('unexpected `orca terminal create` response shape');
-    }
-    this.store.setMailbox(threadTs, this.channelId, terminal.handle);
-    this.logger.info({ threadTs, handle: terminal.handle }, 'mailbox terminal created and persisted');
-    return terminal.handle;
-  }
-
-  private async liveTerminalHandles(): Promise<Set<string>> {
-    const { stdout } = await this.run('orca', ['terminal', 'list', '--json']);
-    const result = parseEnvelope(stdout);
-    const terminals = result?.terminals;
-    if (!Array.isArray(terminals)) {
-      throw new Error('unexpected `orca terminal list` response shape');
-    }
-    return new Set(
-      terminals.flatMap((t: unknown) => {
-        const handle = (t as { handle?: unknown }).handle;
-        return typeof handle === 'string' ? [handle] : [];
-      }),
-    );
+    const handle = await createTerminal(this.run, {
+      worktreePath: this.mailboxWorktreePath,
+      title: `slack-${threadTs}`,
+    });
+    this.store.setMailbox(threadTs, this.channelId, handle);
+    this.logger.info({ threadTs, handle }, 'mailbox terminal created and persisted');
+    return handle;
   }
 
   // ── observe: the PostToolUse seam ──────────────────────────────────────────
@@ -270,6 +279,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
           await this.observeCreate(threadTs, tokens, stdout);
         } else if (isOrca(tokens, 'terminal', 'list')) {
           this.observeTerminalList(threadTs, stdout);
+        } else if (isOrca(tokens, 'terminal', 'wait')) {
+          this.observeTerminalWait(threadTs, tokens, stdout);
         } else if (isOrca(tokens, 'orchestration', 'task-create')) {
           this.observeTaskCreate(threadTs, stdout);
         } else if (isOrca(tokens, 'orchestration', 'dispatch')) {
@@ -284,7 +295,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   /** Worktree created → claim the slot, post the card, 👀 on the root. */
   private async observeCreate(threadTs: string, tokens: string[], stdout: string): Promise<void> {
     const tracker = this.tracker(threadTs);
-    const worktree = parseEnvelope(stdout)?.worktree as
+    const worktree = parseOrcaEnvelope(stdout)?.worktree as
       | { id?: unknown; repoId?: unknown; path?: unknown; displayName?: unknown; linkedIssue?: unknown }
       | undefined;
     if (
@@ -303,8 +314,12 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
 
     const name = worktree.displayName;
+    // prepare enforced --issue, so the token fallback keeps repo#n honest
+    // even when the runtime omits linkedIssue from the envelope.
     const issueNumber =
-      typeof worktree.linkedIssue === 'number' ? worktree.linkedIssue : issueFromName(name);
+      typeof worktree.linkedIssue === 'number'
+        ? worktree.linkedIssue
+        : (issueFromName(name) ?? numberOrNull(flagValue(tokens, '--issue')));
     const { repo, issueUrl } = await this.repoIdentity(
       typeof worktree.repoId === 'string' ? worktree.repoId : undefined,
       name,
@@ -340,9 +355,16 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
   }
 
+  /** A successful tui-idle wait clears that handle for injection (spec §5). */
+  private observeTerminalWait(threadTs: string, tokens: string[], stdout: string): void {
+    if (flagValue(tokens, '--for') !== 'tui-idle' || parseOrcaEnvelope(stdout) === null) return;
+    const handle = flagValue(tokens, '--terminal');
+    if (handle !== undefined) this.tracker(threadTs).waited.add(handle);
+  }
+
   /** `terminal list` output teaches us which handle belongs to which worktree. */
   private observeTerminalList(threadTs: string, stdout: string): void {
-    const terminals = parseEnvelope(stdout)?.terminals;
+    const terminals = parseOrcaEnvelope(stdout)?.terminals;
     if (!Array.isArray(terminals)) return;
     const tracker = this.tracker(threadTs);
     for (const terminal of terminals) {
@@ -355,7 +377,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   /** `task-create` output carries the real title — the card upgrades to it. */
   private observeTaskCreate(threadTs: string, stdout: string): void {
-    const task = parseEnvelope(stdout)?.task as
+    const task = parseOrcaEnvelope(stdout)?.task as
       | { id?: unknown; task_title?: unknown; display_name?: unknown }
       | undefined;
     if (typeof task?.id !== 'string') return;
@@ -372,7 +394,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   /** Dispatch succeeded → milestone edit + the ledger row, all identifiers. */
   private async observeDispatch(threadTs: string, stdout: string): Promise<void> {
-    const dispatch = parseEnvelope(stdout)?.dispatch as
+    const dispatch = parseOrcaEnvelope(stdout)?.dispatch as
       | { id?: unknown; task_id?: unknown; assignee_handle?: unknown }
       | undefined;
     if (typeof dispatch?.id !== 'string' || typeof dispatch.task_id !== 'string') return;
@@ -465,7 +487,13 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   private tracker(threadTs: string): ThreadTracker {
     let tracker = this.threads.get(threadTs);
     if (tracker === undefined) {
-      tracker = { pending: new Map(), handles: new Map(), taskTitles: new Map(), looseSlots: 0 };
+      tracker = {
+        pending: new Map(),
+        handles: new Map(),
+        waited: new Set(),
+        taskTitles: new Map(),
+        looseSlots: 0,
+      };
       this.threads.set(threadTs, tracker);
     }
     return tracker;
@@ -594,10 +622,17 @@ class WorkerSlots {
 
   release(): void {
     if (this.used === 0) return;
-    const waiter = this.waiters.shift();
-    // A waiter takes over the freed slot directly — used stays constant.
-    if (waiter !== undefined) waiter.resolve();
-    else this.used -= 1;
+    this.used -= 1;
+    // Hand the freed slot to the next waiter only when capacity truly
+    // covers it — after a WORKER_CAP decrease, over-cap in-flight workers
+    // must drain below the new cap before any wave proceeds.
+    if (this.used < this.capacity) {
+      const waiter = this.waiters.shift();
+      if (waiter !== undefined) {
+        this.used += 1;
+        waiter.resolve();
+      }
+    }
   }
 }
 
@@ -633,19 +668,6 @@ function shellQuote(token: string): string {
   return `'${token.replaceAll("'", String.raw`'\''`)}'`;
 }
 
-/** The orca CLI `--json` envelope: `result` iff `ok` is true, else null. */
-function parseEnvelope(stdout: string): Record<string, unknown> | null {
-  try {
-    const envelope = JSON.parse(stdout.trim()) as { ok?: unknown; result?: unknown };
-    if (envelope.ok === true && typeof envelope.result === 'object' && envelope.result !== null) {
-      return envelope.result as Record<string, unknown>;
-    }
-  } catch {
-    // not a lone JSON document — a compound command or a CLI error blob
-  }
-  return null;
-}
-
 /** `<repo>-<issue#>-<slug>` → the repo prefix; the whole name when unconventional. */
 function repoFromName(worktreeName: string): string {
   return /^(.*?)-\d+-/.exec(worktreeName)?.[1] ?? worktreeName;
@@ -654,6 +676,11 @@ function repoFromName(worktreeName: string): string {
 function issueFromName(worktreeName: string): number | null {
   const match = /^.*?-(\d+)-/.exec(worktreeName);
   return match === null ? null : Number(match[1]);
+}
+
+function numberOrNull(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return value !== undefined && Number.isInteger(parsed) ? parsed : null;
 }
 
 /** De-slugged worktree suffix — the card title until task-create names it. */
