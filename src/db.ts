@@ -88,14 +88,17 @@ export class SessionStore {
       .run(sessionId, threadTs, channelId);
   }
 
-  recordTurn(threadTs: string, channelId: string): void {
+  /** One completed turn: bumps the count and accumulates the SDK-reported cost. */
+  recordTurn(threadTs: string, channelId: string, costUsd: number): void {
     this.db
       .prepare(
         `UPDATE sessions
-            SET turn_count = turn_count + 1, last_activity_at = ?
+            SET turn_count = turn_count + 1,
+                cost_usd_total = cost_usd_total + ?,
+                last_activity_at = ?
           WHERE thread_ts = ? AND channel_id = ?`,
       )
-      .run(this.now(), threadTs, channelId);
+      .run(costUsd, this.now(), threadTs, channelId);
   }
 
   count(): number {

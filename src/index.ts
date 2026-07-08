@@ -81,6 +81,15 @@ try {
         },
         { onError: (err) => logger.warn({ err, threadTs }, 'voice flush failed') },
       ),
+    // 💸 warnings are events, not status: always a fresh message (spec §8).
+    notify: async (threadTs, text) => {
+      await app.client.chat.postMessage({
+        channel: config.slackChannelId,
+        thread_ts: threadTs,
+        text,
+      });
+    },
+    costThresholdsUsd: config.costWarnThresholdsUsd,
     warmTtlMs: config.warmTtlMs,
     logger,
   });
