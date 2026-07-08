@@ -1,0 +1,29 @@
+# Slack ↔ Orca orchestrator daemon — systemd user unit (spec §10, issue #15).
+# Install: see docs/deploy.md. Lives in the repo; the installed copy is
+# ~/.config/systemd/user/orchestrator.service.
+[Unit]
+Description=Slack-driven orchestrator-dispatcher daemon
+Documentation=https://github.com/nvergez/orchestrator
+# No After=/Wants= ordering: network-online.target has no provider in the
+# user manager (it would be silently ignored), and spec §10 forbids ordering
+# against the Orca system unit. Restart=always + the tolerant boot
+# healthcheck cover anything not yet up when we start.
+
+[Service]
+Type=simple
+# The main checkout IS the deployed instance (spec §10).
+WorkingDirectory=/home/dev/projects/orchestrator
+# Secrets stay in the git-ignored .env (chmod 600) — never in this file.
+EnvironmentFile=/home/dev/projects/orchestrator/.env
+# Both the orca CLI (~/.local/bin) and the nvm bin dir (node, and the claude
+# shim the Agent SDK will spawn later) must be on PATH.
+Environment=PATH=/home/dev/.local/bin:/home/dev/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Absolute nvm node path — user units don't source shell profiles.
+ExecStart=/home/dev/.nvm/versions/node/v22.23.1/bin/node src/index.ts
+# Always come back, even after a clean exit: this is a daemon, not a task.
+Restart=always
+RestartSec=5
+
+[Install]
+# default.target + `systemctl --user enable` + active linger = reboot survival.
+WantedBy=default.target

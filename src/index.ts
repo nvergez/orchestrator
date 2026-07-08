@@ -3,6 +3,7 @@ import { pino } from 'pino';
 import { ConfigError, loadConfig, type Config } from './config.ts';
 import { createLogger, toBoltLogger } from './logger.ts';
 import { registerHandlers } from './app.ts';
+import { reportOrcaHealth } from './orca-health.ts';
 
 let config: Config;
 try {
@@ -16,6 +17,10 @@ try {
 }
 
 const logger = createLogger(config.logLevel);
+
+// Fire-and-forget: the probe runs while we connect to Slack and logs whenever
+// it lands — Orca being down must never crash or delay startup (spec §10).
+void reportOrcaHealth(logger);
 
 try {
   const app = new App({
