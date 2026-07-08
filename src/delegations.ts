@@ -99,6 +99,11 @@ export class DelegationStore {
         handle     TEXT NOT NULL,
         created_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS reconciliations (
+        thread_ts   TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        posted_at   TEXT NOT NULL
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS pending_gates (
         msg_id        TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
@@ -209,6 +214,24 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
+  /**
+   * The thread's newest row for a task, ANY status (issue #25): after boot
+   * reconciliation closes an outage completion, the re-armed watcher can
+   * still consume the same worker_done — a taskId-only payload must resolve
+   * to the closed row (and hit the duplicate guard) instead of surfacing as
+   * an unknown worker.
+   */
+  latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND task_id = ?
+         ORDER BY dispatched_at DESC LIMIT 1`,
+      )
+      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toDelegationRow(row);
+  }
+
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
   listInFlightForThread(threadTs: string): DelegationRow[] {
     const rows = this.db
@@ -270,6 +293,29 @@ export class DelegationStore {
          VALUES (?, ?, ?, ?)`,
       )
       .run(threadTs, channelId, handle, this.now());
+  }
+
+  /**
+   * The thread's last posted boot-reconciliation fingerprint (issue #25) — a
+   * canonical string of the still-open delegations and their observed
+   * classes. Repeated restarts with unchanged state compare equal here and
+   * post no second ⚠️ line.
+   */
+  getReconcileFingerprint(threadTs: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ?')
+      .get(threadTs) as { fingerprint: string } | undefined;
+    return row?.fingerprint;
+  }
+
+  /** Remembers what the thread's ⚠️ line last reported (issue #25). */
+  setReconcileFingerprint(threadTs: string, fingerprint: string): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO reconciliations (thread_ts, fingerprint, posted_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(threadTs, fingerprint, this.now());
   }
 
   /**

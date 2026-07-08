@@ -284,3 +284,36 @@ describe('DelegationStore — the asking-handle fallback (issue #21)', () => {
     expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_old');
   });
 });
+
+describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
+  it('remembers the last posted fingerprint per thread', () => {
+    const store = openStore();
+
+    expect(store.getReconcileFingerprint(THREAD)).toBeUndefined();
+
+    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
+    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=in-flight');
+    expect(store.getReconcileFingerprint('1751970099.000900')).toBeUndefined();
+  });
+
+  it('replaces the fingerprint on a state change instead of stacking rows', () => {
+    const store = openStore();
+
+    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
+    store.setReconcileFingerprint(THREAD, 'ctx_a=stalled');
+
+    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=stalled');
+  });
+});
+
+describe('DelegationStore — any-status task lookup (issue #25)', () => {
+  it('finds the thread’s newest row for a task even after it closed', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.latestByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_8b685db09a47');
+    expect(store.latestByTaskId('1751970099.000900', 'task_13c700f151b3')).toBeUndefined();
+    expect(store.latestByTaskId(THREAD, 'task_none')).toBeUndefined();
+  });
+});

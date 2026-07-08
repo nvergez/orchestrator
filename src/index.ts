@@ -10,6 +10,7 @@ import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
 import { GateWatcher } from './watcher.ts';
+import { BootReconciler } from './reconcile.ts';
 import { GateRelay } from './relay.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
@@ -110,6 +111,15 @@ try {
       await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
     },
   };
+
+  // Boot reconciliation (spec §7, issue #25): crash recovery without waking
+  // sessions — dispatched rows reconciled against task-list + worktree ps,
+  // one truthful ⚠️ line per affected thread, completions missed during the
+  // outage closed right here. Deliberately BEFORE the coordinator (so the
+  // worker-cap count below excludes what the outage already ended) and
+  // BEFORE the watcher re-arm (so a closed row never arms a watcher that
+  // would double-report it as a wake).
+  await new BootReconciler({ store: delegationStore, surface, logger }).reconcile();
 
   // The delegation coordinator (issue #19): worker cap, mailbox terminals,
   // delegation cards and the `delegations` ledger — the daemon half of §5.
