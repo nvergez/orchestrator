@@ -127,11 +127,33 @@ describe('classifyEvent', () => {
       'third_party_in_thread',
     ],
     [
-      'a mention that carries no content once the tag is stripped',
-      { ...mention, text: '<@U0BGRT64CPJ>  ' },
+      'an in-thread mention that carries no content once the tag is stripped',
+      { ...mention, thread_ts: '1751960000.000001', text: '<@U0BGRT64CPJ>  ' },
+      'empty_text',
+    ],
+    [
+      'a thread reply with no text (e.g. attachment-only) — no empty turn injected',
+      { ...threadReply, text: undefined },
+      'empty_text',
+    ],
+    [
+      'a thread reply that is only whitespace',
+      { ...threadReply, text: '   ' },
       'empty_text',
     ],
   ])('ignores %s', (_label, event, reason) => {
     expect(classifyEvent(event, guard)).toEqual({ action: 'ignore', reason });
+  });
+
+  it('a bare root mention still opens the session — the mention IS the open (spec §3)', () => {
+    const bare = { ...mention, text: '<@U0BGRT64CPJ>' };
+
+    const decision = classifyEvent(bare, guard);
+
+    expect(decision.action).toBe('open');
+    expect(decision).toHaveProperty('threadTs', '1751970000.000100');
+    // The turn needs *some* prompt; the filter substitutes a fixed one that
+    // tells the session what happened instead of inventing user words.
+    expect((decision as { text: string }).text).not.toBe('');
   });
 });

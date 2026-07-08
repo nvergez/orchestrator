@@ -124,6 +124,39 @@ describe('Voice', () => {
     expect(calls[0]?.text).toBe('0123456789\n… [truncated]');
   });
 
+  it('finalize leaves no throttle timer behind even when a flush is in flight', async () => {
+    const calls: Call[] = [];
+    let releasePost: (ts: string) => void = () => undefined;
+    const voice = new Voice(
+      {
+        post: (text) => {
+          calls.push({ kind: 'post', text });
+          return new Promise((resolve) => {
+            releasePost = resolve;
+          });
+        },
+        update: (ts, text) => {
+          calls.push({ kind: 'update', ts, text });
+          return Promise.resolve();
+        },
+      },
+      { editIntervalMs: 1000 },
+    );
+
+    voice.append('start');
+    await vi.advanceTimersByTimeAsync(0); // flush begins; post still pending
+    voice.append(' more'); // buffer moves ahead of the in-flight flush
+    const finalized = voice.finalize();
+    releasePost('ts-1');
+    await finalized;
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(calls).toEqual([
+      { kind: 'post', text: 'start' },
+      { kind: 'update', ts: 'ts-1', text: 'start more' },
+    ]);
+  });
+
   it('reports transport failures through onError instead of throwing into the turn', async () => {
     const errors: unknown[] = [];
     const voice = new Voice(

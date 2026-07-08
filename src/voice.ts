@@ -35,6 +35,7 @@ export class Voice {
   private timer: NodeJS.Timeout | null = null;
   private inflight: Promise<void> | null = null;
   private lastFlushAt: number | null = null;
+  private finalized = false;
 
   constructor(transport: VoiceTransport, options: VoiceOptions = {}) {
     this.transport = transport;
@@ -53,6 +54,9 @@ export class Voice {
    * streamed text at all, `fallback` (if given) becomes the whole message.
    */
   async finalize(fallback?: string): Promise<void> {
+    // From here on the throttle never re-arms — an in-flight flush completing
+    // below would otherwise schedule one last pointless timer.
+    this.finalized = true;
     if (this.timer !== null) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -74,7 +78,7 @@ export class Voice {
   }
 
   private scheduleFlush(): void {
-    if (this.timer !== null || this.inflight !== null) return;
+    if (this.finalized || this.timer !== null || this.inflight !== null) return;
     const sinceLast = this.lastFlushAt === null ? Infinity : Date.now() - this.lastFlushAt;
     const delay = Math.max(0, this.editIntervalMs - sinceLast);
     this.timer = setTimeout(() => {

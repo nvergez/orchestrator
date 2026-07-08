@@ -77,7 +77,12 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (event.user !== guard.allowedUserId) {
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
-    return { action: 'reply', threadTs: event.thread_ts, text: event.text ?? '' };
+    const replyText = (event.text ?? '').trim();
+    if (replyText === '') {
+      // Attachment-only or whitespace replies never become empty Claude turns.
+      return { action: 'ignore', reason: 'empty_text' };
+    }
+    return { action: 'reply', threadTs: event.thread_ts, text: replyText };
   }
 
   // app_mention from here on.
@@ -92,11 +97,18 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   }
 
   const text = (event.text ?? '').replaceAll(botTag, '').trim();
-  if (text === '') {
-    return { action: 'ignore', reason: 'empty_text' };
-  }
   if (event.thread_ts !== undefined) {
+    if (text === '') {
+      return { action: 'ignore', reason: 'empty_text' };
+    }
     return { action: 'reply', threadTs: event.thread_ts, text };
   }
-  return { action: 'open', threadTs: event.ts, text };
+  // A bare root mention is still an Open (spec §3: a root @mention is the one
+  // and only opener) — substitute a fixed prompt rather than an empty turn.
+  return { action: 'open', threadTs: event.ts, text: text === '' ? BARE_MENTION_PROMPT : text };
 }
+
+/** What the session gets when the thread opened on a mention with no words. */
+export const BARE_MENTION_PROMPT =
+  '(The user opened this thread by mentioning you without any message. ' +
+  'Greet them briefly and ask what they need.)';

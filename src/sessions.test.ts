@@ -84,7 +84,7 @@ const makeHarness = (
 const chattyScript = (sessionId: string) => (text: string, events: TurnEvents) => {
   events.onSessionId(sessionId);
   events.onDelta(`echo: ${text}`);
-  return { status: 'success', resultText: `echo: ${text}`, costUsd: 0.01 } as const;
+  return { status: 'success', resultText: `echo: ${text}` } as const;
 };
 
 const flush = () => vi.advanceTimersByTimeAsync(0);
@@ -163,7 +163,7 @@ describe('SessionManager', () => {
     expect(proc.turns[0]?.text).toBe('first');
 
     proc.turns[0]!.events.onSessionId('sess-1');
-    proc.turns[0]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    proc.turns[0]!.resolve({ status: 'success', resultText: 'ok' });
     await flush();
 
     expect(proc.turns).toHaveLength(2);
@@ -206,7 +206,7 @@ describe('SessionManager', () => {
   it('a failed turn tells the thread, drops the process, and does not count the turn', async () => {
     const { manager, store, spawns, voices } = makeHarness((_text, events) => {
       events.onSessionId('sess-1');
-      return { status: 'error', errors: ['boom'], costUsd: 0 };
+      return { status: 'error', errors: ['boom'] };
     });
 
     manager.open(THREAD, CHANNEL, USER, 'explode');
@@ -234,7 +234,6 @@ describe('SessionManager', () => {
     const { manager, voices } = makeHarness(() => ({
       status: 'success',
       resultText: 'quiet but done',
-      costUsd: 0,
     }));
 
     manager.open(THREAD, CHANNEL, USER, 'silent turn');

@@ -108,16 +108,11 @@ class ClaudeProcess {
         }
       } else if (message.type === 'result') {
         if (message.subtype === 'success') {
-          return {
-            status: 'success',
-            resultText: message.result,
-            costUsd: message.total_cost_usd,
-          };
+          return { status: 'success', resultText: message.result };
         }
         return {
           status: 'error',
           errors: message.errors.length > 0 ? message.errors : [message.subtype],
-          costUsd: message.total_cost_usd,
         };
       }
       // Everything else (assistant echoes, status, hooks…) is irrelevant to
@@ -132,6 +127,11 @@ class ClaudeProcess {
         // discard trailing messages until the subprocess exits
       }
     })();
+    // If the timeout wins the race below, this promise is abandoned but still
+    // live — a later rejection must not become an unhandledRejection crash.
+    drained.catch((error: unknown) =>
+      this.logger.debug({ err: error }, 'claude subprocess drain failed after end'),
+    );
     const timeout = new Promise<'timeout'>((resolve) => {
       const timer = setTimeout(() => resolve('timeout'), END_DRAIN_TIMEOUT_MS);
       timer.unref();

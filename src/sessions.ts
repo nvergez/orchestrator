@@ -16,8 +16,8 @@ export interface TurnEvents {
 }
 
 export type TurnOutcome =
-  | { status: 'success'; resultText: string; costUsd: number }
-  | { status: 'error'; errors: string[]; costUsd: number }
+  | { status: 'success'; resultText: string }
+  | { status: 'error'; errors: string[] }
   /** The subprocess exited without delivering a result for this turn. */
   | { status: 'process_ended' };
 
@@ -155,7 +155,7 @@ export class SessionManager {
       });
     } catch (error) {
       this.logger.error({ err: error, threadTs: state.threadTs }, 'turn threw');
-      outcome = { status: 'error', errors: [String(error)], costUsd: 0 };
+      outcome = { status: 'error', errors: [String(error)] };
     }
 
     if (outcome.status === 'success') {
