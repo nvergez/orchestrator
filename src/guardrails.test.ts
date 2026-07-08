@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classifyCommand, describeGate, type Tier } from './guardrails.ts';
+import {
+  classifyCommand,
+  describeGate,
+  extractDelegationRepoRefs,
+  type Tier,
+} from './guardrails.ts';
 
 const tierOf = (command: string): Tier => classifyCommand(command).tier;
 
@@ -332,5 +337,78 @@ describe('describeGate — what the 🚦 line shows', () => {
 
   it('collapses internal newlines so the gate stays one line', () => {
     expect(describeGate('git push\norigin main').command).toBe('git push origin main');
+  });
+});
+
+describe('extractDelegationRepoRefs — the allow-list enforcement seam (issue #18)', () => {
+  it('extracts the --repo ref of a worktree create', () => {
+    expect(
+      extractDelegationRepoRefs(
+        'orca worktree create --repo id:abc-123 --name forwardly-84-csv --agent claude --json',
+      ),
+    ).toEqual(['id:abc-123']);
+  });
+
+  it('reads the --repo=value form too', () => {
+    expect(extractDelegationRepoRefs('orca worktree create --repo=id:abc --json')).toEqual([
+      'id:abc',
+    ]);
+  });
+
+  it('yields null for a create with no --repo, so the caller can fail closed', () => {
+    expect(extractDelegationRepoRefs('orca worktree create --name x --json')).toEqual([null]);
+  });
+
+  it('yields null when --repo dangles with no value', () => {
+    expect(extractDelegationRepoRefs('orca worktree create --repo')).toEqual([null]);
+  });
+
+  it('extracts every create in a compound command', () => {
+    expect(
+      extractDelegationRepoRefs(
+        'orca worktree create --repo id:a && orca worktree create --repo id:b',
+      ),
+    ).toEqual(['id:a', 'id:b']);
+  });
+
+  it('extracts every --repo when the flag repeats — all of them must pass', () => {
+    expect(
+      extractDelegationRepoRefs('orca worktree create --repo id:a --repo id:b'),
+    ).toEqual(['id:a', 'id:b']);
+  });
+
+  it('ignores everything that is not an orca worktree create', () => {
+    expect(extractDelegationRepoRefs('orca worktree ps')).toEqual([]);
+    expect(extractDelegationRepoRefs('orca worktree delete x --repo id:a')).toEqual([]);
+    expect(extractDelegationRepoRefs('orca repo list --json')).toEqual([]);
+    expect(extractDelegationRepoRefs('git push --repo id:a')).toEqual([]);
+  });
+
+  it('still sees a create hidden behind a value-carrying flag', () => {
+    expect(
+      extractDelegationRepoRefs('orca --profile p worktree create --repo id:offlist'),
+    ).toEqual(['id:offlist']);
+  });
+
+  it('does not mistake a flag value named create for the subcommand', () => {
+    expect(extractDelegationRepoRefs('orca worktree list --filter create')).toEqual([]);
+  });
+
+  it('does not see a create inside a quoted argument', () => {
+    expect(extractDelegationRepoRefs('gh issue create --title "orca worktree create"')).toEqual(
+      [],
+    );
+  });
+
+  it('finds the create inside a pipeline of other segments', () => {
+    expect(
+      extractDelegationRepoRefs('orca repo list --json; orca worktree create --repo id:a --json'),
+    ).toEqual(['id:a']);
+  });
+
+  it('reads a quoted ref as the shell would', () => {
+    expect(extractDelegationRepoRefs("orca worktree create --repo 'id:abc' --json")).toEqual([
+      'id:abc',
+    ]);
   });
 });

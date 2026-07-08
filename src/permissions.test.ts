@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createLogger } from './logger.ts';
-import { buildCanUseTool, guardrailHooks } from './permissions.ts';
+import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { GateVerdict } from './gate.ts';
+import type { DelegationVerdict } from './routing.ts';
 
 const THREAD = '1751970000.000100';
 
@@ -20,14 +21,29 @@ class FakeGates {
   }
 }
 
+/** A scriptable stand-in for the RepoAllowList. */
+class FakeAllowList implements DelegationPolicy {
+  checkedRefs: Array<string | null> = [];
+  private readonly verdict: DelegationVerdict;
+
+  constructor(verdict: DelegationVerdict = { allowed: true }) {
+    this.verdict = verdict;
+  }
+
+  check(repoRef: string | null): Promise<DelegationVerdict> {
+    this.checkedRefs.push(repoRef);
+    return Promise.resolve(this.verdict);
+  }
+}
+
 const callOptions = () => ({
   signal: new AbortController().signal,
   toolUseID: 'toolu_01',
   requestId: 'req_01',
 });
 
-const makeCanUseTool = (gates: FakeGates) =>
-  buildCanUseTool({ threadTs: THREAD, gates, logger: createLogger('silent') });
+const makeCanUseTool = (gates: FakeGates, allowList: DelegationPolicy = new FakeAllowList()) =>
+  buildCanUseTool({ threadTs: THREAD, gates, allowList, logger: createLogger('silent') });
 
 describe('buildCanUseTool', () => {
   it('denies any tool that is not Bash — the orchestrator never codes', async () => {
@@ -93,6 +109,79 @@ describe('buildCanUseTool', () => {
     const result = await canUseTool('Bash', {}, callOptions());
     expect(result).toMatchObject({ behavior: 'deny' });
     expect(gates.requests).toEqual([]);
+  });
+});
+
+describe('buildCanUseTool — repo allow-list on delegations (spec §4/§7, issue #18)', () => {
+  const CREATE = 'orca worktree create --repo id:abc-123 --agent claude --json';
+
+  it('lets a worktree create on an allow-listed repo run silently (AUTO)', async () => {
+    const gates = new FakeGates();
+    const allowList = new FakeAllowList({ allowed: true });
+    const canUseTool = makeCanUseTool(gates, allowList);
+    const input = { command: CREATE };
+    const result = await canUseTool('Bash', input, callOptions());
+    expect(result).toEqual({ behavior: 'allow', updatedInput: input });
+    expect(allowList.checkedRefs).toEqual(['id:abc-123']);
+    expect(gates.requests).toEqual([]);
+  });
+
+  it('denies an off-list repo outright — never gated, never silently rerouted', async () => {
+    const gates = new FakeGates();
+    const allowList = new FakeAllowList({
+      allowed: false,
+      reason: '`legacy-app` is not in routing-hints.json',
+    });
+    const canUseTool = makeCanUseTool(gates, allowList);
+    const result = await canUseTool('Bash', { command: CREATE }, callOptions());
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect((result as { message: string }).message).toContain('routing-hints.json');
+    expect((result as { message: string }).message).toContain('zero-match');
+    expect(gates.requests).toEqual([]);
+  });
+
+  it('checks the allow-list even when another segment gates the command', async () => {
+    const gates = new FakeGates({ approved: true, reply: 'go' });
+    const allowList = new FakeAllowList({ allowed: false, reason: 'off-list' });
+    const canUseTool = makeCanUseTool(gates, allowList);
+    const result = await canUseTool('Bash', { command: `${CREATE} && git push` }, callOptions());
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect(gates.requests).toEqual([]);
+  });
+
+  it('fails closed on a create that names no --repo at all', async () => {
+    const gates = new FakeGates();
+    const allowList = new FakeAllowList({ allowed: false, reason: 'no --repo' });
+    const canUseTool = makeCanUseTool(gates, allowList);
+    const result = await canUseTool(
+      'Bash',
+      { command: 'orca worktree create --name x --json' },
+      callOptions(),
+    );
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect(allowList.checkedRefs).toEqual([null]);
+  });
+
+  it('never consults the allow-list for non-delegation commands', async () => {
+    const gates = new FakeGates();
+    const allowList = new FakeAllowList();
+    const canUseTool = makeCanUseTool(gates, allowList);
+    await canUseTool('Bash', { command: 'orca repo list --json' }, callOptions());
+    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    expect(allowList.checkedRefs).toEqual([]);
+  });
+
+  it('never consults the allow-list for a forbidden command — deny wins first', async () => {
+    const gates = new FakeGates();
+    const allowList = new FakeAllowList();
+    const canUseTool = makeCanUseTool(gates, allowList);
+    const result = await canUseTool(
+      'Bash',
+      { command: 'orca worktree create --repo "$(cat /etc/passwd)"' },
+      callOptions(),
+    );
+    expect(result).toMatchObject({ behavior: 'deny' });
+    expect(allowList.checkedRefs).toEqual([]);
   });
 });
 

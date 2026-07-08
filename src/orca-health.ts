@@ -4,11 +4,7 @@
  * one read-only CLI call, outcome logged, never blocking and never fatal.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-/** Command-runner seam: resolves with stdout, rejects like execFile does. */
-export type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string }>;
+import { execFileRunner, listRegistryRepos, type CommandRunner } from './orca.ts';
 
 /** What the reporter needs from a pino logger — kept minimal for the tests. */
 export interface HealthLogger {
@@ -16,26 +12,13 @@ export interface HealthLogger {
   warn(fields: object, message: string): void;
 }
 
-/** A probe that hangs must not linger forever; generous, since nothing waits on it. */
-const ORCA_PROBE_TIMEOUT_MS = 10_000;
-
-const execFileAsync = promisify(execFile);
-
-const execFileRunner: CommandRunner = (command, args) =>
-  execFileAsync(command, args, { timeout: ORCA_PROBE_TIMEOUT_MS });
-
 export type HealthReport =
   | { status: 'reachable'; repoCount: number }
   | { status: 'unreachable'; reason: string };
 
 export async function probeOrca(run: CommandRunner): Promise<HealthReport> {
   try {
-    const { stdout } = await run('orca', ['repo', 'list', '--json']);
-    const envelope = JSON.parse(stdout) as { ok?: boolean; result?: { repos?: unknown } };
-    const repos = envelope.result?.repos;
-    if (envelope.ok !== true || !Array.isArray(repos)) {
-      return { status: 'unreachable', reason: 'unexpected `orca repo list` response shape' };
-    }
+    const repos = await listRegistryRepos(run);
     return { status: 'reachable', repoCount: repos.length };
   } catch (error) {
     return { status: 'unreachable', reason: describeFailure(error) };

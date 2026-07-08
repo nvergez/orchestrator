@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { App } from '@slack/bolt';
 import { pino } from 'pino';
 import { ConfigError, loadConfig, type Config } from './config.ts';
@@ -9,6 +10,7 @@ import { SessionManager } from './sessions.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
+import { loadRoutingHints, RepoAllowList, routingInstructions } from './routing.ts';
 
 let config: Config;
 try {
@@ -28,6 +30,14 @@ const logger = createLogger(config.logLevel);
 void reportOrcaHealth(logger);
 
 try {
+  // The routing hints double as the delegation allow-list (spec §4/§7) — a
+  // malformed file must fail the boot, never narrow the list silently.
+  const hints = loadRoutingHints(join(import.meta.dirname, '..', 'routing-hints.json'));
+  logger.info(
+    { repos: hints.map((hint) => hint.name) },
+    'routing hints loaded — the delegation allow-list',
+  );
+
   const store = new SessionStore(config.dbPath);
   // Boot rule (spec §3): rows survive the restart, every session comes back
   // dormant, and nothing below wakes one — the next human message does.
@@ -79,9 +89,17 @@ try {
     logger,
   });
 
+  const allowList = new RepoAllowList({ hints, logger });
+
   const sessions = new SessionManager({
     store,
-    spawn: createProcessFactory({ cwd: process.cwd(), gates, logger }),
+    spawn: createProcessFactory({
+      cwd: process.cwd(),
+      gates,
+      allowList,
+      systemPromptAppend: routingInstructions(hints),
+      logger,
+    }),
     voiceFor: (threadTs) =>
       new Voice(
         {

@@ -2,7 +2,9 @@
  * The tier classifier behind `canUseTool` (spec §7, issue #8): every Bash
  * command the orchestrator session asks for lands in exactly one tier —
  * AUTO runs silently, CONFIRM suspends behind the 🚦 thread gate, FORBIDDEN
- * is denied outright. Pure: no I/O, fully unit-testable.
+ * is denied outright. Pure: no I/O, fully unit-testable. The same shell
+ * reader also powers `extractDelegationRepoRefs` (issue #18) — the seam
+ * permissions.ts runs the repo allow-list on.
  *
  * Fail-closed by construction: only bare `orca` / `gh` / `git` (plus the
  * spec-gated `rm`) are recognized; compound commands take the tier of their
@@ -76,6 +78,40 @@ export function describeGate(command: string): GateDescription {
     }
   }
   return { command: oneLine };
+}
+
+/**
+ * The `--repo` values of every `orca worktree create` segment in the command
+ * — what the allow-list check in permissions.ts runs on before any tier is
+ * honored (spec §7: the routing hints file is the delegation allow-list). A
+ * create carrying no `--repo` yields a null entry so the caller can fail
+ * closed on it.
+ */
+export function extractDelegationRepoRefs(command: string): Array<string | null> {
+  const refs: Array<string | null> = [];
+  for (const tokens of parse(command).segments) {
+    if (tokens[0] !== 'orca') continue;
+    // Adjacent `worktree create` tokens anywhere in the segment — not just as
+    // the first non-flag words — so a value-carrying flag ahead of the
+    // subcommand cannot route a create around the allow-list.
+    const isCreate = tokens.some(
+      (token, index) => token === 'worktree' && tokens[index + 1] === 'create',
+    );
+    if (!isCreate) continue;
+    let found = false;
+    for (let i = 1; i < tokens.length; i += 1) {
+      const token = tokens[i] as string;
+      if (token === '--repo') {
+        refs.push(tokens[i + 1] ?? null);
+        found = true;
+      } else if (token.startsWith('--repo=')) {
+        refs.push(token.slice('--repo='.length));
+        found = true;
+      }
+    }
+    if (!found) refs.push(null);
+  }
+  return refs;
 }
 
 // ── shell surface parsing ────────────────────────────────────────────────────

@@ -4,10 +4,17 @@ import type {
   HookEvent,
   HookJSONOutput,
 } from '@anthropic-ai/claude-agent-sdk';
-import { classifyCommand, describeGate } from './guardrails.ts';
+import { classifyCommand, describeGate, extractDelegationRepoRefs } from './guardrails.ts';
 import { gateLine } from './messages.ts';
 import type { GateRequester } from './gate.ts';
+import type { DelegationVerdict } from './routing.ts';
 import type { Logger } from './logger.ts';
+
+/** The slice of RepoAllowList this hook consults for every delegation. */
+export interface DelegationPolicy {
+  /** Verdict on one `--repo` ref; null means the create carried none. */
+  check(repoRef: string | null): Promise<DelegationVerdict>;
+}
 
 /**
  * The `canUseTool` enforcement hook (spec §7): the bridge between the pure
@@ -18,9 +25,10 @@ import type { Logger } from './logger.ts';
 export function buildCanUseTool(opts: {
   threadTs: string;
   gates: GateRequester;
+  allowList: DelegationPolicy;
   logger: Logger;
 }): CanUseTool {
-  const { threadTs, gates, logger } = opts;
+  const { threadTs, gates, allowList, logger } = opts;
   return async (toolName, input, { signal }) => {
     // The session's base tool set is Bash-only, but fail closed anyway: the
     // orchestrator routes/delegates/supervises, it never codes (spec §7).
@@ -40,6 +48,29 @@ export function buildCanUseTool(opts: {
       { threadTs, command, tier: verdict.tier, reason: verdict.reason },
       'bash command classified',
     );
+
+    // Routing enforcement (spec §4/§7, issue #18): a delegation's --repo must
+    // resolve to a repo that is both registered AND in the hints allow-list —
+    // checked before any tier is honored, so an off-list repo is denied, not
+    // gated. Substitution-carrying commands never get here (forbidden above).
+    if (verdict.tier !== 'forbidden') {
+      for (const repoRef of extractDelegationRepoRefs(command)) {
+        const check = await allowList.check(repoRef);
+        if (!check.allowed) {
+          logger.warn(
+            { threadTs, command, repoRef, reason: check.reason },
+            'delegation denied by the repo allow-list',
+          );
+          return {
+            behavior: 'deny',
+            message:
+              `Delegation refused: ${check.reason}. Treat this as a zero-match ` +
+              '(stop and list the delegable repos) — do not retry with another ref ' +
+              'for the same repo.',
+          };
+        }
+      }
+    }
 
     switch (verdict.tier) {
       case 'auto':

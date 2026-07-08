@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { probeOrca, reportOrcaHealth, type CommandRunner } from './orca-health.ts';
+import { probeOrca, reportOrcaHealth } from './orca-health.ts';
+import type { CommandRunner } from './orca.ts';
 
 /** Canned `orca repo list --json` success payload (real CLI envelope shape). */
 const repoListJson = JSON.stringify({
   id: '82605d31-2782-404a-92b4-53aae089274a',
   ok: true,
   result: {
-    repos: [{ displayName: 'forwardly' }, { displayName: 'orchestrator' }],
+    repos: [
+      { id: 'u1', displayName: 'forwardly' },
+      { id: 'u2', displayName: 'orchestrator' },
+    ],
   },
 });
 
