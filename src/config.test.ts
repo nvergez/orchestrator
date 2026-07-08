@@ -27,6 +27,7 @@ describe('loadConfig', () => {
       costWarnThresholdsUsd: [5, 10],
       liveSessionCap: 5,
       workerCap: 3,
+      watchWindowMs: 15 * 60_000,
       autoCloseAfterMs: 7 * 24 * 60 * 60_000,
       sweepIntervalMs: 60 * 60_000,
     });
@@ -139,6 +140,20 @@ describe('loadConfig', () => {
 
       expect(() => loadConfig(env)).toThrowError(ConfigError);
       expect(() => loadConfig(env)).toThrowError(/WORKER_CAP/);
+    },
+  );
+
+  it('honors WATCH_WINDOW_MINUTES when provided', () => {
+    expect(loadConfig({ ...validEnv, WATCH_WINDOW_MINUTES: '5' }).watchWindowMs).toBe(5 * 60_000);
+  });
+
+  it.each([['0'], ['-3'], ['soon']])(
+    'rejects a WATCH_WINDOW_MINUTES of %s (must be a positive number)',
+    (badValue) => {
+      const env = { ...validEnv, WATCH_WINDOW_MINUTES: badValue };
+
+      expect(() => loadConfig(env)).toThrowError(ConfigError);
+      expect(() => loadConfig(env)).toThrowError(/WATCH_WINDOW_MINUTES/);
     },
   );
 

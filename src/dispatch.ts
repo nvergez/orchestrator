@@ -66,6 +66,8 @@ export interface DelegationCoordinatorOptions {
   workerCap: number;
   /** The Orca worktree the mailbox terminals live in — the daemon's own checkout. */
   mailboxWorktreePath: string;
+  /** Fires after every ledgered dispatch — how the gate watcher arms (#20). */
+  onDispatched?: (threadTs: string) => void;
   logger: Logger;
   /** Injectable for tests; defaults to the real orca CLI. */
   run?: CommandRunner;
@@ -106,6 +108,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   private readonly surface: DelegationSurface;
   private readonly channelId: string;
   private readonly mailboxWorktreePath: string;
+  private readonly onDispatched: (threadTs: string) => void;
   private readonly logger: Logger;
   private readonly run: CommandRunner;
   private readonly now: () => Date;
@@ -117,6 +120,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     this.surface = options.surface;
     this.channelId = options.channelId;
     this.mailboxWorktreePath = options.mailboxWorktreePath;
+    this.onDispatched = options.onDispatched ?? (() => undefined);
     this.logger = options.logger;
     this.run = options.run ?? execFileRunner;
     this.now = options.now ?? (() => new Date());
@@ -448,6 +452,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       { threadTs, dispatchId: dispatch.id, taskId: dispatch.task_id, workerHandle },
       'delegation dispatched and ledgered',
     );
+    // The row is in flight from here — the thread needs its gate watcher.
+    this.onDispatched(threadTs);
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────

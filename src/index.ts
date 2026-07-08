@@ -9,6 +9,7 @@ import { SessionStore } from './db.ts';
 import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
+import { GateWatcher } from './watcher.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
@@ -94,24 +95,35 @@ try {
 
   const allowList = new RepoAllowList({ hints, logger });
 
+  // One Slack surface for the delegation coordinator and the gate watcher —
+  // thread posts, card edits, root reactions on and off.
+  const surface = {
+    post: postToThread,
+    update: async (ts: string, text: string): Promise<void> => {
+      await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+    },
+    react: async (ts: string, name: string): Promise<void> => {
+      await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
+    },
+    unreact: async (ts: string, name: string): Promise<void> => {
+      await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
+    },
+  };
+
   // The delegation coordinator (issue #19): worker cap, mailbox terminals,
   // delegation cards and the `delegations` ledger — the daemon half of §5.
   const delegations = new DelegationCoordinator({
     store: delegationStore,
-    surface: {
-      post: postToThread,
-      update: async (ts, text) => {
-        await app.client.chat.update({ channel: config.slackChannelId, ts, text });
-      },
-      react: async (ts, name) => {
-        await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
-      },
-    },
+    surface,
     channelId: config.slackChannelId,
     workerCap: config.workerCap,
     // Mailbox terminals live in the daemon's own checkout — the one worktree
     // that always exists and never gets archived with a delegation.
     mailboxWorktreePath: process.cwd(),
+    // Evaluated at dispatch time, long after the watcher below exists.
+    onDispatched: (threadTs) => {
+      watcher.arm(threadTs);
+    },
     logger,
   });
 
@@ -146,6 +158,28 @@ try {
     countDelegations: (threadTs) => delegationStore.countForThread(threadTs),
     logger,
   });
+
+  // The per-thread gate watcher (spec §6, issue #20): the daemon listens,
+  // the session thinks — one `check --wait` child per thread with in-flight
+  // work, worker_done → ✅ card + summary wake, gates surfaced verbatim.
+  const watcher = new GateWatcher({
+    store: delegationStore,
+    surface,
+    channelId: config.slackChannelId,
+    wake: (threadTs, channelId, text) => sessions.wake(threadTs, channelId, text),
+    onDelegationClosed: () => {
+      delegations.onDelegationClosed();
+    },
+    windowMs: config.watchWindowMs,
+    logger,
+  });
+  // Boot re-arm (spec §6): the ledger, not process memory, says which
+  // threads still have workers out — a completion sent while the daemon was
+  // down is still sitting unread on the mailbox and lands right here.
+  const rearmed = watcher.rearmFromStore();
+  if (rearmed > 0) {
+    logger.info({ threads: rearmed }, 'gate watchers re-armed from the delegations ledger');
+  }
 
   registerHandlers(app, guard, sessions, gates, logger);
   await app.start();

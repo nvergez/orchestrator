@@ -79,6 +79,107 @@ export function milestoneLine(at: string, text: string): string {
 }
 
 /**
+ * Scenario A end — the card's final state on `worker_done` (issue #20): ✅
+ * (or ❌) with the durable links. The milestones give way to the links: the
+ * card is now a result record, not a progress log. `prLinks` come out of the
+ * worker's report (extractPullRequestLinks); the failure reason is the
+ * worker's subject, verbatim.
+ */
+export function completedCard(opts: {
+  repo: string;
+  issueNumber: number;
+  title: string;
+  worktreePath: string | null;
+  durationMs: number;
+  issueUrl?: string;
+  prLinks: Array<{ url: string; label: string }>;
+  failureReason?: string;
+}): string {
+  const ref = `${opts.repo}#${opts.issueNumber}`;
+  const failed = opts.failureReason !== undefined;
+  const header = failed
+    ? `❌ *${ref} — ${opts.title} — failed after ${formatDuration(opts.durationMs)}*`
+    : `✅ *${ref} — ${opts.title} — delivered in ${formatDuration(opts.durationMs)}*`;
+  const lines = [header];
+  if (opts.failureReason !== undefined) lines.push(`• reason: ${opts.failureReason}`);
+  for (const pr of opts.prLinks) lines.push(`• PR: <${pr.url}|${pr.label}>`);
+  lines.push(`• issue: ${opts.issueUrl === undefined ? ref : `<${opts.issueUrl}|${ref}>`}`);
+  if (opts.worktreePath !== null) lines.push(`• worktree: \`${opts.worktreePath}\``);
+  return lines.join('\n');
+}
+
+/**
+ * Issue #20 — the daemon's own short summary when no session could take the
+ * wake (thread closed, or the row lost its thread): the completion still
+ * lands as a NEW message, never silence. When the session does wake, its
+ * voice writes this line's richer sibling instead.
+ */
+export function workerDoneFallbackLine(subject: string, failed: boolean): string {
+  const head = failed ? '❌ Failed' : '✅ Delivered';
+  return `${head} — ${subject}. Details in the card ⤴`;
+}
+
+/**
+ * Issue #20 — a `decision_gate`/`escalation` arriving before the relay slice
+ * (#21): surfaced crudely but verbatim, with the raw message id and the
+ * exact command that answers it, so nothing is lost even without the
+ * registry-backed routing.
+ */
+export function crudeWorkerEventLine(opts: {
+  kind: 'decision_gate' | 'escalation';
+  worktreeName: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  subject: string;
+  body: string;
+  msgId: string;
+}): string {
+  const emoji = opts.kind === 'escalation' ? '🚨' : '❓';
+  const verb = opts.kind === 'escalation' ? 'escalates' : 'asks';
+  const name = opts.worktreeName === null ? 'a worker' : `\`${opts.worktreeName}\``;
+  const ref =
+    opts.repo !== null && opts.issueNumber !== null ? ` (${opts.repo}#${opts.issueNumber})` : '';
+  const quoted = [opts.subject, opts.body]
+    .filter((part) => part.trim() !== '')
+    .join('\n')
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+  return [
+    `${emoji} *${name}*${ref} ${verb} (raw relay — the full gate flow lands in a later slice):`,
+    quoted,
+    `Answer with: \`orca orchestration reply --id ${opts.msgId} --body "<answer>"\``,
+  ].join('\n');
+}
+
+/** `27 min`, `1 h 05 min`, `under a minute` — the card's duration wording. */
+export function formatDuration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return 'under a minute';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} h` : `${hours} h ${String(rest).padStart(2, '0')} min`;
+}
+
+/**
+ * GitHub pull-request URLs in a worker's report → the card's rich links,
+ * labeled `<repo>#<n>`, first appearance order, deduplicated.
+ */
+export function extractPullRequestLinks(text: string): Array<{ url: string; label: string }> {
+  const links: Array<{ url: string; label: string }> = [];
+  const seen = new Set<string>();
+  const pattern = /https:\/\/github\.com\/[\w.-]+\/([\w.-]+)\/pull\/(\d+)/g;
+  for (const match of text.matchAll(pattern)) {
+    const url = match[0];
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push({ url, label: `${match[1]}#${match[2]}` });
+  }
+  return links;
+}
+
+/**
  * Issue #19 — the global concurrent-worker cap is full: the delegation waits
  * its wave (the `worktree create` call stays suspended until a slot frees).
  */
