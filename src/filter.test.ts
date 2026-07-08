@@ -12,22 +12,42 @@ const mention = {
   channel: 'C0ASJR3LAE6',
   user: 'U09CC6M3W1W',
   ts: '1751970000.000100',
+  text: '<@U0BGRT64CPJ> deploy the fix',
+};
+
+const threadReply = {
+  type: 'message' as const,
+  channel: 'C0ASJR3LAE6',
+  user: 'U09CC6M3W1W',
+  ts: '1751970002.000300',
+  thread_ts: '1751970000.000100',
+  text: 'yes, go ahead',
 };
 
 describe('classifyEvent', () => {
-  it('acks an app_mention from the authorized user, threaded on the mention', () => {
+  it('opens a session on a root @mention from the authorized user, mention stripped', () => {
     expect(classifyEvent(mention, guard)).toEqual({
-      action: 'ack',
+      action: 'open',
       threadTs: '1751970000.000100',
+      text: 'deploy the fix',
     });
   });
 
-  it('acks inside the existing thread when the mention is itself a thread reply', () => {
+  it('treats a mention inside a thread as a reply, not a new session (spec §3: open = root only)', () => {
     const inThread = { ...mention, thread_ts: '1751960000.000001' };
 
     expect(classifyEvent(inThread, guard)).toEqual({
-      action: 'ack',
+      action: 'reply',
       threadTs: '1751960000.000001',
+      text: 'deploy the fix',
+    });
+  });
+
+  it('treats a plain thread reply from the authorized user as a reply — no re-mention needed', () => {
+    expect(classifyEvent(threadReply, guard)).toEqual({
+      action: 'reply',
+      threadTs: '1751970000.000100',
+      text: 'yes, go ahead',
     });
   });
 
@@ -53,6 +73,18 @@ describe('classifyEvent', () => {
     });
   });
 
+  it('skips the message.channels copy of a mention — the app_mention event already carries it', () => {
+    const messageCopy = {
+      ...threadReply,
+      text: '<@U0BGRT64CPJ> deploy the fix',
+    };
+
+    expect(classifyEvent(messageCopy, guard)).toEqual({
+      action: 'ignore',
+      reason: 'mention_duplicate',
+    });
+  });
+
   it.each([
     [
       'a mention in another channel',
@@ -66,41 +98,62 @@ describe('classifyEvent', () => {
     ],
     [
       'a subtype event, even from the authorized user',
-      { ...mention, subtype: 'message_changed' },
+      { ...threadReply, subtype: 'message_changed' },
       'subtype',
     ],
     [
       'a message from any bot',
-      { ...mention, type: 'message' as const, bot_id: 'B0SOMEBOT', user: undefined },
+      { ...threadReply, bot_id: 'B0SOMEBOT', user: undefined },
       'bot_message',
     ],
     [
       "the bot's own message",
-      { ...mention, user: 'U0BGRT64CPJ' },
+      { ...threadReply, user: 'U0BGRT64CPJ' },
       'self',
     ],
     [
       'an event with no user',
-      { ...mention, user: undefined },
+      { ...threadReply, user: undefined },
       'no_user',
     ],
     [
-      'a plain channel message without a mention, even from the authorized user',
-      { ...mention, type: 'message' as const },
+      'a root channel message without a mention, even from the authorized user',
+      { ...threadReply, thread_ts: undefined },
       'not_a_mention',
     ],
     [
       'a third-party reply in a thread — silence, not a refusal',
-      {
-        type: 'message' as const,
-        channel: 'C0ASJR3LAE6',
-        user: 'U0THIRDPARTY',
-        ts: '1751970002.000300',
-        thread_ts: '1751970000.000100',
-      },
-      'not_a_mention',
+      { ...threadReply, user: 'U0THIRDPARTY' },
+      'third_party_in_thread',
+    ],
+    [
+      'an in-thread mention that carries no content once the tag is stripped',
+      { ...mention, thread_ts: '1751960000.000001', text: '<@U0BGRT64CPJ>  ' },
+      'empty_text',
+    ],
+    [
+      'a thread reply with no text (e.g. attachment-only) — no empty turn injected',
+      { ...threadReply, text: undefined },
+      'empty_text',
+    ],
+    [
+      'a thread reply that is only whitespace',
+      { ...threadReply, text: '   ' },
+      'empty_text',
     ],
   ])('ignores %s', (_label, event, reason) => {
     expect(classifyEvent(event, guard)).toEqual({ action: 'ignore', reason });
+  });
+
+  it('a bare root mention still opens the session — the mention IS the open (spec §3)', () => {
+    const bare = { ...mention, text: '<@U0BGRT64CPJ>' };
+
+    const decision = classifyEvent(bare, guard);
+
+    expect(decision.action).toBe('open');
+    expect(decision).toHaveProperty('threadTs', '1751970000.000100');
+    // The turn needs *some* prompt; the filter substitutes a fixed one that
+    // tells the session what happened instead of inventing user words.
+    expect((decision as { text: string }).text).not.toBe('');
   });
 });

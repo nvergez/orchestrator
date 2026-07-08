@@ -1,10 +1,21 @@
 import type { App } from '@slack/bolt';
 import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
-import { ACK_TEXT, refusalLine } from './messages.ts';
+import { refusalLine } from './messages.ts';
 import type { Logger } from './logger.ts';
 
+/** The slice of SessionManager the event handlers drive. */
+export interface SessionGateway {
+  open(threadTs: string, channelId: string, rootUser: string, text: string): void;
+  reply(threadTs: string, channelId: string, text: string): boolean;
+}
+
 /** Routes every subscribed event (app_mention, message.channels) through the filter. */
-export function registerHandlers(app: App, guard: Guard, logger: Logger): void {
+export function registerHandlers(
+  app: App,
+  guard: Guard,
+  sessions: SessionGateway,
+  logger: Logger,
+): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
     // Slack's payload types for `message` are a union over subtypes, so field
     // access is awkward; the filter reads this flat envelope and tolerates
@@ -12,23 +23,39 @@ export function registerHandlers(app: App, guard: Guard, logger: Logger): void {
     const incoming = event as IncomingEvent;
     const decision = classifyEvent(incoming, guard);
 
-    if (decision.action === 'ignore') {
-      logger.debug(
-        { type: incoming.type, ts: incoming.ts, reason: decision.reason },
-        'event ignored',
-      );
-      return;
+    switch (decision.action) {
+      case 'ignore':
+        logger.debug(
+          { type: incoming.type, ts: incoming.ts, reason: decision.reason },
+          'event ignored',
+        );
+        return;
+      case 'refuse':
+        logger.info({ ts: incoming.ts, user: incoming.user }, 'third-party mention refused');
+        await app.client.chat.postMessage({
+          channel: guard.channelId,
+          thread_ts: decision.threadTs,
+          text: refusalLine(guard.allowedUserId),
+        });
+        return;
+      case 'open':
+        logger.info({ threadTs: decision.threadTs }, 'root mention — opening session');
+        sessions.open(
+          decision.threadTs,
+          guard.channelId,
+          incoming.user ?? guard.allowedUserId,
+          decision.text,
+        );
+        return;
+      case 'reply': {
+        const handled = sessions.reply(decision.threadTs, guard.channelId, decision.text);
+        logger.debug(
+          { threadTs: decision.threadTs, handled },
+          handled ? 'thread reply — resuming session' : 'reply in unregistered thread ignored',
+        );
+        return;
+      }
     }
-
-    logger.info(
-      { type: incoming.type, ts: incoming.ts, user: incoming.user, action: decision.action },
-      'replying in thread',
-    );
-    await app.client.chat.postMessage({
-      channel: guard.channelId,
-      thread_ts: decision.threadTs,
-      text: decision.action === 'ack' ? ACK_TEXT : refusalLine(guard.allowedUserId),
-    });
   };
 
   app.event('app_mention', handle);
