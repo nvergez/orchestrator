@@ -1,5 +1,6 @@
 import type { Logger } from './logger.ts';
-import type { SessionStore } from './db.ts';
+import type { SessionRow, SessionStore } from './db.ts';
+import { DAY_MS } from './config.ts';
 import { crossedThresholds } from './cost.ts';
 import {
   CLOSED_THREAD_LINE,
@@ -86,8 +87,6 @@ export interface SessionManagerOptions {
   logger: Logger;
 }
 
-const DAY_MS = 24 * 60 * 60_000;
-
 export class SessionManager {
   private readonly store: SessionStore;
   private readonly spawn: ProcessFactory;
@@ -107,6 +106,7 @@ export class SessionManager {
   private pendingSpawns = 0;
   /** Threads waiting for a slot, FIFO — queued messages run in arrival order. */
   private readonly slotWaiters: Array<() => void> = [];
+  private sweeping = false;
 
   constructor(options: SessionManagerOptions) {
     this.store = options.store;
@@ -174,41 +174,36 @@ export class SessionManager {
    * be closed under the user's feet.
    */
   async sweepDormant(): Promise<number> {
-    const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
-    let closed = 0;
-    for (const row of this.store.openSessionsInactiveSince(cutoff)) {
-      const state = this.threads.get(`${row.channelId}:${row.threadTs}`);
-      if (
-        state !== undefined &&
-        (state.running || state.proc !== null || state.queue.length > 0)
-      ) {
-        continue;
-      }
-      this.store.closeSession(row.threadTs, row.channelId);
-      closed += 1;
-      this.logger.info(
-        { threadTs: row.threadTs, lastActivityAt: row.lastActivityAt },
-        'auto-closed dormant session',
-      );
-      try {
-        await this.notify(
-          row.threadTs,
-          closingSummary({
-            // Delegations stay 0 until #19 lands the delegations ledger.
-            delegations: 0,
-            costUsd: row.costUsdTotal,
-            turnCount: row.turnCount,
-            dormantDays: this.autoCloseAfterMs / DAY_MS,
-          }),
+    // Re-entry guard: a sweep slower than its interval (Slack hiccups) must
+    // not overlap the next one and double-post 🔚 summaries.
+    if (this.sweeping) return 0;
+    this.sweeping = true;
+    try {
+      const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
+      let closed = 0;
+      for (const row of this.store.openSessionsInactiveSince(cutoff)) {
+        const state = this.threads.get(threadKey(row.threadTs, row.channelId));
+        if (
+          state !== undefined &&
+          (state.running || state.proc !== null || state.queue.length > 0)
+        ) {
+          continue;
+        }
+        this.store.closeSession(row.threadTs, row.channelId);
+        closed += 1;
+        this.logger.info(
+          { threadTs: row.threadTs, lastActivityAt: row.lastActivityAt },
+          'auto-closed dormant session',
         );
-      } catch (error) {
-        this.logger.warn(
-          { err: error, threadTs: row.threadTs },
-          '🔚 auto-close summary post failed',
-        );
+        // The summary names the *actual* dormancy — a session swept after a
+        // long daemon outage says so, not the configured minimum.
+        const dormantDays = Math.round((Date.now() - Date.parse(row.lastActivityAt)) / DAY_MS);
+        await this.postClosingSummary(row, dormantDays);
       }
+      return closed;
+    } finally {
+      this.sweeping = false;
     }
-    return closed;
   }
 
   /** Warm subprocesses currently alive (the global-cap slice builds on this). */
@@ -227,8 +222,29 @@ export class SessionManager {
     });
   }
 
+  /** Posts the 🔚 summary from the ledger row; a failed post never blocks the close. */
+  private async postClosingSummary(row: SessionRow, dormantDays?: number): Promise<void> {
+    try {
+      await this.notify(
+        row.threadTs,
+        closingSummary({
+          // Delegations stay 0 until #19 lands the delegations ledger.
+          delegations: 0,
+          costUsd: row.costUsdTotal,
+          turnCount: row.turnCount,
+          dormantDays,
+        }),
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, threadTs: row.threadTs },
+        '🔚 closing summary post failed',
+      );
+    }
+  }
+
   private enqueue(threadTs: string, channelId: string, item: QueueItem): void {
-    const key = `${channelId}:${threadTs}`;
+    const key = threadKey(threadTs, channelId);
     let state = this.threads.get(key);
     if (state === undefined) {
       state = {
@@ -243,10 +259,7 @@ export class SessionManager {
       this.threads.set(key, state);
     }
     state.queue.push(item);
-    if (state.warmTimer !== null) {
-      clearTimeout(state.warmTimer);
-      state.warmTimer = null;
-    }
+    this.clearWarmTimer(state);
     if (!state.running) {
       state.running = true;
       this.drain(state).catch((error: unknown) => {
@@ -280,7 +293,7 @@ export class SessionManager {
    * thread posts the ⏳ line and waits, FIFO, until a slot frees.
    */
   private async acquireSlot(state: ThreadState): Promise<void> {
-    if (this.slotWaiters.length === 0 && this.tryReserveSlot()) return;
+    if (this.slotWaiters.length === 0 && this.tryReserveSlotOrReap()) return;
     // Register the waiter before the ⏳ post: a slot freed while the post is
     // in flight must still find us in the line.
     const slot = new Promise<void>((resolve) => this.slotWaiters.push(resolve));
@@ -304,9 +317,10 @@ export class SessionManager {
    * the coldest live session whose turn is finished — it gives up its
    * process and cold-resumes later from its persisted session_id, nothing
    * lost. A mid-turn session (running, possibly suspended on a 🚦 gate) is
-   * never touched.
+   * never touched. The reaped subprocess winds down in the background: the
+   * cap governs live sessions, not OS-level teardown.
    */
-  private tryReserveSlot(): boolean {
+  private tryReserveSlotOrReap(): boolean {
     if (this.liveProcessCount() + this.pendingSpawns < this.liveSessionCap) {
       this.pendingSpawns += 1;
       return true;
@@ -323,10 +337,7 @@ export class SessionManager {
       { threadTs: coldest.threadTs },
       'live-session cap reached — reaping the coldest idle session',
     );
-    if (coldest.warmTimer !== null) {
-      clearTimeout(coldest.warmTimer);
-      coldest.warmTimer = null;
-    }
+    this.clearWarmTimer(coldest);
     void this.dropProcess(coldest);
     this.pendingSpawns += 1;
     return true;
@@ -339,7 +350,7 @@ export class SessionManager {
    * reap inside tryReserveSlot would recurse and over-hand slots.
    */
   private wakeWaiters(): void {
-    while (this.slotWaiters.length > 0 && this.tryReserveSlot()) {
+    while (this.slotWaiters.length > 0 && this.tryReserveSlotOrReap()) {
       this.slotWaiters.shift()?.();
     }
   }
@@ -360,31 +371,15 @@ export class SessionManager {
     // Anything still queued behind the close was sent to a session that no
     // longer exists: drop it, answering turns once with the fixed line.
     const dropped = state.queue.splice(0);
-    if (state.warmTimer !== null) {
-      clearTimeout(state.warmTimer);
-      state.warmTimer = null;
-    }
+    this.clearWarmTimer(state);
     const hadProc = state.proc !== null;
     void this.dropProcess(state);
     if (hadProc) this.wakeWaiters();
-    try {
-      await this.notify(
-        state.threadTs,
-        closingSummary({
-          // Delegations stay 0 until #19 lands the delegations ledger.
-          delegations: 0,
-          costUsd: row.costUsdTotal,
-          turnCount: row.turnCount,
-        }),
-      );
-      if (dropped.some((item) => item.kind === 'turn')) {
-        await this.notify(state.threadTs, CLOSED_THREAD_LINE);
-      }
-    } catch (error) {
-      this.logger.warn(
-        { err: error, threadTs: state.threadTs },
-        '🔚 closing summary post failed',
-      );
+    await this.postClosingSummary(row);
+    // Best-effort and independent of the summary post: a failed summary must
+    // not swallow the dropped turns' fixed line, or vice versa.
+    if (dropped.some((item) => item.kind === 'turn')) {
+      this.postClosedLine(state.threadTs);
     }
   }
 
@@ -434,6 +429,9 @@ export class SessionManager {
         ? `⚠️ Turn failed (${outcome.errors.join('; ')}) — reply to retry.`
         : '⚠️ The session process ended unexpectedly — reply to resume.';
     this.logger.warn({ threadTs: state.threadTs, outcome }, 'turn did not complete');
+    // A failed turn is still human activity: reset the dormancy clock so the
+    // sweep can't auto-close a thread whose last messages all errored.
+    this.store.touch(state.threadTs, state.channelId);
     voice.append(reason);
     await voice.finalize();
     await this.dropProcess(state);
@@ -467,6 +465,12 @@ export class SessionManager {
     }
   }
 
+  private clearWarmTimer(state: ThreadState): void {
+    if (state.warmTimer === null) return;
+    clearTimeout(state.warmTimer);
+    state.warmTimer = null;
+  }
+
   private armWarmTimer(state: ThreadState): void {
     state.warmTimer = setTimeout(() => {
       state.warmTimer = null;
@@ -488,4 +492,8 @@ export class SessionManager {
       this.logger.warn({ err: error, threadTs: state.threadTs }, 'process end failed');
     }
   }
+}
+
+function threadKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
 }

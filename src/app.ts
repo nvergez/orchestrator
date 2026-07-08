@@ -18,6 +18,12 @@ const REPLY_LOG_LINES: Record<ReplyResult, string> = {
   unregistered: 'reply in unregistered thread ignored',
 };
 
+const CLOSE_LOG_LINES: Record<CloseResult, string> = {
+  closing: 'close command — closing session',
+  closed: 'close in already-closed thread — fixed line posted',
+  unregistered: 'close in unregistered thread ignored',
+};
+
 /** Routes every subscribed event (app_mention, message.channels) through the filter. */
 export function registerHandlers(
   app: App,
@@ -70,7 +76,13 @@ export function registerHandlers(
           return;
         }
         const result = sessions.reply(decision.threadTs, guard.channelId, decision.text);
-        logger.debug({ threadTs: decision.threadTs, result }, REPLY_LOG_LINES[result]);
+        // Fixed-line posts are user-visible events (info); the rest is
+        // ambient routing (debug).
+        if (result === 'closed') {
+          logger.info({ threadTs: decision.threadTs, result }, REPLY_LOG_LINES[result]);
+        } else {
+          logger.debug({ threadTs: decision.threadTs, result }, REPLY_LOG_LINES[result]);
+        }
         return;
       }
       case 'close': {
@@ -85,14 +97,9 @@ export function registerHandlers(
         }
         const result = sessions.close(decision.threadTs, guard.channelId);
         if (result === 'unregistered') {
-          logger.debug({ threadTs: decision.threadTs }, 'close in unregistered thread ignored');
+          logger.debug({ threadTs: decision.threadTs, result }, CLOSE_LOG_LINES[result]);
         } else {
-          logger.info(
-            { threadTs: decision.threadTs, result },
-            result === 'closing'
-              ? 'close command — closing session'
-              : 'close in already-closed thread — fixed line posted',
-          );
+          logger.info({ threadTs: decision.threadTs, result }, CLOSE_LOG_LINES[result]);
         }
         return;
       }

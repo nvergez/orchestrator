@@ -92,6 +92,19 @@ export class SessionStore {
   }
 
   /**
+   * Marks activity without a completed turn — a failed turn still resets the
+   * dormancy clock, so the auto-close sweep never closes a thread the human
+   * poked recently just because the turn errored.
+   */
+  touch(threadTs: string, channelId: string): void {
+    this.db
+      .prepare(
+        'UPDATE sessions SET last_activity_at = ? WHERE thread_ts = ? AND channel_id = ?',
+      )
+      .run(this.now(), threadTs, channelId);
+  }
+
+  /**
    * The terminal transition (spec §3): the row stays — it *is* the history —
    * but no reply will ever resume the session again.
    */

@@ -41,7 +41,7 @@ const DEFAULT_AUTO_CLOSE_DAYS = 7;
 
 const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
 
-const DAY_MS = 24 * 60 * 60_000;
+export const DAY_MS = 24 * 60 * 60_000;
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const problems: string[] = [];
@@ -59,27 +59,36 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     return value;
   };
 
-  const warmTtlMinutes = Number(env.SESSION_WARM_TTL_MINUTES ?? DEFAULT_WARM_TTL_MINUTES);
-  if (!Number.isFinite(warmTtlMinutes) || warmTtlMinutes <= 0) {
-    problems.push('SESSION_WARM_TTL_MINUTES must be a positive number of minutes');
-  }
+  const positiveNumber = (key: string, fallback: number, unit: string): number => {
+    const value = Number(env[key] ?? fallback);
+    if (!Number.isFinite(value) || value <= 0) {
+      problems.push(`${key} must be a positive number of ${unit}`);
+    }
+    return value;
+  };
+
+  const warmTtlMinutes = positiveNumber(
+    'SESSION_WARM_TTL_MINUTES',
+    DEFAULT_WARM_TTL_MINUTES,
+    'minutes',
+  );
 
   const liveSessionCap = Number(env.SESSION_LIVE_CAP ?? DEFAULT_LIVE_SESSION_CAP);
   if (!Number.isInteger(liveSessionCap) || liveSessionCap <= 0) {
     problems.push('SESSION_LIVE_CAP must be a positive integer');
   }
 
-  const autoCloseDays = Number(env.SESSION_AUTO_CLOSE_DAYS ?? DEFAULT_AUTO_CLOSE_DAYS);
-  if (!Number.isFinite(autoCloseDays) || autoCloseDays <= 0) {
-    problems.push('SESSION_AUTO_CLOSE_DAYS must be a positive number of days');
-  }
-
-  const sweepIntervalMinutes = Number(
-    env.SESSION_SWEEP_INTERVAL_MINUTES ?? DEFAULT_SWEEP_INTERVAL_MINUTES,
+  const autoCloseDays = positiveNumber(
+    'SESSION_AUTO_CLOSE_DAYS',
+    DEFAULT_AUTO_CLOSE_DAYS,
+    'days',
   );
-  if (!Number.isFinite(sweepIntervalMinutes) || sweepIntervalMinutes <= 0) {
-    problems.push('SESSION_SWEEP_INTERVAL_MINUTES must be a positive number of minutes');
-  }
+
+  const sweepIntervalMinutes = positiveNumber(
+    'SESSION_SWEEP_INTERVAL_MINUTES',
+    DEFAULT_SWEEP_INTERVAL_MINUTES,
+    'minutes',
+  );
 
   let costWarnThresholdsUsd = [...DEFAULT_COST_WARN_THRESHOLDS_USD];
   if (env.COST_WARN_THRESHOLDS_USD !== undefined) {

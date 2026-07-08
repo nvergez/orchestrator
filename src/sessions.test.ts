@@ -705,6 +705,37 @@ describe('SessionManager auto-close sweep (spec §3)', () => {
     expect(store.get(THREAD, CHANNEL)?.turnCount).toBe(1); // the turn still landed
   });
 
+  it('a failed turn still resets the dormancy clock — an erroring thread is not dormant', async () => {
+    const { manager, store } = makeHarness(
+      (_text, events) => {
+        events.onSessionId('sess-1');
+        return { status: 'error', errors: ['boom'] };
+      },
+      { autoCloseMs: 7 * DAY },
+    );
+    manager.open(THREAD, CHANNEL, USER, 'first try');
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(6 * DAY);
+    manager.reply(THREAD, CHANNEL, 'try again'); // fails too — but it IS activity
+    await flush();
+    await vi.advanceTimersByTimeAsync(2 * DAY); // 8 days since open, 2 since the reply
+
+    expect(await manager.sweepDormant()).toBe(0);
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('open');
+  });
+
+  it('the dormancy summary names the actual span, not the configured minimum', async () => {
+    const { manager, notices } = makeHarness(chattyScript('sess-1'), { autoCloseMs: 7 * DAY });
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+
+    await vi.advanceTimersByTimeAsync(30 * DAY); // e.g. the daemon was down a while
+    await manager.sweepDormant();
+
+    expect(notices.at(-1)?.text).toContain('🔚 Session closed — dormant for 30 days.');
+  });
+
   it('a reply after auto-close gets the fixed line — dormancy closes are final too', async () => {
     const { manager, notices, spawns } = makeHarness(chattyScript('sess-1'), {
       autoCloseMs: 7 * DAY,

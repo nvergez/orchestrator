@@ -129,6 +129,18 @@ describe('SessionStore', () => {
     expect(store.count()).toBe(1);
   });
 
+  it('touch refreshes last_activity_at without counting a turn', () => {
+    const timestamps = ['2026-07-08T10:00:00.000Z', '2026-07-08T11:00:00.000Z'];
+    const store = memoryStore(() => timestamps.shift() ?? '2026-07-08T23:59:59.000Z');
+    store.register(THREAD, CHANNEL, USER);
+
+    store.touch(THREAD, CHANNEL);
+
+    const row = store.get(THREAD, CHANNEL);
+    expect(row?.lastActivityAt).toBe('2026-07-08T11:00:00.000Z');
+    expect(row?.turnCount).toBe(0);
+  });
+
   it('closeSession flips the row to its terminal status and keeps the history (spec §3)', () => {
     const store = memoryStore();
     store.register(THREAD, CHANNEL, USER);
