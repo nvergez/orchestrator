@@ -1,0 +1,29 @@
+{
+  "name": "orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Slack-driven orchestrator-dispatcher daemon: one Claude Code session per Slack thread, delegating work to Orca worktree agents.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "dev": "node --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.7.3",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.6.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
+    "vitest": "^4.1.10"
+  }
+}

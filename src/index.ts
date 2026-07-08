@@ -1,0 +1,50 @@
+import { App } from '@slack/bolt';
+import { pino } from 'pino';
+import { ConfigError, loadConfig, type Config } from './config.ts';
+import { createLogger, toBoltLogger } from './logger.ts';
+import { registerHandlers } from './app.ts';
+
+let config: Config;
+try {
+  config = loadConfig(process.env);
+} catch (error) {
+  if (error instanceof ConfigError) {
+    pino().fatal(error.message);
+    process.exit(1);
+  }
+  throw error;
+}
+
+const logger = createLogger(config.logLevel);
+
+try {
+  const app = new App({
+    token: config.slackBotToken,
+    appToken: config.slackAppToken,
+    socketMode: true,
+    logger: toBoltLogger(logger),
+    // Without this, the constructor fires its own auth.test in the background
+    // and a bad token dies as an unhandled rejection instead of down in our catch.
+    deferInitialization: true,
+  });
+  await app.init();
+
+  // auth.test both verifies the bot token before we connect (fail fast on an
+  // invalid key) and tells us our own user id for the filter's self-check.
+  const auth = await app.client.auth.test();
+  const guard = {
+    channelId: config.slackChannelId,
+    allowedUserId: config.slackAllowedUserId,
+    botUserId: auth.user_id as string,
+  };
+
+  registerHandlers(app, guard, logger);
+  await app.start();
+  logger.info(
+    { botUserId: guard.botUserId, channelId: guard.channelId },
+    'connected to Slack over Socket Mode',
+  );
+} catch (error) {
+  logger.fatal({ err: error }, 'boot failed');
+  process.exit(1);
+}

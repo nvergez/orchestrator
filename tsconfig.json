@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    // Run directly under Node 22 type stripping — no build step, so the
+    // syntax must stay erasable and imports keep their .ts extensions.
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
