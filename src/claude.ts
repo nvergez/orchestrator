@@ -52,8 +52,7 @@ class ClaudeProcess {
   private readonly input = new Pushable<SDKUserMessage>();
   private readonly session: Query;
   private readonly logger: Logger;
-  // The SDK's total_cost_usd is cumulative per query() call and starts back
-  // at zero on a cold resume, so a per-process meter yields per-turn costs.
+  // One meter per process — see TurnCostMeter for the cumulative semantics.
   private readonly costMeter = new TurnCostMeter();
 
   constructor(opts: { resumeSessionId: string | null; cwd: string; logger: Logger }) {
@@ -118,6 +117,8 @@ class ClaudeProcess {
             costUsd: this.costMeter.turnCost(message.total_cost_usd),
           };
         }
+        // A failed turn's spend is not ledgered (spec §7 counts completed
+        // turns) and the meter dies with the dropped process — accepted loss.
         return {
           status: 'error',
           errors: message.errors.length > 0 ? message.errors : [message.subtype],

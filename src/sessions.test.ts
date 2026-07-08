@@ -3,6 +3,7 @@ import { createLogger } from './logger.ts';
 import { SessionStore } from './db.ts';
 import {
   SessionManager,
+  type Notifier,
   type OrchestratorProcess,
   type TurnEvents,
   type TurnOutcome,
@@ -60,7 +61,7 @@ interface Harness {
 
 const makeHarness = (
   script?: (text: string, events: TurnEvents) => TurnOutcome,
-  options: { store?: SessionStore; notify?: (threadTs: string, text: string) => Promise<void> } = {},
+  options: { store?: SessionStore; notify?: Notifier } = {},
 ): Harness => {
   const store = options.store ?? new SessionStore(':memory:');
   const spawns: Harness['spawns'] = [];
@@ -91,13 +92,11 @@ const makeHarness = (
   return { manager, store, spawns, voices, notices };
 };
 
-const chattyScript =
-  (sessionId: string, costUsd = 0) =>
-  (text: string, events: TurnEvents) => {
-    events.onSessionId(sessionId);
-    events.onDelta(`echo: ${text}`);
-    return { status: 'success', resultText: `echo: ${text}`, costUsd } as const;
-  };
+const chattyScript = (sessionId: string) => (text: string, events: TurnEvents) => {
+  events.onSessionId(sessionId);
+  events.onDelta(`echo: ${text}`);
+  return { status: 'success', resultText: `echo: ${text}`, costUsd: 0 } as const;
+};
 
 const flush = () => vi.advanceTimersByTimeAsync(0);
 
@@ -296,12 +295,10 @@ describe('SessionManager cost ledger (spec §7)', () => {
     manager.reply(THREAD, CHANNEL, 'turn 2');
     await flush();
     expect(notices).toHaveLength(1);
-    expect(notices[0]).toEqual({
-      threadTs: THREAD,
-      text:
-        '💸 This thread has cost *$5.03* ($5 threshold crossed) — info only, nothing is blocked.\n' +
-        'Next warning at $10.',
-    });
+    // The verbatim itself is pinned once, in messages.test.ts (scenario D).
+    expect(notices[0]?.threadTs).toBe(THREAD);
+    expect(notices[0]?.text).toContain('*$5.03* ($5 threshold crossed)');
+    expect(notices[0]?.text).toContain('Next warning at $10.');
 
     manager.reply(THREAD, CHANNEL, 'turn 3');
     await flush();
@@ -328,10 +325,12 @@ describe('SessionManager cost ledger (spec §7)', () => {
     await flush();
 
     expect(notices.map((n) => n.text)).toEqual([
-      '💸 This thread has cost *$12.00* ($5 threshold crossed) — info only, nothing is blocked.\n' +
-        'Next warning at $10.',
-      '💸 This thread has cost *$12.00* ($10 threshold crossed) — info only, nothing is blocked.',
+      expect.stringContaining('*$12.00* ($5 threshold crossed)'),
+      expect.stringContaining('*$12.00* ($10 threshold crossed)'),
     ]);
+    // $10 fired in the same turn, so neither line may promise it as "next".
+    expect(notices[0]?.text).not.toContain('Next warning');
+    expect(notices[1]?.text).not.toContain('Next warning');
   });
 
   it('warnings are one-shot across restarts — the persisted total suppresses re-firing', async () => {

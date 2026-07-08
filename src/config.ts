@@ -50,7 +50,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     problems.push('SESSION_WARM_TTL_MINUTES must be a positive number of minutes');
   }
 
-  let costWarnThresholdsUsd = DEFAULT_COST_WARN_THRESHOLDS_USD;
+  let costWarnThresholdsUsd = [...DEFAULT_COST_WARN_THRESHOLDS_USD];
   if (env.COST_WARN_THRESHOLDS_USD !== undefined) {
     const parsed = env.COST_WARN_THRESHOLDS_USD.split(',').map((v) => Number(v.trim()));
     const ascending = parsed.every((n, i) => i === 0 || n > (parsed[i - 1] ?? NaN));
