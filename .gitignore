@@ -1,0 +1,4 @@
+# Secrets — jamais commités. Vrai fichier hors-repo : /home/dev/projects/orchestrator/.env
+.env
+.env.*
+!.env.example
