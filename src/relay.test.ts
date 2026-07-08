@@ -55,6 +55,22 @@ const seedGate = (
 const replyCommand = (body: string, id = GATE) =>
   `orca orchestration reply --id ${id} --body "${body}" --json`;
 
+const seedStall = (
+  store: DelegationStore,
+  over: Partial<Parameters<DelegationStore['recordStall']>[0]> = {},
+): void => {
+  store.recordStall({
+    dispatchId: 'ctx_stalled',
+    threadTs: THREAD,
+    workerHandle: WORKER,
+    worktreeName: 'scratch-21-bench',
+    lastOutput: '? Overwrite existing bench.json? (y/N)',
+    fingerprint: '1783528800000',
+    relayTs: '1751970003.000400',
+    ...over,
+  });
+};
+
 describe('decorateReply — the registry as turn context', () => {
   it('passes a gate-less thread through untouched', () => {
     const { relay } = makeRelay();
@@ -68,7 +84,7 @@ describe('decorateReply — the registry as turn context', () => {
     store.answerGate('msg_answered');
 
     const decorated = relay.decorateReply(THREAD, 'the human words');
-    expect(decorated).toContain('[relayed worker gates — daemon context');
+    expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
     expect(decorated).toContain(`[PENDING] ❓ question ${GATE} from \`scratch-21-bench\``);
     expect(decorated).toContain('ack ref: scratch#21');
     expect(decorated).toContain(`worker terminal ${WORKER}`);
@@ -82,6 +98,30 @@ describe('decorateReply — the registry as turn context', () => {
     const { relay, store } = makeRelay();
     seedGate(store, { threadTs: OTHER_THREAD });
     expect(relay.decorateReply(THREAD, 'hello')).toBe('hello');
+  });
+
+  it('lists watchdog stall alerts with their terminal, ack ref and last output (issue #22)', () => {
+    const { relay, store } = makeRelay();
+    seedStall(store);
+    seedStall(store, { dispatchId: 'ctx_nudged', workerHandle: null, worktreeName: null });
+    store.answerStall('ctx_nudged');
+
+    const decorated = relay.decorateReply(THREAD, 'y');
+    expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
+    expect(decorated).toContain('[PENDING] ⚠️ stall from `scratch-21-bench`');
+    expect(decorated).toContain('ack ref: scratch#21');
+    expect(decorated).toContain(`worker terminal ${WORKER}`);
+    expect(decorated).toContain('last output: "? Overwrite existing bench.json? (y/N)"');
+    expect(decorated).toContain(
+      '[ANSWERED] ⚠️ stall from an unmatched worker (ack ref: ctx_nudged, worker terminal unknown',
+    );
+    expect(decorated.endsWith('---\ny')).toBe(true);
+  });
+
+  it('never leaks another thread’s stalls either', () => {
+    const { relay, store } = makeRelay();
+    seedStall(store, { threadTs: OTHER_THREAD });
+    expect(relay.decorateReply(THREAD, 'y')).toBe('y');
   });
 });
 
@@ -203,6 +243,27 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
     seedGate(store, label === 'another thread’s gate' ? { threadTs: OTHER_THREAD } : {});
     expect(relay.sanctionsSend(THREAD, command)).toBe(false);
   });
+
+  it('sanctions the nudge while the worker’s stall alert is pending, not after (issue #22)', () => {
+    const { relay, store } = makeRelay();
+    seedStall(store);
+    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
+      true,
+    );
+
+    store.answerStall('ctx_stalled');
+    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
+      false,
+    );
+  });
+
+  it('never sanctions a send for another thread’s stall', () => {
+    const { relay, store } = makeRelay();
+    seedStall(store, { threadTs: OTHER_THREAD });
+    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
+      false,
+    );
+  });
 });
 
 describe('observe — the pending → answered flip', () => {
@@ -272,6 +333,62 @@ describe('observe — the pending → answered flip', () => {
     await relay.observe(THREAD, send, SEND_OK);
     expect(store.getGate('msg_two')?.status).toBe('pending');
     expect(store.getGate('msg_three')?.status).toBe('pending');
+  });
+
+  it('a nudge flips the stall alert and settles the root back to 👀 (issue #22)', async () => {
+    const { relay, store, surface } = makeRelay();
+    seedStall(store);
+
+    await relay.observe(
+      THREAD,
+      `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
+      SEND_OK,
+    );
+
+    expect(store.getStall('ctx_stalled')?.status).toBe('answered');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'eyes' });
+  });
+
+  it('a failed nudge leaves the stall pending — the send never reached the terminal', async () => {
+    const { relay, store, surface } = makeRelay();
+    seedStall(store);
+
+    await relay.observe(
+      THREAD,
+      `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
+      JSON.stringify({ ok: false, error: {} }),
+    );
+
+    expect(store.getStall('ctx_stalled')?.status).toBe('pending');
+    expect(surface.reactions).toEqual([]);
+  });
+
+  it('keeps 🚨 while a sibling escalation is pending after the nudge', async () => {
+    const { relay, store, surface } = makeRelay();
+    seedStall(store);
+    seedGate(store, { msgId: 'msg_esc', kind: 'escalation', workerHandle: 'term_other', options: [] });
+
+    await relay.observe(
+      THREAD,
+      `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
+      SEND_OK,
+    );
+
+    expect(store.getStall('ctx_stalled')?.status).toBe('answered');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'rotating_light' });
+  });
+
+  it('a send to a different terminal leaves the stall pending', async () => {
+    const { relay, store } = makeRelay();
+    seedStall(store);
+
+    await relay.observe(
+      THREAD,
+      'orca terminal send --terminal term_other --text "y" --enter --json',
+      SEND_OK,
+    );
+
+    expect(store.getStall('ctx_stalled')?.status).toBe('pending');
   });
 
   it('a correction send flips nothing — the worker’s newer pending gate survives', async () => {

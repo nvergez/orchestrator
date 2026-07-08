@@ -1,8 +1,8 @@
 import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from './guardrails.ts';
 import { parseOrcaEnvelope } from './orca.ts';
-import { applyRootReaction, type ReactionSurface, type RootReaction } from './watcher.ts';
+import { settleRootReaction, type ReactionSurface } from './watcher.ts';
 import { worktreeIssueRef, type PrepareVerdict } from './dispatch.ts';
-import type { DelegationStore, PendingGateRow } from './delegations.ts';
+import type { DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
 import type { Logger } from './logger.ts';
 
 /**
@@ -25,10 +25,13 @@ import type { Logger } from './logger.ts';
  *   send` is CONFIRM by classification, but a send targeting the worker
  *   terminal of a gate this thread relayed carries a human answer — the
  *   reply-failure fallback or a best-effort late correction (issue #9) — so
- *   it runs AUTO, without the 🚦 ceremony.
+ *   it runs AUTO, without the 🚦 ceremony. A pending watchdog stall alert
+ *   (issue #22) vouches the same way: a stalled worker has no `ask` to
+ *   reply to, so the sanctioned send IS its answer path.
  * - `observe` (from the PostToolUse hook): a reply (or fallback send) that
- *   actually succeeded flips the gate to `answered` and settles the root
- *   reaction — ❓/🚨 while gates remain, back to 👀 when none do.
+ *   actually succeeded flips the gate — or the stall alert the send just
+ *   nudged — to `answered` and settles the root reaction — ❓/🚨 while
+ *   gates or stalls remain, back to 👀 when none do.
  *
  * `gate-resolve` never appears here: DAG gates are reserved for coordinator
  * DAG decisions (issue #9), and the classifier gates the command itself.
@@ -77,17 +80,20 @@ export class GateRelay implements SessionRelay {
   // ── the turn context ─────────────────────────────────────────────────────
 
   /**
-   * Prepends the thread's gate registry to a human message (spec §6: the
-   * session routes "anchored on the registry"). Answered gates ride along so
-   * the LLM can recognize — and refuse to re-route — a late correction. A
-   * thread that never relayed a gate passes through untouched.
+   * Prepends the thread's gate and stall-alert registries to a human message
+   * (spec §6: the session routes "anchored on the registry"). Answered
+   * entries ride along so the LLM can recognize — and refuse to re-route —
+   * a late correction. A thread that never relayed anything passes through
+   * untouched.
    */
   decorateReply(threadTs: string, text: string): string {
     const gates = this.store.listGatesForThread(threadTs);
-    if (gates.length === 0) return text;
+    const stalls = this.store.listStallsForThread(threadTs);
+    if (gates.length === 0 && stalls.length === 0) return text;
     return [
-      '[relayed worker gates — daemon context, not part of the human message]',
+      '[relayed worker gates & watchdog stall alerts — daemon context, not part of the human message]',
       ...gates.map((gate) => contextLine(gate)),
+      ...stalls.map((stall) => stallContextLine(stall)),
       'Follow your worker-gate instructions. The human message follows:',
       '---',
       text,
@@ -99,11 +105,12 @@ export class GateRelay implements SessionRelay {
   /**
    * True for the sanctioned `terminal send`: a single-segment, --json send
    * to a worker this thread's registry vouches for RIGHT NOW — the worker
-   * still has a pending gate here (the reply-failure fallback), or the
-   * thread's last reply attempt named one of its gates (the late correction
-   * the denial pointed at). Anything else keeps its CONFIRM tier: a worker
-   * whose gates are long answered must not stay a silent AUTO target
-   * forever.
+   * still has a pending gate here (the reply-failure fallback), a pending
+   * watchdog stall alert (issue #22: the nudge IS the answer path — there
+   * is no `ask` to reply to), or the thread's last reply attempt named one
+   * of its gates (the late correction the denial pointed at). Anything else
+   * keeps its CONFIRM tier: a worker whose gates and stalls are long
+   * answered must not stay a silent AUTO target forever.
    */
   sanctionsSend(threadTs: string, command: string): boolean {
     const segments = commandSegments(command);
@@ -117,9 +124,10 @@ export class GateRelay implements SessionRelay {
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
       return true;
     }
-    return this.store
-      .listPendingGates(threadTs)
-      .some((gate) => gate.workerHandle === handle);
+    return (
+      this.store.listPendingGates(threadTs).some((gate) => gate.workerHandle === handle) ||
+      this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)
+    );
   }
 
   /** Registry enforcement on `orchestration reply` — non-reply commands pass. */
@@ -249,6 +257,16 @@ export class GateRelay implements SessionRelay {
     if (parseOrcaEnvelope(stdout) === null) return;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return;
+    // A stalled worker got its keystrokes whatever else the send was for —
+    // its ⚠️ alert is no longer awaiting an answer (issue #22).
+    for (const stall of this.store.listPendingStalls(threadTs)) {
+      if (stall.workerHandle !== handle || !this.store.answerStall(stall.dispatchId)) continue;
+      this.logger.info(
+        { threadTs, dispatchId: stall.dispatchId, workerHandle: handle },
+        'stall alert answered — the nudge reached the worker terminal',
+      );
+      await this.settleRootReaction(threadTs);
+    }
     const last = this.lastReply.get(threadTs);
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
       this.lastReply.delete(threadTs);
@@ -286,16 +304,10 @@ export class GateRelay implements SessionRelay {
     await this.settleRootReaction(threadTs);
   }
 
-  /** ❓/🚨 while gates remain, 👀 when the last one was answered (spec §8). */
+  /** ❓/🚨 while gates or stalls remain, 👀 when the last one was answered
+   * (spec §8) — the shared coarse-state settle. */
   private async settleRootReaction(threadTs: string): Promise<void> {
-    const pending = this.store.listPendingGates(threadTs);
-    const name: RootReaction =
-      pending.length === 0
-        ? 'eyes'
-        : pending.some((gate) => gate.kind === 'escalation')
-          ? 'rotating_light'
-          : 'question';
-    await applyRootReaction(this.surface, this.logger, threadTs, name);
+    await settleRootReaction(this.store, this.surface, this.logger, threadTs);
   }
 }
 
@@ -321,4 +333,28 @@ function contextLine(gate: PendingGateRow): string {
 function gateRef(gate: PendingGateRow): string {
   const ref = gate.worktreeName === null ? null : worktreeIssueRef(gate.worktreeName);
   return ref ?? gate.taskId ?? gate.msgId;
+}
+
+/** One stall-alert row, flattened for the LLM's turn context (issue #22). */
+function stallContextLine(stall: StallAlertRow): string {
+  const status = stall.status === 'pending' ? 'PENDING' : 'ANSWERED';
+  const from = stall.worktreeName === null ? 'an unmatched worker' : `\`${stall.worktreeName}\``;
+  const ref =
+    (stall.worktreeName === null ? null : worktreeIssueRef(stall.worktreeName)) ??
+    stall.dispatchId;
+  const terminal =
+    stall.workerHandle === null
+      ? 'worker terminal unknown — no route down'
+      : `worker terminal ${stall.workerHandle}`;
+  return [
+    `- [${status}] ⚠️ stall from ${from} (ack ref: ${ref}, ${terminal})` +
+      ' — stalled without asking; an answer goes down as keystrokes via terminal send',
+    `  last output: "${oneLine(stall.lastOutput)}"`,
+  ].join('\n');
+}
+
+/** The stored tail flattened to one context line, capped. */
+function oneLine(text: string): string {
+  const flat = text.split('\n').map((line) => line.trim()).filter((line) => line !== '').join(' ⏎ ');
+  return flat.length > 200 ? `…${flat.slice(-200)}` : flat;
 }

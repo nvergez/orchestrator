@@ -47,16 +47,40 @@ export interface PendingGateRow {
   answeredAt: string | null;
 }
 
+/** One row of the `stall_alerts` registry (issue #22) — written by the
+ * watchdog when it posts a ⚠️ alert; one live alert per delegation. */
+export interface StallAlertRow {
+  /** The delegation the stall belongs to — also the row key. */
+  dispatchId: string;
+  threadTs: string;
+  /** The stalled worker's terminal — where the reply lands as keystrokes. */
+  workerHandle: string | null;
+  worktreeName: string | null;
+  /** The truncated last terminal output shown in the alert, verbatim. */
+  lastOutput: string;
+  /** The stall state's identity (the last-activity timestamp) — a sweep
+   * seeing the same fingerprint has already alerted and stays silent. */
+  fingerprint: string;
+  /** Slack ts of the ⚠️ alert message; null when the post failed. */
+  relayTs: string | null;
+  status: 'pending' | 'answered';
+  alertedAt: string;
+  answeredAt: string | null;
+}
+
 /**
- * The `delegations` + `mailboxes` + `pending_gates` share of the orchestrator
- * state database (spec §9), sharing the SQLite file with SessionStore — same
- * synchronous single-writer design. The delegations ledger is written at
- * dispatch and closed on `worker_done` (slice #20); it is what boot
- * reconciliation and the worker-cap count survive restarts on. The mailboxes
- * table remembers each thread's coordinator terminal (`slack-<thread_ts>`,
- * issue #9) so a thread's dispatches all share one origin handle across
- * daemon restarts. The pending_gates registry is written by the daemon at
- * relay time (issue #21) and anchors the routing of human answers back down.
+ * The `delegations` + `mailboxes` + `pending_gates` + `stall_alerts` share of
+ * the orchestrator state database (spec §9), sharing the SQLite file with
+ * SessionStore — same synchronous single-writer design. The delegations
+ * ledger is written at dispatch and closed on `worker_done` (slice #20); it
+ * is what boot reconciliation and the worker-cap count survive restarts on.
+ * The mailboxes table remembers each thread's coordinator terminal
+ * (`slack-<thread_ts>`, issue #9) so a thread's dispatches all share one
+ * origin handle across daemon restarts. The pending_gates registry is written
+ * by the daemon at relay time (issue #21) and anchors the routing of human
+ * answers back down. The stall_alerts registry is its watchdog sibling
+ * (issue #22): written when a ⚠️ alert is posted, it anchors the terminal-
+ * send route for the reply and the no-repeat-spam fingerprint.
  *
  * Unlike `sessions`, both tables key on `thread_ts` alone — deliberate: the
  * daemon serves the single pinned channel (spec §2), and the coordinator
@@ -120,6 +144,19 @@ export class DelegationStore {
         relayed_at    TEXT NOT NULL,
         answered_at   TEXT
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS stall_alerts (
+        dispatch_id   TEXT PRIMARY KEY,
+        thread_ts     TEXT NOT NULL,
+        worker_handle TEXT,
+        worktree_name TEXT,
+        last_output   TEXT NOT NULL,
+        fingerprint   TEXT NOT NULL,
+        relay_ts      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'answered')),
+        alerted_at    TEXT NOT NULL,
+        answered_at   TEXT
+      ) STRICT;
     `);
   }
 
@@ -170,7 +207,12 @@ export class DelegationStore {
          WHERE dispatch_id = ? AND status = 'dispatched'`,
       )
       .run(status, this.now(), dispatchId);
-    return Number(changes) > 0;
+    if (Number(changes) === 0) return false;
+    // A closed delegation's stall alert is moot — the worker reported after
+    // all. Settle it so the worker never lingers as a silent AUTO send
+    // target and the alert drops out of the pending coarse state.
+    this.answerStall(dispatchId);
+    return true;
   }
 
   getByDispatchId(dispatchId: string): DelegationRow | undefined {
@@ -252,6 +294,15 @@ export class DelegationStore {
       )
       .all() as Array<{ thread_ts: string; channel_id: string }>;
     return rows.map((row) => ({ threadTs: row.thread_ts, channelId: row.channel_id }));
+  }
+
+  /** Every in-flight delegation across all threads — the watchdog sweep's
+   * inspection set (issue #22): only these worktrees get looked at. */
+  listInFlight(): DelegationRow[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM delegations WHERE status = 'dispatched' ORDER BY dispatched_at`)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map(toDelegationRow);
   }
 
   /** Delegations still in flight — what the worker cap counts at boot. */
@@ -384,9 +435,86 @@ export class DelegationStore {
     return Number(changes) > 0;
   }
 
+  /**
+   * Registers a posted ⚠️ stall alert (issue #22). One live alert per
+   * delegation: a NEW stall state (different fingerprint) replaces the old
+   * row wholesale — back to pending, new output, new relay ts — which is
+   * exactly the "one alert per stall state" contract.
+   */
+  recordStall(row: Omit<StallAlertRow, 'status' | 'alertedAt' | 'answeredAt'>): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO stall_alerts
+           (dispatch_id, thread_ts, worker_handle, worktree_name,
+            last_output, fingerprint, relay_ts, status, alerted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(
+        row.dispatchId,
+        row.threadTs,
+        row.workerHandle,
+        row.worktreeName,
+        row.lastOutput,
+        row.fingerprint,
+        row.relayTs,
+        this.now(),
+      );
+  }
+
+  /** The delegation's stall alert, whatever its state — the fingerprint check. */
+  getStall(dispatchId: string): StallAlertRow | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM stall_alerts WHERE dispatch_id = ?')
+      .get(dispatchId) as Record<string, unknown> | undefined;
+    return row === undefined ? undefined : toStallAlertRow(row);
+  }
+
+  /** All of a thread's stall alerts, oldest first — the turn-context list. */
+  listStallsForThread(threadTs: string): StallAlertRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id')
+      .all(threadTs) as Array<Record<string, unknown>>;
+    return rows.map(toStallAlertRow);
+  }
+
+  /** The thread's unanswered stall alerts — sanctioned send targets, 🚨 state. */
+  listPendingStalls(threadTs: string): StallAlertRow[] {
+    return this.listStallsForThread(threadTs).filter((stall) => stall.status === 'pending');
+  }
+
+  /**
+   * Flips a stall alert to answered once its nudge went down the worker's
+   * terminal (or its delegation closed). Only a pending alert flips — the
+   * boolean says whether this call won.
+   */
+  answerStall(dispatchId: string): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE stall_alerts SET status = 'answered', answered_at = ?
+         WHERE dispatch_id = ? AND status = 'pending'`,
+      )
+      .run(this.now(), dispatchId);
+    return Number(changes) > 0;
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+function toStallAlertRow(row: Record<string, unknown>): StallAlertRow {
+  return {
+    dispatchId: row.dispatch_id as string,
+    threadTs: row.thread_ts as string,
+    workerHandle: row.worker_handle as string | null,
+    worktreeName: row.worktree_name as string | null,
+    lastOutput: row.last_output as string,
+    fingerprint: row.fingerprint as string,
+    relayTs: row.relay_ts as string | null,
+    status: row.status as StallAlertRow['status'],
+    alertedAt: row.alerted_at as string,
+    answeredAt: row.answered_at as string | null,
+  };
 }
 
 function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {

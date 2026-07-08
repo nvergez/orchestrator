@@ -16,6 +16,7 @@ import {
   queuedLine,
   refusalLine,
   restartNotice,
+  stalledWorkerAlert,
   workerCapLine,
   workerDoneFallbackLine,
   zeroMatchLine,
@@ -323,6 +324,64 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
     });
     expect(unmatched).toContain('❓ *A worker* asks:');
     expect(unmatched).toContain('> Anyone there?');
+  });
+});
+
+describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
+  it('renders the mock exactly: who, silence span, quoted last output, reply instruction', () => {
+    const message = stalledWorkerAlert({
+      worktreeName: 'scratch-21-bench',
+      repo: 'scratch',
+      issueNumber: 21,
+      issueUrl: 'https://github.com/nvergez/scratch/issues/21',
+      stalledForMs: 25 * 60_000,
+      lastOutput: '? Overwrite existing bench.json? (y/N)',
+    });
+    expect(message).toBe(
+      [
+        '⚠️ *`scratch-21-bench`* (<https://github.com/nvergez/scratch/issues/21|scratch#21>) seems stalled —',
+        'no sign for 25 min, without having asked a question. Last output:',
+        '',
+        '> `? Overwrite existing bench.json? (y/N)`',
+        '',
+        "Tell me what to answer, I'll relay it to its terminal.",
+      ].join('\n'),
+    );
+  });
+
+  it('quotes a multi-line tail line by line, keeping blank lines quoted', () => {
+    const message = stalledWorkerAlert({
+      worktreeName: 'scratch-21-bench',
+      repo: 'scratch',
+      issueNumber: 21,
+      stalledForMs: 12 * 60_000,
+      lastOutput: 'running bench…\n\n? Overwrite existing bench.json? (y/N)',
+    });
+    expect(message).toContain('> `running bench…`\n>\n> `? Overwrite existing bench.json? (y/N)`');
+  });
+
+  it('keeps the code quoting stable when the output itself carries backticks', () => {
+    const message = stalledWorkerAlert({
+      worktreeName: 'scratch-21-bench',
+      repo: 'scratch',
+      issueNumber: 21,
+      stalledForMs: 12 * 60_000,
+      lastOutput: 'delete `bench.json`? (y/N)',
+    });
+    expect(message).toContain("> `delete 'bench.json'? (y/N)`");
+  });
+
+  it('degrades: plain ref without a remote, "A worker" without a row, no readable output', () => {
+    const message = stalledWorkerAlert({
+      worktreeName: null,
+      repo: null,
+      issueNumber: null,
+      stalledForMs: 130 * 60_000,
+      lastOutput: '  ',
+    });
+    expect(message).toContain('⚠️ *A worker* seems stalled —');
+    expect(message).toContain('no sign for 2 h 10 min');
+    expect(message).toContain('> (no recent output could be read)');
   });
 });
 

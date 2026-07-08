@@ -285,7 +285,7 @@ The daemon posts and maintains the delegation status card in the thread on its o
 
 ## Worker gates — routing answers back down (spec §6)
 
-When a worker asks a question or escalates, the daemon posts the gate message in the thread itself and registers it — never repeat or rephrase a relayed question. Your job starts when the human replies: messages in a thread with relayed gates arrive prefixed with a \`[relayed worker gates …]\` context block listing each gate's msg id, worktree, question, options and status. Route on it:
+When a worker asks a question or escalates, the daemon posts the gate message in the thread itself and registers it — never repeat or rephrase a relayed question. Your job starts when the human replies: messages in a thread with relayed gates arrive prefixed with a \`[relayed worker gates & watchdog stall alerts …]\` context block listing each gate's msg id, worktree, question, options and status. Route on it:
 
 - Decide first whether the message answers a gate at all. A pending gate does NOT capture the thread — the message may be a general question or a new request; handle those normally.
 - Exactly one PENDING gate and the message plausibly answers it → route it, zero ceremony, no confirmation question.
@@ -295,5 +295,14 @@ When a worker asks a question or escalates, the daemon posts the gate message in
 - After the reply command succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<what went down>')} — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
 - If the reply command fails (the worker's ask likely hit its timeout), say so in one short line, then forward the SAME text with \`orca terminal send --terminal <the gate's worker terminal> --text "<the answer>" --enter --json\` — it runs without a gate because the registry vouches for it.
 - An ANSWERED gate never re-routes. If the human revises a decision that already went down, say it was already passed on and relay the correction best-effort via the same \`orca terminal send\` — no cancellation guarantee.
-- Never use \`orca orchestration gate-resolve\` — DAG gates are not part of this relay.`;
+- Never use \`orca orchestration gate-resolve\` — DAG gates are not part of this relay.
+
+## Watchdog stall alerts — nudging a stalled worker (spec §5/§6)
+
+The daemon also sweeps for workers stalled at their terminal WITHOUT having asked anything (an interactive prompt, an agent that just stopped) and posts the ⚠️ alert itself — never repeat or rephrase it. These appear in the same context block as \`⚠️ stall\` entries, each carrying the worker's terminal handle and its last output. A human reply to one goes down as terminal keystrokes — there is no \`ask\` to reply to, so never \`orca orchestration reply\` for a stall entry:
+
+- Forward with: \`orca terminal send --terminal <the stall's worker terminal> --text "<the answer>" --enter --json\` — its own Bash command, nothing chained. The registry vouches for it, so it runs without a 🚦.
+- Fidelity is absolute here too: the text goes down verbatim (only stripping Slack markup and <@…> mentions). A stall has no numbered options — a bare "y" or "2" goes down literally as typed keystrokes. Never rephrase, never pack explanations into the keystrokes.
+- After the send succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<the keystrokes>')} — the ack ref from the stall's context entry.
+- Disambiguation follows the gate rules: pending stalls and pending gates are all candidates; match the reply against the stall's last output for clues (a "y" fits a \`(y/N)\` prompt); at the slightest doubt ask ONE short clarifying line and run nothing.`;
 }
