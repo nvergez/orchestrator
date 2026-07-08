@@ -6,6 +6,8 @@ import {
 import type { Logger } from './logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
+import { buildCanUseTool, guardrailHooks } from './permissions.ts';
+import type { SessionGates } from './gate.ts';
 
 /**
  * The Claude Agent SDK adapter behind `OrchestratorProcess` (spec §1/§3):
@@ -54,9 +56,19 @@ class ClaudeProcess {
   private readonly logger: Logger;
   // One meter per process — see TurnCostMeter for the cumulative semantics.
   private readonly costMeter = new TurnCostMeter();
+  private readonly gates: SessionGates;
+  private readonly threadTs: string;
 
-  constructor(opts: { resumeSessionId: string | null; cwd: string; logger: Logger }) {
+  constructor(opts: {
+    resumeSessionId: string | null;
+    threadTs: string;
+    cwd: string;
+    gates: SessionGates;
+    logger: Logger;
+  }) {
     this.logger = opts.logger;
+    this.gates = opts.gates;
+    this.threadTs = opts.threadTs;
     this.session = query({
       prompt: this.input,
       options: {
@@ -64,10 +76,20 @@ class ClaudeProcess {
         cwd: opts.cwd,
         // Post-then-edit needs deltas, not just whole assistant messages.
         includePartialMessages: true,
-        // No canUseTool yet (that's the spec §7 slice), so 'default' makes the
-        // CLI auto-deny anything that would normally prompt — reads still
-        // work, nothing dangerous runs from a Slack message.
+        // Spec §7: the session's only side-effecting tool is Bash — no
+        // file-editing tools, the orchestrator never codes itself.
+        tools: ['Bash'],
+        // Enforcement (spec §7): 'default' routes every would-prompt call
+        // into canUseTool, and the PreToolUse ask-hook forces even
+        // settings-allowed Bash commands down that same path — AUTO runs
+        // silently, CONFIRM suspends behind the 🚦 gate, FORBIDDEN is denied.
         permissionMode: 'default',
+        canUseTool: buildCanUseTool({
+          threadTs: opts.threadTs,
+          gates: opts.gates,
+          logger: opts.logger,
+        }),
+        hooks: guardrailHooks(),
         // settingSources and env are deliberately NOT set: omitting them keeps
         // CLI-default settings loading (never `--bare`, spec §10 — bare would
         // strip the OAuth token) and lets the subprocess inherit process.env,
@@ -88,6 +110,7 @@ class ClaudeProcess {
     while (true) {
       const { value: message, done } = await this.session.next();
       if (done === true || message === undefined) {
+        this.releaseGates();
         return { status: 'process_ended' };
       }
       if (message.type === 'system' && message.subtype === 'init') {
@@ -119,6 +142,7 @@ class ClaudeProcess {
         }
         // A failed turn's spend is not ledgered (spec §7 counts completed
         // turns) and the meter dies with the dropped process — accepted loss.
+        this.releaseGates();
         return {
           status: 'error',
           errors: message.errors.length > 0 ? message.errors : [message.subtype],
@@ -129,7 +153,17 @@ class ClaudeProcess {
     }
   }
 
+  /**
+   * A dead or dying process can never release a suspended gate, and a
+   * stranded gate would swallow the thread's next reply — deny whatever is
+   * still pending whenever this process stops being able to answer.
+   */
+  private releaseGates(): void {
+    this.gates.cancelThread(this.threadTs);
+  }
+
   async end(): Promise<void> {
+    this.releaseGates();
     this.input.end();
     const drained = (async () => {
       while (!(await this.session.next()).done) {
@@ -152,7 +186,17 @@ class ClaudeProcess {
   }
 }
 
-export function createProcessFactory(opts: { cwd: string; logger: Logger }): ProcessFactory {
-  return ({ resumeSessionId }) =>
-    new ClaudeProcess({ resumeSessionId, cwd: opts.cwd, logger: opts.logger });
+export function createProcessFactory(opts: {
+  cwd: string;
+  gates: SessionGates;
+  logger: Logger;
+}): ProcessFactory {
+  return ({ resumeSessionId, threadTs }) =>
+    new ClaudeProcess({
+      resumeSessionId,
+      threadTs,
+      cwd: opts.cwd,
+      gates: opts.gates,
+      logger: opts.logger,
+    });
 }

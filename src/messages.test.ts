@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { costWarningLine, refusalLine } from './messages.ts';
+import { costWarningLine, gateLine, refusalLine } from './messages.ts';
 
 describe('refusalLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
@@ -25,5 +25,19 @@ describe('costWarningLine', () => {
 
   it('always shows the total with two decimals', () => {
     expect(costWarningLine(5, 5, 10)).toContain('*$5.00*');
+  });
+});
+
+describe('gateLine', () => {
+  it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario B)', () => {
+    expect(gateLine('git push --force-with-lease', 'forwardly/csv-export-metrics')).toBe(
+      '🚦 `git push --force-with-lease` on `forwardly/csv-export-metrics` — go?',
+    );
+  });
+
+  it('matches the mock verbatim when no worktree is identifiable', () => {
+    expect(gateLine('orca worktree delete forwardly-84-csv-export')).toBe(
+      '🚦 `orca worktree delete forwardly-84-csv-export` — go?',
+    );
   });
 });

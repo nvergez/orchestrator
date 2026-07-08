@@ -33,6 +33,8 @@ export interface OrchestratorProcess {
 export type ProcessFactory = (opts: {
   /** Persisted session_id to cold-resume, or null to open a fresh session. */
   resumeSessionId: string | null;
+  /** The Slack thread this session speaks for — where its 🚦 gates post. */
+  threadTs: string;
 }) => OrchestratorProcess;
 
 /** The slice of `Voice` the manager drives — one instance per turn. */
@@ -155,7 +157,7 @@ export class SessionManager {
         { threadTs: state.threadTs, resumeSessionId },
         resumeSessionId === null ? 'opening session' : 'cold-resuming session',
       );
-      state.proc = this.spawn({ resumeSessionId });
+      state.proc = this.spawn({ resumeSessionId, threadTs: state.threadTs });
     }
 
     const voice = this.voiceFor(state.threadTs);
