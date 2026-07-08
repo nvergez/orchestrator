@@ -384,6 +384,22 @@ describe('extractDelegationRepoRefs — the allow-list enforcement seam (issue #
     expect(extractDelegationRepoRefs('git push --repo id:a')).toEqual([]);
   });
 
+  it('still sees a create hidden behind a value-carrying flag', () => {
+    expect(
+      extractDelegationRepoRefs('orca --profile p worktree create --repo id:offlist'),
+    ).toEqual(['id:offlist']);
+  });
+
+  it('does not mistake a flag value named create for the subcommand', () => {
+    expect(extractDelegationRepoRefs('orca worktree list --filter create')).toEqual([]);
+  });
+
+  it('does not see a create inside a quoted argument', () => {
+    expect(extractDelegationRepoRefs('gh issue create --title "orca worktree create"')).toEqual(
+      [],
+    );
+  });
+
   it('finds the create inside a pipeline of other segments', () => {
     expect(
       extractDelegationRepoRefs('orca repo list --json; orca worktree create --repo id:a --json'),

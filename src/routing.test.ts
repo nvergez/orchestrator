@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from './logger.ts';
-import type { CommandRunner } from './orca-health.ts';
+import type { CommandRunner } from './orca.ts';
 import {
   GLOBAL_DEFAULT_AGENT,
-  listRegistryRepos,
   loadRoutingHints,
   parseRoutingHints,
   RepoAllowList,
@@ -105,28 +104,6 @@ describe('loadRoutingHints', () => {
   });
 });
 
-describe('listRegistryRepos', () => {
-  it('maps the envelope to id/name pairs', async () => {
-    const repos = await listRegistryRepos(
-      succeedWith(registryJson([{ id: 'u1', displayName: 'forwardly', path: '/p' }])),
-    );
-    expect(repos).toEqual([{ id: 'u1', name: 'forwardly' }]);
-  });
-
-  it('throws on an ok:false or shapeless envelope', async () => {
-    await expect(listRegistryRepos(succeedWith(JSON.stringify({ ok: false })))).rejects.toThrow(
-      /unexpected `orca repo list` response shape/,
-    );
-  });
-
-  it('drops entries missing id or displayName — narrowing is the safe direction', async () => {
-    const repos = await listRegistryRepos(
-      succeedWith(registryJson([{ id: 'u1' }, { id: 'u2', displayName: 'orca' }])),
-    );
-    expect(repos).toEqual([{ id: 'u2', name: 'orca' }]);
-  });
-});
-
 describe('RepoAllowList', () => {
   const registry = registryJson([
     { id: 'uuid-forwardly', displayName: 'forwardly' },
@@ -152,6 +129,14 @@ describe('RepoAllowList', () => {
     const verdict = await makeAllowList(succeedWith(registry)).check('id:uuid-invented');
     expect(verdict).toMatchObject({ allowed: false });
     expect((verdict as { reason: string }).reason).toContain('not a registered Orca repo');
+  });
+
+  it('never lets a typed ref match the other field — id:<name> is not a repo', async () => {
+    const allowList = makeAllowList(succeedWith(registry));
+    await expect(allowList.check('id:forwardly')).resolves.toMatchObject({ allowed: false });
+    await expect(allowList.check('name:uuid-forwardly')).resolves.toMatchObject({
+      allowed: false,
+    });
   });
 
   it('denies a hinted repo that is not registered — hints alone do not delegate', async () => {

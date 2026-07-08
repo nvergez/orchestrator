@@ -1,7 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type { CommandRunner } from './orca-health.ts';
+import { execFileRunner, listRegistryRepos, type CommandRunner, type RegistryRepo } from './orca.ts';
 import { delegationGateLine, zeroMatchLine } from './messages.ts';
 import type { Logger } from './logger.ts';
 
@@ -126,40 +124,6 @@ function stringArray(value: unknown): string[] | undefined {
   return value as string[];
 }
 
-// ── living registry ──────────────────────────────────────────────────────────
-
-export interface RegistryRepo {
-  id: string;
-  /** The registry `displayName` — what a hints entry's `name` pins. */
-  name: string;
-}
-
-/** Registry calls must not hang a suspended canUseTool call forever. */
-const REGISTRY_TIMEOUT_MS = 10_000;
-
-const execFileAsync = promisify(execFile);
-
-export const orcaRunner: CommandRunner = (command, args) =>
-  execFileAsync(command, args, { timeout: REGISTRY_TIMEOUT_MS });
-
-/** `orca repo list --json` → the living registry. Throws when Orca is down. */
-export async function listRegistryRepos(run: CommandRunner): Promise<RegistryRepo[]> {
-  const { stdout } = await run('orca', ['repo', 'list', '--json']);
-  const envelope = JSON.parse(stdout) as { ok?: boolean; result?: { repos?: unknown } };
-  const repos = envelope.result?.repos;
-  if (envelope.ok !== true || !Array.isArray(repos)) {
-    throw new Error('unexpected `orca repo list` response shape');
-  }
-  // An entry without id or displayName cannot be matched — dropping it only
-  // narrows the delegable surface, which is the fail-closed direction.
-  return repos.flatMap((repo: unknown) => {
-    const record = repo as { id?: unknown; displayName?: unknown };
-    return typeof record.id === 'string' && typeof record.displayName === 'string'
-      ? [{ id: record.id, name: record.displayName }]
-      : [];
-  });
-}
-
 // ── allow-list enforcement ───────────────────────────────────────────────────
 
 export type DelegationVerdict = { allowed: true } | { allowed: false; reason: string };
@@ -184,7 +148,7 @@ export class RepoAllowList {
 
   constructor(options: RepoAllowListOptions) {
     this.allowedNames = new Set(options.hints.map((hint) => hint.name));
-    this.run = options.run ?? orcaRunner;
+    this.run = options.run ?? execFileRunner;
     this.logger = options.logger;
   }
 
@@ -195,8 +159,11 @@ export class RepoAllowList {
         reason: 'the delegation names no --repo, so it cannot be checked against the allow-list',
       };
     }
-    // Accept the CLI's `id:<uuid>` ref form (spec §5) plus bare id or name.
-    const ref = repoRef.replace(/^(id|name):/, '');
+    // The CLI's `--repo` takes `id:<uuid>` / `name:<displayName>` refs (spec
+    // §5) or a bare value; a typed ref only ever matches its own field.
+    const typed = /^(id|name):(.*)$/.exec(repoRef);
+    const kind = typed?.[1];
+    const ref = typed?.[2] ?? repoRef;
 
     let registry: RegistryRepo[];
     try {
@@ -209,7 +176,10 @@ export class RepoAllowList {
       };
     }
 
-    const repo = registry.find((candidate) => candidate.id === ref || candidate.name === ref);
+    const repo = registry.find(
+      (candidate) =>
+        (kind !== 'name' && candidate.id === ref) || (kind !== 'id' && candidate.name === ref),
+    );
     if (repo === undefined) {
       return { allowed: false, reason: `\`${repoRef}\` is not a registered Orca repo` };
     }
