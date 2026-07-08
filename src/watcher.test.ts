@@ -247,7 +247,7 @@ describe('worker_done — the happy path', () => {
     ]);
   });
 
-  it('keeps 👀 while a sibling delegation is still in flight, and keeps watching', async () => {
+  it('settles back to 👀 while a sibling delegation is still in flight, and keeps watching', async () => {
     const { watcher, store, surface, checkRunner } = makeWatcher({
       checks: [checkOut(busMessage())],
     });
@@ -259,10 +259,35 @@ describe('worker_done — the happy path', () => {
       expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     });
 
-    expect(surface.reactions).toEqual([]);
+    // Never ✅ with work still out — the registries settle the honest state.
+    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
     // The second window parked on the still-armed watcher.
     expect(watcher.isArmed(THREAD)).toBe(true);
     expect(checkRunner.calls).toHaveLength(2);
+  });
+
+  it('a sibling worker_done keeps 🚨 while another delegation’s stall alert is pending', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage())],
+    });
+    seedDispatch(store);
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
+    store.recordStall({
+      dispatchId: 'ctx_d2',
+      threadTs: THREAD,
+      workerHandle: 'term_stalled',
+      worktreeName: 'scratch-9-slug',
+      lastOutput: '? proceed (y/N)',
+      fingerprint: '1751970000000',
+      relayTs: null,
+    });
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    });
+
+    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
   });
 
   it('ignores a duplicated worker_done — one close, one freed slot, one wake', async () => {

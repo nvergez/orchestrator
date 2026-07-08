@@ -161,6 +161,47 @@ export function gateRelayMessage(opts: {
 }
 
 /**
+ * Scenario "Stalled worker (watchdog)" — the ⚠️ alert (issue #22): same mold
+ * as a gate (who + issue link), but it says explicitly that the worker
+ * stalled WITHOUT asking a question, shows the last terminal output verbatim
+ * (code-quoted, truncated upstream), and points the reply at the terminal —
+ * there is no `ask` to answer, so the route back is `terminal send` (spec §6).
+ */
+export function stalledWorkerAlert(opts: {
+  worktreeName: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+  /** How long since the worktree last showed any sign of life. */
+  stalledForMs: number;
+  /** The truncated tail of the worker terminal; empty when unreadable. */
+  lastOutput: string;
+}): string {
+  const who = opts.worktreeName === null ? '*A worker*' : `*\`${opts.worktreeName}\`*`;
+  const plainRef =
+    opts.repo !== null && opts.issueNumber !== null ? `${opts.repo}#${opts.issueNumber}` : null;
+  const ref =
+    plainRef === null
+      ? ''
+      : ` (${opts.issueUrl === undefined ? plainRef : `<${opts.issueUrl}|${plainRef}>`})`;
+  const tail =
+    opts.lastOutput.trim() === ''
+      ? ['> (no recent output could be read)']
+      : opts.lastOutput
+          .split('\n')
+          .map((line) => (line.trim() === '' ? '>' : `> \`${line.replaceAll('`', "'")}\``));
+  return [
+    `⚠️ ${who}${ref} seems stalled —`,
+    `no sign for ${formatDuration(opts.stalledForMs)}, without having asked a question. Last output:`,
+    '',
+    ...tail,
+    '',
+    "Tell me what to answer, I'll relay it to its terminal.",
+  ].join('\n');
+}
+
+/**
  * Scenario C end — the fixed acknowledgment after an answer went back down.
  * Rendered by the session's voice (the routing turn's one visible line); the
  * template lives here so the system prompt and the tests share one source.

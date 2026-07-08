@@ -6,12 +6,12 @@ import {
 } from './messages.ts';
 import {
   execFileRunner,
-  listRegistryRepos,
   makeExecFileRunner,
   parseOrcaEnvelope,
+  safeRegistryIssueUrl,
   type CommandRunner,
 } from './orca.ts';
-import type { DelegationRow, DelegationStore } from './delegations.ts';
+import type { DelegationRow, DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
 import type { DelegationSurface } from './dispatch.ts';
 import type { Logger } from './logger.ts';
 
@@ -120,6 +120,33 @@ export async function applyRootReaction(
       logger.debug({ err: error, threadTs, stale }, 'stale reaction removal skipped');
     }
   }
+}
+
+/** The registry slice the coarse-state computation reads. */
+export interface PendingStateStore {
+  listPendingGates(threadTs: string): PendingGateRow[];
+  listPendingStalls(threadTs: string): StallAlertRow[];
+}
+
+/**
+ * The thread's honest coarse state while work is in flight, re-derived from
+ * the registries and applied to the root (spec §8): 🚨 while an escalation
+ * or a watchdog stall alert waits, ❓ while only questions do, 👀 otherwise.
+ * Shared by every path that settles the root after a pending set changed —
+ * a gate relayed or answered, a stall alerted or nudged, a sibling done.
+ */
+export async function settleRootReaction(
+  store: PendingStateStore,
+  surface: ReactionSurface,
+  logger: Logger,
+  threadTs: string,
+): Promise<void> {
+  const gates = store.listPendingGates(threadTs);
+  const alarmed =
+    gates.some((gate) => gate.kind === 'escalation') ||
+    store.listPendingStalls(threadTs).length > 0;
+  const name: RootReaction = alarmed ? 'rotating_light' : gates.length > 0 ? 'question' : 'eyes';
+  await applyRootReaction(surface, logger, threadTs, name);
 }
 
 export interface OrchestrationMessage {
@@ -428,7 +455,10 @@ export class GateWatcher {
           worktreeName: row?.worktreeName ?? null,
           repo: row?.repo ?? null,
           issueNumber: row?.issueNumber ?? null,
-          issueUrl: row === undefined ? undefined : await this.issueUrl(row),
+          issueUrl:
+            row === undefined
+              ? undefined
+              : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
           question,
           options,
         }),
@@ -450,12 +480,10 @@ export class GateWatcher {
       options,
       relayTs,
     });
-    // A pending escalation outranks a plain question on the root (spec §8):
-    // a ❓ arriving while a 🚨 waits must not soften the coarse state.
-    const escalated =
-      kind === 'escalation' ||
-      this.store.listPendingGates(gateThread).some((gate) => gate.kind === 'escalation');
-    await this.setRootReaction(gateThread, escalated ? 'rotating_light' : 'question');
+    // A pending escalation or stall alert outranks a plain question on the
+    // root (spec §8): a ❓ arriving while a 🚨 waits must not soften the
+    // coarse state. The just-recorded gate is part of the settled set.
+    await settleRootReaction(this.store, this.surface, this.logger, gateThread);
   }
 
   /**
@@ -509,30 +537,10 @@ export class GateWatcher {
   ): Promise<void> {
     await flipCardFinal(this.surface, this.logger, row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
-      issueUrl: await this.issueUrl(row),
+      issueUrl: await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
       reportText: `${message.subject}\n${message.body}`,
       ...(failed && { failureReason: message.subject }),
     });
-  }
-
-  /**
-   * The issue link is re-derived from the registry at close time — the
-   * ledger row keeps only `repo#n`. Wrapped: a folder repo (no remote) or an
-   * unreachable Orca degrades to the plain reference (spec §10).
-   */
-  private async issueUrl(row: DelegationRow): Promise<string | undefined> {
-    if (row.repo === null || row.issueNumber === null) return undefined;
-    try {
-      const registry = await listRegistryRepos(this.run);
-      const key = registry.find((repo) => repo.name === row.repo)?.canonicalKey;
-      return key === undefined ? undefined : `https://${key}/issues/${row.issueNumber}`;
-    } catch (error) {
-      this.logger.warn(
-        { err: error, repo: row.repo },
-        'registry lookup for the issue link failed — plain reference',
-      );
-      return undefined;
-    }
   }
 
   // ── root reactions ─────────────────────────────────────────────────────────
@@ -540,14 +548,24 @@ export class GateWatcher {
   /**
    * Spec §8 coarse state: a failure surfaces as ❌ immediately; a success
    * flips the root to ✅ only once the thread has no other in-flight work —
-   * with siblings still running, 👀 stays the honest state. The reaction is
-   * the CURRENT state, latest terminal event wins: a sibling success after
-   * a failure does replace the ❌ — the failure keeps its ❌ card and its
-   * summary message in the thread, which are the log; the root is not.
+   * with siblings still running, the registries decide the honest state
+   * (👀, or ❓/🚨 while other gates or stall alerts wait — this is also
+   * what clears a 🚨 whose stall alert the ledger close just settled). The
+   * reaction is the CURRENT state, latest terminal event wins: a sibling
+   * success after a failure does replace the ❌ — the failure keeps its ❌
+   * card and its summary message in the thread, which are the log; the root
+   * is not.
    */
   private async swapRootReaction(threadTs: string, failed: boolean): Promise<void> {
-    if (!failed && this.store.listInFlightForThread(threadTs).length > 0) return;
-    await this.setRootReaction(threadTs, failed ? 'x' : 'white_check_mark');
+    if (failed) {
+      await this.setRootReaction(threadTs, 'x');
+      return;
+    }
+    if (this.store.listInFlightForThread(threadTs).length > 0) {
+      await settleRootReaction(this.store, this.surface, this.logger, threadTs);
+      return;
+    }
+    await this.setRootReaction(threadTs, 'white_check_mark');
   }
 
   private async setRootReaction(threadTs: string, name: RootReaction): Promise<void> {

@@ -11,6 +11,7 @@ import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
 import { GateWatcher } from './watcher.ts';
 import { BootReconciler } from './reconcile.ts';
+import { Watchdog } from './watchdog.ts';
 import { GateRelay } from './relay.ts';
 import { createProcessFactory } from './claude.ts';
 import { GateKeeper } from './gate.ts';
@@ -196,6 +197,26 @@ try {
   if (rearmed > 0) {
     logger.info({ threads: rearmed }, 'gate watchers re-armed from the delegations ledger');
   }
+
+  // The stalled-worker watchdog (spec §5, issue #22): the second detection
+  // layer — a periodic staleness sweep over the in-flight delegations'
+  // worktrees; a silent worker gets its ⚠️ alert through the same relay
+  // mold as gates, and the reply routes down as terminal keystrokes.
+  const watchdog = new Watchdog({
+    store: delegationStore,
+    surface,
+    stallAfterMs: config.watchdogStallAfterMs,
+    logger,
+  });
+  const stallSweep = (): void => {
+    watchdog.sweep().catch((error: unknown) => {
+      logger.error({ err: error }, 'watchdog sweep failed');
+    });
+  };
+  // One pass at boot: a worker that stalled while the daemon was down must
+  // not wait a full interval to surface.
+  stallSweep();
+  setInterval(stallSweep, config.watchdogSweepIntervalMs).unref();
 
   registerHandlers(app, guard, sessions, gates, relay, logger);
   await app.start();

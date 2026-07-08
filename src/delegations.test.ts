@@ -268,6 +268,97 @@ describe('DelegationStore — pending_gates registry (issue #21)', () => {
   });
 });
 
+describe('DelegationStore — stall_alerts registry (issue #22)', () => {
+  const stallRow = (overrides: Partial<Parameters<DelegationStore['recordStall']>[0]> = {}) => ({
+    dispatchId: 'ctx_8b685db09a47',
+    threadTs: THREAD,
+    workerHandle: 'term_300035ab',
+    worktreeName: 'scratch-21-bench',
+    lastOutput: '? Overwrite existing bench.json? (y/N)',
+    fingerprint: '1783528800000',
+    relayTs: '1751970003.000400',
+    ...overrides,
+  });
+
+  it('records a posted alert and reads it back pending', () => {
+    const store = openStore();
+
+    store.recordStall(stallRow());
+
+    expect(store.getStall('ctx_8b685db09a47')).toEqual({
+      ...stallRow(),
+      status: 'pending',
+      alertedAt: '2026-07-08T12:00:00.000Z',
+      answeredAt: null,
+    });
+  });
+
+  it('a new stall state replaces the old alert wholesale — back to pending', () => {
+    const store = openStore();
+    store.recordStall(stallRow());
+    store.answerStall('ctx_8b685db09a47');
+
+    store.recordStall(stallRow({ fingerprint: '1783529900000', lastOutput: '? again (y/N)' }));
+
+    expect(store.getStall('ctx_8b685db09a47')).toMatchObject({
+      fingerprint: '1783529900000',
+      lastOutput: '? again (y/N)',
+      status: 'pending',
+      answeredAt: null,
+    });
+    expect(store.listStallsForThread(THREAD)).toHaveLength(1);
+  });
+
+  it('answers a stall exactly once — the second flip reports it lost', () => {
+    const store = openStore();
+    store.recordStall(stallRow());
+
+    expect(store.answerStall('ctx_8b685db09a47')).toBe(true);
+    expect(store.answerStall('ctx_8b685db09a47')).toBe(false);
+    expect(store.answerStall('ctx_unknown')).toBe(false);
+
+    expect(store.getStall('ctx_8b685db09a47')?.answeredAt).toBe('2026-07-08T12:00:01.000Z');
+  });
+
+  it('lists a thread’s stalls oldest first, pending view filtered, thread-scoped', () => {
+    const store = openStore();
+    store.recordStall(stallRow({ dispatchId: 'ctx_1' }));
+    store.recordStall(stallRow({ dispatchId: 'ctx_2' }));
+    store.recordStall(stallRow({ dispatchId: 'ctx_other', threadTs: '1751970099.000900' }));
+    store.answerStall('ctx_1');
+
+    expect(store.listStallsForThread(THREAD).map((stall) => stall.dispatchId)).toEqual([
+      'ctx_1',
+      'ctx_2',
+    ]);
+    expect(store.listPendingStalls(THREAD).map((stall) => stall.dispatchId)).toEqual(['ctx_2']);
+  });
+
+  it('closing the delegation settles its pending stall alert — the worker reported after all', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordStall(stallRow());
+
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.getStall('ctx_8b685db09a47')?.status).toBe('answered');
+    expect(store.listPendingStalls(THREAD)).toEqual([]);
+  });
+
+  it('lists every in-flight delegation across threads — the sweep’s inspection set', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_2', threadTs: '1751970099.000900' }));
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_3' }));
+    store.closeDelegation('ctx_3', 'failed');
+
+    expect(store.listInFlight().map((row) => row.dispatchId)).toEqual([
+      'ctx_8b685db09a47',
+      'ctx_2',
+    ]);
+  });
+});
+
 describe('DelegationStore — the asking-handle fallback (issue #21)', () => {
   it('finds the thread’s newest in-flight row by worker handle, never a closed one', () => {
     const store = openStore();

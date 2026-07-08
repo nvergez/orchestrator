@@ -28,6 +28,8 @@ describe('loadConfig', () => {
       liveSessionCap: 5,
       workerCap: 3,
       watchWindowMs: 15 * 60_000,
+      watchdogSweepIntervalMs: 2 * 60_000,
+      watchdogStallAfterMs: 10 * 60_000,
       autoCloseAfterMs: 7 * 24 * 60 * 60_000,
       sweepIntervalMs: 60 * 60_000,
     });
@@ -156,6 +158,34 @@ describe('loadConfig', () => {
       expect(() => loadConfig(env)).toThrowError(/WATCH_WINDOW_MINUTES/);
     },
   );
+
+  it('defaults the watchdog to a 2-min sweep and a 10-min stall threshold (#22)', () => {
+    expect(loadConfig(validEnv).watchdogSweepIntervalMs).toBe(2 * 60_000);
+    expect(loadConfig(validEnv).watchdogStallAfterMs).toBe(10 * 60_000);
+  });
+
+  it('honors the WATCHDOG_* overrides when provided', () => {
+    const config = loadConfig({
+      ...validEnv,
+      WATCHDOG_SWEEP_INTERVAL_MINUTES: '0.5',
+      WATCHDOG_STALL_MINUTES: '25',
+    });
+
+    expect(config.watchdogSweepIntervalMs).toBe(30_000);
+    expect(config.watchdogStallAfterMs).toBe(25 * 60_000);
+  });
+
+  it.each([
+    ['WATCHDOG_SWEEP_INTERVAL_MINUTES', '0'],
+    ['WATCHDOG_SWEEP_INTERVAL_MINUTES', 'often'],
+    ['WATCHDOG_STALL_MINUTES', '-5'],
+    ['WATCHDOG_STALL_MINUTES', 'soon'],
+  ])('rejects a %s of %s (must be a positive number)', (key, badValue) => {
+    const env = { ...validEnv, [key]: badValue };
+
+    expect(() => loadConfig(env)).toThrowError(ConfigError);
+    expect(() => loadConfig(env)).toThrowError(new RegExp(key));
+  });
 
   it('defaults the auto-close span to 7 days dormant (spec §3)', () => {
     expect(loadConfig(validEnv).autoCloseAfterMs).toBe(7 * 24 * 60 * 60_000);

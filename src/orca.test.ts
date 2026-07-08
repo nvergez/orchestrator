@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   listOrchestrationTasks,
   listRegistryRepos,
+  listWorktreeActivity,
   listWorktreeProcesses,
+  readTerminalTail,
+  registryIssueUrl,
   type CommandRunner,
 } from './orca.ts';
 
@@ -116,5 +119,97 @@ describe('listWorktreeProcesses', () => {
     await expect(listWorktreeProcesses(succeedWith('not json'))).rejects.toThrow(
       /unexpected `orca worktree ps` response shape/,
     );
+  });
+});
+
+describe('registryIssueUrl', () => {
+  const registry = registryJson([
+    {
+      id: 'u1',
+      displayName: 'forwardly',
+      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+    },
+    { id: 'u2', displayName: 'scratch' },
+  ]);
+
+  it('builds the issue link off the canonical key', async () => {
+    await expect(registryIssueUrl(succeedWith(registry), 'forwardly', 84)).resolves.toBe(
+      'https://github.com/lemlist/forwardly/issues/84',
+    );
+  });
+
+  it('is undefined for a folder repo without a remote, or an unknown repo', async () => {
+    await expect(registryIssueUrl(succeedWith(registry), 'scratch', 21)).resolves.toBeUndefined();
+    await expect(registryIssueUrl(succeedWith(registry), 'ghost', 1)).resolves.toBeUndefined();
+  });
+});
+
+describe('listWorktreeActivity (issue #22)', () => {
+  const envelope = (result: object): string => JSON.stringify({ id: 'x', ok: true, result });
+
+  it('maps worktrees to their liveness signals, tolerating absent fields', async () => {
+    const activity = await listWorktreeActivity(
+      succeedWith(
+        envelope({
+          worktrees: [
+            {
+              worktreeId: 'r1::/p1',
+              lastOutputAt: 1783528800000,
+              agents: [
+                { state: 'working', stateStartedAt: 1783528000000, updatedAt: 1783528700000 },
+                { state: 'done' },
+                { notAnAgent: true },
+              ],
+            },
+            { worktreeId: 'r2::/p2', lastOutputAt: null },
+            { lastOutputAt: 123 },
+          ],
+        }),
+      ),
+    );
+
+    expect(activity.get('r1::/p1')).toEqual({
+      lastOutputAt: 1783528800000,
+      agents: [
+        { state: 'working', stateStartedAt: 1783528000000, updatedAt: 1783528700000 },
+        { state: 'done', stateStartedAt: null, updatedAt: null },
+      ],
+    });
+    expect(activity.get('r2::/p2')).toEqual({ lastOutputAt: null, agents: [] });
+    expect(activity.size).toBe(2);
+  });
+
+  it('asks for an explicit --limit and throws on a shapeless envelope', async () => {
+    const calls: string[][] = [];
+    const run: CommandRunner = (_command, args) => {
+      calls.push(args);
+      return Promise.resolve({ stdout: envelope({ worktrees: [] }) });
+    };
+    await listWorktreeActivity(run);
+    expect(calls).toEqual([['worktree', 'ps', '--limit', '1000', '--json']]);
+
+    await expect(listWorktreeActivity(succeedWith(JSON.stringify({ ok: false })))).rejects.toThrow(
+      /unexpected `orca worktree ps` response shape/,
+    );
+  });
+});
+
+describe('readTerminalTail (issue #22)', () => {
+  const envelope = (result: object): string => JSON.stringify({ id: 'x', ok: true, result });
+
+  it('returns the tail lines, dropping non-strings', async () => {
+    await expect(
+      readTerminalTail(
+        succeedWith(envelope({ terminal: { handle: 'term_1', tail: ['a', 2, 'b'] } })),
+        'term_1',
+        40,
+      ),
+    ).resolves.toEqual(['a', 'b']);
+  });
+
+  it('throws on a shapeless envelope', async () => {
+    await expect(
+      readTerminalTail(succeedWith(envelope({ terminal: {} })), 'term_1', 40),
+    ).rejects.toThrow(/unexpected `orca terminal read` response shape/);
   });
 });

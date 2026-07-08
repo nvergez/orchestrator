@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { Logger } from './logger.ts';
 
 /**
  * The one seam to the orca CLI: the promisified runner, the `--json`
@@ -146,6 +147,116 @@ export async function listWorktreeProcesses(run: CommandRunner): Promise<Worktre
       },
     ];
   });
+}
+
+/**
+ * The registry-derived GitHub issue link (`https://<canonicalKey>/issues/<n>`)
+ * — undefined for a folder repo with no remote (link rendering then degrades
+ * to plain `repo#n`, spec §8). Throws when Orca is down; callers wrap.
+ */
+export async function registryIssueUrl(
+  run: CommandRunner,
+  repoName: string,
+  issueNumber: number,
+): Promise<string | undefined> {
+  const registry = await listRegistryRepos(run);
+  const key = registry.find((repo) => repo.name === repoName)?.canonicalKey;
+  return key === undefined ? undefined : `https://${key}/issues/${issueNumber}`;
+}
+
+/**
+ * `registryIssueUrl` with the degradation every card and alert shares: a row
+ * with no linkable repo, or an unreachable Orca (spec §10, warned) →
+ * undefined, and the caller's rendering falls back to the plain `repo#n`.
+ */
+export async function safeRegistryIssueUrl(
+  run: CommandRunner,
+  logger: Logger,
+  repoName: string | null,
+  issueNumber: number | null,
+): Promise<string | undefined> {
+  if (repoName === null || issueNumber === null) return undefined;
+  try {
+    return await registryIssueUrl(run, repoName, issueNumber);
+  } catch (error) {
+    logger.warn(
+      { err: error, repo: repoName },
+      'registry lookup for the issue link failed — plain reference',
+    );
+    return undefined;
+  }
+}
+
+/** The liveness signals `orca worktree ps` reports for one worktree —
+ * everything the watchdog's staleness clock reads (issue #22). */
+export interface WorktreeActivity {
+  /** Last terminal output in the worktree, epoch ms; null when untracked. */
+  lastOutputAt: number | null;
+  /** Every agent pane's state clock — a fresh one means someone is alive. */
+  agents: Array<{ state: string; stateStartedAt: number | null; updatedAt: number | null }>;
+}
+
+/** `orca worktree ps --json` → activity by worktree id. Throws when Orca is down. */
+export async function listWorktreeActivity(
+  run: CommandRunner,
+): Promise<Map<string, WorktreeActivity>> {
+  // The explicit --limit keeps a busy runtime from truncating the summary
+  // under the watchdog silently.
+  const { stdout } = await run('orca', ['worktree', 'ps', '--limit', '1000', '--json']);
+  const worktrees = parseOrcaEnvelope(stdout)?.worktrees;
+  if (!Array.isArray(worktrees)) {
+    throw new Error('unexpected `orca worktree ps` response shape');
+  }
+  const activity = new Map<string, WorktreeActivity>();
+  for (const worktree of worktrees) {
+    const record = worktree as { worktreeId?: unknown; lastOutputAt?: unknown; agents?: unknown };
+    if (typeof record.worktreeId !== 'string') continue;
+    const agents = Array.isArray(record.agents)
+      ? record.agents.flatMap((agent: unknown) => {
+          const { state, stateStartedAt, updatedAt } = agent as {
+            state?: unknown;
+            stateStartedAt?: unknown;
+            updatedAt?: unknown;
+          };
+          if (typeof state !== 'string') return [];
+          return [
+            {
+              state,
+              stateStartedAt: typeof stateStartedAt === 'number' ? stateStartedAt : null,
+              updatedAt: typeof updatedAt === 'number' ? updatedAt : null,
+            },
+          ];
+        })
+      : [];
+    activity.set(record.worktreeId, {
+      lastOutputAt: typeof record.lastOutputAt === 'number' ? record.lastOutputAt : null,
+      agents,
+    });
+  }
+  return activity;
+}
+
+/** `orca terminal read` → the terminal's retained tail lines. Throws when
+ * Orca is down or the handle is gone. */
+export async function readTerminalTail(
+  run: CommandRunner,
+  handle: string,
+  limit: number,
+): Promise<string[]> {
+  const { stdout } = await run('orca', [
+    'terminal',
+    'read',
+    '--terminal',
+    handle,
+    '--limit',
+    String(limit),
+    '--json',
+  ]);
+  const terminal = parseOrcaEnvelope(stdout)?.terminal as { tail?: unknown } | undefined;
+  if (!Array.isArray(terminal?.tail)) {
+    throw new Error('unexpected `orca terminal read` response shape');
+  }
+  return terminal.tail.filter((line): line is string => typeof line === 'string');
 }
 
 /** Every live terminal handle on the runtime. Throws when Orca is down. */
