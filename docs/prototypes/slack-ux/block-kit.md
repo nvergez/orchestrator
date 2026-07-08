@@ -1,28 +1,28 @@
-# Variante Block Kit — non retenue par défaut
+# Block Kit variant — not adopted by default
 
-Per la décision sur le relais des gates (#9), **le texte pur est le mécanisme** ; Block Kit
-serait une couche de confort. Cette page montre à quoi ressemblerait cette couche sur les
-deux messages les plus structurés, pour trancher en connaissance de cause.
+Per the decision on gate relaying (#9), **plain text is the mechanism**; Block Kit
+would be a comfort layer. This page shows what that layer would look like on the
+two most structured messages, so the call can be made with full knowledge.
 
-Coûts de la variante : payloads plus lourds à éditer (post-then-edit sur des `blocks`
-entiers), rendu figé (un bloc ne reflow pas comme du texte), et si on ajoute des **boutons**
-aux gates il faut un chemin d'interactivité (`block_actions`) en plus du chemin texte — deux
-mécaniques de réponse à maintenir pour le même geste. Le mrkdwn pur garde « réponds dans le
-fil » comme unique geste.
+Costs of the variant: heavier payloads to edit (post-then-edit over entire
+`blocks`), rigid rendering (a block doesn't reflow like text), and if you add **buttons**
+to the gates you need an interactivity path (`block_actions`) on top of the text path — two
+reply mechanics to maintain for the same gesture. Pure mrkdwn keeps "reply in the
+thread" as the single gesture.
 
-## 1. La carte de délégation (état en cours)
+## 1. The delegation card (in-progress state)
 
 ```json
 {
   "channel": "C0ASJR3LAE6",
   "thread_ts": "1751970120.000200",
-  "text": "⚙️ forwardly#84 — export CSV des métriques d'envoi (en cours)",
+  "text": "⚙️ forwardly#84 — CSV export of send metrics (in progress)",
   "blocks": [
     {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "*⚙️ forwardly#84 — export CSV des métriques d'envoi*"
+        "text": "*⚙️ forwardly#84 — CSV export of send metrics*"
       }
     },
     {
@@ -38,42 +38,42 @@ fil » comme unique geste.
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "• 14:04 — issue créée, worktree prêt, brief transmis (task `t-3f81`)\n• 14:12 — worker : « endpoint `/metrics/export` posé, tests en cours »"
+        "text": "• 14:04 — issue created, worktree ready, brief handed off (task `t-3f81`)\n• 14:12 — worker: “endpoint `/metrics/export` in place, tests running”"
       }
     },
     {
       "type": "context",
       "elements": [
-        { "type": "mrkdwn", "text": "dernier signe de vie : il y a 2 min" }
+        { "type": "mrkdwn", "text": "last sign of life: 2 min ago" }
       ]
     }
   ]
 }
 ```
 
-## 2. Le gate worker (question verbatim + options)
+## 2. The worker gate (verbatim question + options)
 
-Version avec boutons — chaque bouton porte le **texte intégral** de son option (transmis en
-verbatim per #9) ; le texte libre dans le fil reste toujours accepté en parallèle.
+Version with buttons — each button carries the **full text** of its option (relayed
+verbatim per #9); free text in the thread always remains accepted in parallel.
 
 ```json
 {
   "channel": "C0ASJR3LAE6",
   "thread_ts": "1751970120.000200",
-  "text": "❓ orca-53-lint-ci demande : quelle config lint fait foi pour la CI ?",
+  "text": "❓ orca-53-lint-ci asks: which lint config is authoritative for CI?",
   "blocks": [
     {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "❓ *`orca-53-lint-ci`* (<https://github.com/nvergez/orca/issues/53|orca#53>) demande :"
+        "text": "❓ *`orca-53-lint-ci`* (<https://github.com/nvergez/orca/issues/53|orca#53>) asks:"
       }
     },
     {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "> Deux configs lint coexistent (`.eslintrc.cjs` à la racine, `eslint.config.mjs` dans `app/`). Laquelle fait foi pour la CI ?"
+        "text": "> Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in `app/`). Which one is authoritative for CI?"
       }
     },
     {
@@ -83,8 +83,8 @@ verbatim per #9) ; le texte libre dans le fil reste toujours accepté en parall�
         {
           "type": "button",
           "action_id": "gate_opt_1",
-          "text": { "type": "plain_text", "text": "1 · .eslintrc.cjs (racine)" },
-          "value": ".eslintrc.cjs (racine)"
+          "text": { "type": "plain_text", "text": "1 · .eslintrc.cjs (root)" },
+          "value": ".eslintrc.cjs (root)"
         },
         {
           "type": "button",
@@ -95,8 +95,8 @@ verbatim per #9) ; le texte libre dans le fil reste toujours accepté en parall�
         {
           "type": "button",
           "action_id": "gate_opt_3",
-          "text": { "type": "plain_text", "text": "3 · Fusionner vers flat config" },
-          "value": "Fusionner les deux vers flat config"
+          "text": { "type": "plain_text", "text": "3 · Merge into flat config" },
+          "value": "Merge both into flat config"
         }
       ]
     },
@@ -105,7 +105,7 @@ verbatim per #9) ; le texte libre dans le fil reste toujours accepté en parall�
       "elements": [
         {
           "type": "mrkdwn",
-          "text": "ou réponds dans ce fil — numéro ou texte libre"
+          "text": "or reply in this thread — a number or free text"
         }
       ]
     }

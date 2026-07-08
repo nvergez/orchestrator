@@ -1,311 +1,311 @@
-# Mock des conversations Slack — `#orchestrator`
+# Slack conversation mock — `#orchestrator`
 
-Convention de lecture : chaque bloc cité `>` est **un message Slack**. `**qui** — heure` en
-tête. Les *(annotations en italique)* ne sont pas des messages : elles expliquent la mécanique.
-Quand un message est **édité en place**, ses versions successives sont montrées avec
-« ✏️ le même message, après édition ».
+Reading convention: each quoted block `>` is **one Slack message**. `**who** — time` at
+the top. The *(annotations in italics)* are not messages: they explain the mechanics.
+When a message is **edited in place**, its successive versions are shown with
+"✏️ the same message, after editing".
 
 ---
 
-## A — Nominal complet : demande → clarify → délégation → progression → done
+## A — Full nominal path: request → clarify → delegation → progress → done
 
-*(Message racine dans le channel. Session ouverte par @mention sur racine, per #5.)*
+*(Root message in the channel. Session opened by @mention on the root, per #5.)*
 
 > **Nicolas** — 14:02
-> @orchestrator ajoute un petit export CSV des métriques d'envoi
+> @orchestrator add a small CSV export of the send metrics
 >
-> réactions : 👀 *(posée par le bot : « je traite »)*
+> reactions: 👀 *(added by the bot: "I'm on it")*
 
-*(Toute la suite se passe dans le thread. Le routing tourne en silence : `orca repo list
---json` + hints → deux candidats crédibles → clarify-on-doubt, per #10. La réponse du bot
-apparaît en post-then-edit — d'abord tronquée, puis complète en ~2 s :)*
+*(Everything that follows happens in the thread. Routing runs silently: `orca repo list
+--json` + hints → two credible candidates → clarify-on-doubt, per #10. The bot's reply
+appears via post-then-edit — truncated at first, then complete in ~2 s:)*
 
 > **orchestrator** `APP` — 14:02
-> Deux repos peuvent correspondre :
-> **1.** `forwardly` — le produit : l'export vivrait dans l'app, branché sur les vraies données
-> **2.** `scratch` — bac à sable : script one-shot à côté du produit
-> Je partirais avec l'agent **claude**. Réponds **1**, **2**, ou nomme un autre repo.
+> Two repos could match:
+> **1.** `forwardly` — the product: the export would live in the app, wired to real data
+> **2.** `scratch` — sandbox: a one-shot script alongside the product
+> I'd go with the **claude** agent. Reply **1**, **2**, or name another repo.
 >
-> réaction racine : 👀 → ❓
+> root reaction: 👀 → ❓
 
-*(Per #10 : la désambiguïsation **est** la confirmation — un seul aller-retour. Répondre « 1 »
-vaut go, y compris pour l'agent annoncé. Pas de second gate.)*
+*(Per #10: the disambiguation **is** the confirmation — a single round trip. Replying "1"
+counts as go, including for the announced agent. No second gate.)*
 
 > **Nicolas** — 14:03
 > 1
 
-*(Délégation immédiate, per #4 : issue GitHub créée sur le repo cible, worktree
-`<repo>-<issue#>-<slug>`, brief par `dispatch --inject`. Le bot poste **la carte** — un
-message de statut qui sera édité aux jalons, jamais re-posté :)*
+*(Immediate delegation, per #4: GitHub issue created on the target repo, worktree
+`<repo>-<issue#>-<slug>`, brief via `dispatch --inject`. The bot posts **the card** — a
+status message that will be edited at milestones, never re-posted:)*
 
 > **orchestrator** `APP` — 14:04
-> ⚙️ **forwardly#84 — export CSV des métriques d'envoi**
+> ⚙️ **forwardly#84 — CSV export of send metrics**
 > `forwardly-84-csv-export` · claude · issue [forwardly#84](https://github.com/lemlist/forwardly/issues/84)
-> • 14:04 — issue créée, worktree prêt, brief transmis (task `t-3f81`)
+> • 14:04 — issue created, worktree ready, brief handed off (task `t-3f81`)
 >
-> réaction racine : ❓ → 👀
+> root reaction: ❓ → 👀
 
-*(✏️ le même message, après édition — 14:12, sur un `status` du worker. Les éditions ne
-notifient pas : c'est voulu, c'est de l'ambiant.)*
+*(✏️ the same message, after editing — 14:12, on a worker `status`. Edits don't
+notify: that's intentional, it's ambient.)*
 
-> **orchestrator** `APP` — 14:04 *(édité)*
-> ⚙️ **forwardly#84 — export CSV des métriques d'envoi**
+> **orchestrator** `APP` — 14:04 *(edited)*
+> ⚙️ **forwardly#84 — CSV export of send metrics**
 > `forwardly-84-csv-export` · claude · issue [forwardly#84](https://github.com/lemlist/forwardly/issues/84)
-> • 14:04 — issue créée, worktree prêt, brief transmis (task `t-3f81`)
-> • 14:12 — worker : « endpoint `/metrics/export` posé, tests en cours »
-> • dernier signe de vie : il y a 2 min
+> • 14:04 — issue created, worktree ready, brief handed off (task `t-3f81`)
+> • 14:12 — worker: "endpoint `/metrics/export` in place, tests running"
+> • last sign of life: 2 min ago
 
-*(14:31 — `worker_done`. Le daemon réveille la session (per #9), qui fait deux choses :
-elle **édite la carte** vers son état final ✅ — les liens durables vivent là — et poste une
-**synthèse courte** en nouveau message, parce que « c'est fini » exige une notification.)*
+*(14:31 — `worker_done`. The daemon wakes the session (per #9), which does two things:
+it **edits the card** to its final ✅ state — the durable links live there — and posts a
+**short summary** as a new message, because "it's done" deserves a notification.)*
 
-> **orchestrator** `APP` — 14:04 *(édité)*
-> ✅ **forwardly#84 — export CSV des métriques d'envoi — livré en 27 min**
-> • PR : [forwardly#87 — Add CSV export of send metrics](https://github.com/lemlist/forwardly/pull/87) *(prête à relire)*
-> • issue : [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — commentaire de résolution posté
-> • worktree : `~/orca/workspaces/forwardly/forwardly-84-csv-export`
+> **orchestrator** `APP` — 14:04 *(edited)*
+> ✅ **forwardly#84 — CSV export of send metrics — delivered in 27 min**
+> • PR: [forwardly#87 — Add CSV export of send metrics](https://github.com/lemlist/forwardly/pull/87) *(ready for review)*
+> • issue: [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — resolution comment posted
+> • worktree: `~/orca/workspaces/forwardly/forwardly-84-csv-export`
 
 > **orchestrator** `APP` — 14:31
-> ✅ Livré — [forwardly#87](https://github.com/lemlist/forwardly/pull/87) prête à relire :
-> endpoint `/metrics/export` + bouton dans le dashboard, tests verts. Détails dans la carte ⤴
+> ✅ Delivered — [forwardly#87](https://github.com/lemlist/forwardly/pull/87) ready for review:
+> `/metrics/export` endpoint + dashboard button, tests green. Details in the card ⤴
 >
-> réaction racine : 👀 → ✅
+> root reaction: 👀 → ✅
 
 ---
 
-## B — Gate d'autonomie (push)
+## B — Autonomy gate (push)
 
-*(Repo et action explicites dans la demande → délégation/action directe, sans gate de
-confirmation de routing, per #10. Mais `git push` est en catégorie CONFIRM, per #8 :
-`canUseTool` suspend la commande et pose un gate d'UNE ligne.)*
+*(Repo and action explicit in the request → direct delegation/action, no routing
+confirmation gate, per #10. But `git push` is in the CONFIRM category, per #8:
+`canUseTool` suspends the command and posts a ONE-line gate.)*
 
 > **Nicolas** — 09:15
-> @orchestrator la PR forwardly#87 a un conflit — rebase-la sur main et re-pousse
+> @orchestrator PR forwardly#87 has a conflict — rebase it on main and re-push
 >
-> réactions : 👀
+> reactions: 👀
 
 > **orchestrator** `APP` — 09:16
-> Rebase fait dans `forwardly-84-csv-export`, conflit résolu (lockfile), tests verts.
+> Rebase done in `forwardly-84-csv-export`, conflict resolved (lockfile), tests green.
 >
-> réaction racine : 👀
+> root reaction: 👀
 
 > **orchestrator** `APP` — 09:18
-> 🚦 `git push --force-with-lease` sur `forwardly/csv-export-metrics` — go ?
+> 🚦 `git push --force-with-lease` on `forwardly/csv-export-metrics` — go?
 >
-> réaction racine : 👀 → ❓
+> root reaction: 👀 → ❓
 
 > **Nicolas** — 09:20
 > go
 
 > **orchestrator** `APP` — 09:20
-> ✅ Poussé — CI relancée sur [forwardly#87](https://github.com/lemlist/forwardly/pull/87).
+> ✅ Pushed — CI re-triggered on [forwardly#87](https://github.com/lemlist/forwardly/pull/87).
 >
-> réaction racine : ❓ → ✅
+> root reaction: ❓ → ✅
 
-*(Le gate 🚦 est un message de thread ordinaire dont on attend la réponse — pas un bouton,
-pas un `decision_gate` de DAG. Même moule pour merge, deploy, suppression :
-« 🚦 `gh pr merge forwardly#87` (squash) — go ? », « 🚦 `orca worktree delete
-forwardly-84-csv-export` — go ? ».)*
+*(The 🚦 gate is an ordinary thread message awaiting a reply — not a button,
+not a DAG `decision_gate`. Same mold for merge, deploy, deletion:
+"🚦 `gh pr merge forwardly#87` (squash) — go?", "🚦 `orca worktree delete
+forwardly-84-csv-export` — go?".)*
 
 ---
 
-## C — Gate worker remontée : question verbatim + options → réponse
+## C — Worker gate relayed: verbatim question + options → reply
 
-*(Une délégation `orca#53` est en vol depuis 20 min ; la session s'est assoupie (TTL 30 min
-per #5). Le worker pose un `ask`. Le daemon — qui écoute, per #9 — réveille la session, qui
-poste un **nouveau message** de gate. Contrat de contenu per #9 : qui demande, la question
-**en verbatim, jamais paraphrasée**, les options numérotées, la consigne.)*
+*(A delegation `orca#53` has been in flight for 20 min; the session has gone dormant (30 min TTL
+per #5). The worker posts an `ask`. The daemon — which is listening, per #9 — wakes the session, which
+posts a **new** gate message. Content contract per #9: who is asking, the question
+**verbatim, never paraphrased**, the numbered options, the instructions.)*
 
 > **orchestrator** `APP` — 16:40
-> ❓ **`orca-53-lint-ci`** ([orca#53](https://github.com/nvergez/orca/issues/53)) demande :
+> ❓ **`orca-53-lint-ci`** ([orca#53](https://github.com/nvergez/orca/issues/53)) asks:
 >
-> > Deux configs lint coexistent (`.eslintrc.cjs` à la racine, `eslint.config.mjs` dans
-> > `app/`). Laquelle fait foi pour la CI ?
-> > **1.** `.eslintrc.cjs` (racine)
+> > Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in
+> > `app/`). Which one is authoritative for CI?
+> > **1.** `.eslintrc.cjs` (root)
 > > **2.** `eslint.config.mjs` (app/)
-> > **3.** Fusionner les deux vers flat config
+> > **3.** Merge both into flat config
 >
-> Réponds dans ce fil — numéro ou texte libre.
+> Reply in this thread — a number or free text.
 >
-> réaction racine : 👀 → ❓
+> root reaction: 👀 → ❓
 
 > **Nicolas** — 16:52
 > 3
 
-*(Une seule gate pending dans ce fil → la réponse route vers elle sans cérémonie, per #9.
-« 3 » est transmis comme le **texte intégral de l'option 3, en verbatim** — le LLM ne
-reformule jamais une décision humaine. Redescente par `orchestration reply --id`.)*
+*(A single pending gate in this thread → the reply routes to it without ceremony, per #9.
+"3" is relayed as the **full text of option 3, verbatim** — the LLM never
+rephrases a human decision. Sent back down via `orchestration reply --id`.)*
 
 > **orchestrator** `APP` — 16:52
-> ✅ Transmis à `orca#53` — « Fusionner les deux vers flat config »
+> ✅ Relayed to `orca#53` — "Merge both into flat config"
 >
-> réaction racine : ❓ → 👀
+> root reaction: ❓ → 👀
 
-*(La carte de la délégation, plus haut dans le fil, est éditée : la ligne « ❓ en attente
-de ta réponse » redevient « ⚙️ en cours ».)*
+*(The delegation's card, higher up in the thread, is edited: the "❓ awaiting
+your reply" line goes back to "⚙️ in progress".)*
 
 ---
 
-## D — Avertissement de coût
+## D — Cost warning
 
-*(Ledger SQLite par session, per #5/#8 : seuils configurables, défauts 5 $ puis 10 $.
-Mesure seule — jamais de blocage. Nouveau message : un franchissement de seuil mérite une
-notification, pas une édition.)*
+*(SQLite ledger per session, per #5/#8: configurable thresholds, defaults $5 then $10.
+Measurement only — never blocking. New message: crossing a threshold deserves a
+notification, not an edit.)*
 
 > **orchestrator** `APP` — 17:20
-> 💸 Ce fil a coûté **5,03 $** (seuil 5 $ franchi) — info seulement, rien n'est bloqué.
-> Prochain avertissement à 10 $.
+> 💸 This thread has cost **$5.03** ($5 threshold crossed) — info only, nothing is blocked.
+> Next warning at $10.
 
-*(Compte la session orchestrateur uniquement : les tokens des workers délégués ne remontent
-pas dans le ledger v1 — limite actée en #8.)*
+*(Counts the orchestrator session only: delegated workers' tokens don't feed
+into the v1 ledger — limitation accepted in #8.)*
 
 ---
 
-## E — « Où en est X ? »
+## E — "Where is X at?"
 
-*(Statut à la demande = la troisième voie de la tranche « progression » : la carte est le
-tableau de bord ambiant, mais on peut toujours interroger. Réponse = **nouveau message**
-snapshot ; la carte reste la surface vivante.)*
+*(On-demand status = the third path of the "progress" slice: the card is the
+ambient dashboard, but you can always ask. Reply = **new** snapshot
+message; the card remains the living surface.)*
 
 > **Nicolas** — 15:05
-> où en est l'export CSV ?
+> where is the CSV export at?
 
 > **orchestrator** `APP` — 15:05
-> ⚙️ Toujours en cours — `forwardly-84-csv-export` (claude) travaille depuis 22 min.
-> Dernier statut (il y a 3 min) : « endpoint fait, je branche le bouton dashboard ».
-> Aucune question en attente. Détail : carte ⤴
+> ⚙️ Still in progress — `forwardly-84-csv-export` (claude) has been working for 22 min.
+> Last status (3 min ago): "endpoint done, wiring up the dashboard button".
+> No question pending. Details: card ⤴
 
-*(Sources : `task-list`, `worktree ps`, derniers `status`/heartbeats — pas de devinette.
-Si la session dormait, ce message l'a réveillée comme n'importe quel message humain.)*
+*(Sources: `task-list`, `worktree ps`, latest `status`/heartbeats — no guessing.
+If the session was dormant, this message woke it like any human message.)*
 
 ---
 
-## F — Session assoupie, réveillée sans cérémonie
+## F — Dormant session, woken without ceremony
 
-*(Dernier échange à 14:31. TTL de chaleur 30 min → la session s'est assoupie à ~15:00 :
-process réapé, `session_id` persisté, per #5. AUCUN message d'assoupissement — c'est un
-état technique, pas un événement. À 17:48, reprise en thread **sans re-mention** :)*
+*(Last exchange at 14:31. 30 min warmth TTL → the session went dormant at ~15:00:
+process reaped, `session_id` persisted, per #5. NO dormancy message — it's a
+technical state, not an event. At 17:48, resume in-thread **without re-mention**:)*
 
 > **Nicolas** — 17:48
-> au fait, ajoute aussi l'export en JSON
+> by the way, also add a JSON export
 
 > **orchestrator** `APP` — 17:48
-> Bonne suite de [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — je crée
-> une issue liée et je délègue sur **forwardly** avec **claude**. Go ?
+> Nice follow-up to [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — I'll create
+> a linked issue and delegate on **forwardly** with **claude**. Go?
 
-*(Le réveil à froid via `resume` coûte quelques secondes de latence — c'est TOUT ce que
-l'humain perçoit. Le gate de confirmation réapparaît ici parce que repo/agent sont inférés
-du contexte, per #10.)*
+*(The cold wake via `resume` costs a few seconds of latency — that's ALL the
+human perceives. The confirmation gate reappears here because repo/agent are inferred
+from context, per #10.)*
 
-### F′ — Plafond atteint : la file
+### F′ — Cap reached: the queue
 
-*(5 sessions live, toutes en plein tour, per #5 : jamais de rejet sec, jamais de travail
-perdu — le message est mis en file et on l'annonce :)*
+*(5 live sessions, all mid-turn, per #5: never a hard rejection, never lost work
+— the message is queued and announced:)*
 
 > **orchestrator** `APP` — 11:02
-> ⏳ En file (5 sessions actives) — je m'y mets dès qu'un slot se libère.
+> ⏳ Queued (5 active sessions) — I'll get to it as soon as a slot frees up.
 
 ---
 
-## G — Un tiers écrit
+## G — A third party writes
 
-*(Allow-list utilisateur en env, v1 = un seul user, per #8.)*
+*(User allow-list in env, v1 = a single user, per #8.)*
 
-**G1 — @mention racine par un tiers → refus poli, aucune session créée :**
+**G1 — root @mention by a third party → polite refusal, no session created:**
 
 > **Charline** — 10:12
-> @orchestrator déploie forwardly en prod
+> @orchestrator deploy forwardly to prod
 
 > **orchestrator** `APP` — 10:12
-> v1 : seul <@U09CC6M3W1W> peut me piloter.
+> v1: only <@U09CC6M3W1W> can drive me.
 
-*(Découvrable : un collègue qui teste ne croit pas le bot cassé. Pas de réaction 👀, pas de
+*(Discoverable: a colleague trying it out doesn't think the bot is broken. No 👀 reaction, no
 session.)*
 
-**G2 — réponse d'un tiers dans un thread actif → ignorée en silence :**
+**G2 — third-party reply in an active thread → silently ignored:**
 
-> **Charline** — 10:31 *(dans le thread de l'export CSV)*
-> ou plutôt fais-le en Go
+> **Charline** — 10:31 *(in the CSV export thread)*
+> actually do it in Go instead
 
-*(Rien. Le message n'est jamais injecté dans la session — garde-fou anti-injection per #8 :
-la reprise en thread se fait sans re-mention, donc sans ce filtre n'importe qui pourrait
-piloter une session en cours. Silence assumé, pas de « je t'ignore » qui pollue le fil.)*
+*(Nothing. The message is never injected into the session — anti-injection guardrail per #8:
+in-thread resume happens without re-mention, so without this filter anyone could
+drive a running session. Deliberate silence — no "I'm ignoring you" polluting the thread.)*
 
 ---
 
-## Moments brefs
+## Brief moments
 
-### Clôture explicite — `@orchestrator close`
+### Explicit close — `@orchestrator close`
 
 > **Nicolas** — 18:30
 > @orchestrator close
 
 > **orchestrator** `APP` — 18:30
-> 🔚 Session close.
-> • 2 délégations : ✅ `forwardly#84` (PR [#87](https://github.com/lemlist/forwardly/pull/87) mergée) · ✅ `forwardly#91` (export JSON, PR [#93](https://github.com/lemlist/forwardly/pull/93) à relire)
-> • coût du fil : 6,84 $ · 19 tours
-> Mentionne-moi sur un nouveau message racine pour repartir.
+> 🔚 Session closed.
+> • 2 delegations: ✅ `forwardly#84` (PR [#87](https://github.com/lemlist/forwardly/pull/87) merged) · ✅ `forwardly#91` (JSON export, PR [#93](https://github.com/lemlist/forwardly/pull/93) to review)
+> • thread cost: $6.84 · 19 turns
+> Mention me on a new root message to start again.
 
-### Réponse dans un thread clos
+### Reply in a closed thread
 
-> **Nicolas** — *(3 jours plus tard, dans le même fil)*
-> et une version XML ?
+> **Nicolas** — *(3 days later, in the same thread)*
+> and an XML version?
 
 > **orchestrator** `APP`
-> Session close. Mentionne-moi sur un nouveau message racine pour repartir.
+> Session closed. Mention me on a new root message to start again.
 
-*(Verbatim de #5 : `closed` est définitif et prévisible — pas de réouverture v1.)*
+*(Verbatim from #5: `closed` is final and predictable — no reopening in v1.)*
 
-### Redémarrage du daemon — réconciliation
+### Daemon restart — reconciliation
 
-*(Per #8 : au boot, relire les délégations en vol, réconcilier avec `task-list`/`worktree
-ps`, poster UNE ligne par thread concerné — sans réveiller la session.)*
+*(Per #8: at boot, re-read in-flight delegations, reconcile with `task-list`/`worktree
+ps`, post ONE line per affected thread — without waking the session.)*
 
 > **orchestrator** `APP` — 08:04
-> ⚠️ Redémarré — `forwardly#84` était en vol : toujours en cours (dernier signe il y a
-> 4 min). Réponds pour reprendre la supervision.
+> ⚠️ Restarted — `forwardly#84` was in flight: still in progress (last sign
+> 4 min ago). Reply to resume supervision.
 
-### Zéro match — stop + liste
+### Zero match — stop + list
 
 > **Nicolas** — 11:40
-> @orchestrator corrige le bug du site vitrine
+> @orchestrator fix the showcase site bug
 
 > **orchestrator** `APP` — 11:40
-> Aucun repo que je pilote ne correspond. Je connais : `forwardly`, `orca`, `scratch`,
-> `orchestrator`. Reformule en visant l'un d'eux.
+> No repo I drive matches. I know: `forwardly`, `orca`, `scratch`,
+> `orchestrator`. Rephrase targeting one of them.
 
-*(Per #10 : jamais de fallback silencieux, pas de `scratch` attrape-tout.)*
+*(Per #10: never a silent fallback, no catch-all `scratch`.)*
 
-### Escalation d'un worker
+### Worker escalation
 
 > **orchestrator** `APP` — 15:47
-> 🚨 **`forwardly-84-csv-export`** ([forwardly#84](https://github.com/lemlist/forwardly/issues/84)) escalade :
+> 🚨 **`forwardly-84-csv-export`** ([forwardly#84](https://github.com/lemlist/forwardly/issues/84)) escalates:
 >
-> > Les tests e2e cassent sur `main` même sans mes changements — je suspends en attendant.
+> > The e2e tests break on `main` even without my changes — I'm pausing until further notice.
 >
-> Réponds dans ce fil.
+> Reply in this thread.
 >
-> réaction racine : 👀 → 🚨
+> root reaction: 👀 → 🚨
 
-*(Même contrat que le gate ❓ — verbatim, mais marqué urgent et généralement sans options,
+*(Same contract as the ❓ gate — verbatim, but flagged urgent and usually without options,
 per #9.)*
 
-### Worker calé (watchdog)
+### Stalled worker (watchdog)
 
 > **orchestrator** `APP` — 16:20
-> ⚠️ **`scratch-21-bench`** ([scratch#21](https://github.com/nvergez/scratch/issues/21)) semble calé —
-> aucun signe depuis 25 min, sans avoir posé de question. Dernier output :
+> ⚠️ **`scratch-21-bench`** ([scratch#21](https://github.com/nvergez/scratch/issues/21)) seems stalled —
+> no sign for 25 min, without having asked a question. Last output:
 >
 > > `? Overwrite existing bench.json? (y/N)`
 >
-> Dis-moi quoi répondre, je le transmets à son terminal.
+> Tell me what to answer, I'll relay it to its terminal.
 >
-> réaction racine : 👀 → 🚨
+> root reaction: 👀 → 🚨
 
-*(Redescente par `terminal send` — pas de `reply` possible, il n'y a pas d'`ask`, per #9.)*
+*(Sent back down via `terminal send` — no `reply` possible, there is no `ask`, per #9.)*
 
-### Accueil
+### Welcome
 
-*(Aucun — ni épinglé par thread, ni épinglé/canvas au niveau du channel. Tranché en
-itération HITL : l'usage s'apprend par la pratique — le refus poli guide les tiers, les
-réactions et les cartes se comprennent d'elles-mêmes.)*
+*(None — neither pinned per thread, nor pinned/canvas at the channel level. Decided in a
+HITL iteration: usage is learned by practice — the polite refusal guides third parties, and the
+reactions and cards are self-explanatory.)*

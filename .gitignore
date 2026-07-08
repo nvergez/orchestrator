@@ -1,4 +1,4 @@
-# Secrets — jamais commités. Vrai fichier hors-repo : /home/dev/projects/orchestrator/.env
+# Secrets — never committed. Real file lives outside the repo: /home/dev/projects/orchestrator/.env
 .env
 .env.*
 !.env.example
