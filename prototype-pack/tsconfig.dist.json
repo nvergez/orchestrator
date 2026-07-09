@@ -1,0 +1,17 @@
+{
+  // PROTOTYPE (#67) — throwaway. Emit config for shape B (compiled dist/).
+  // Compiles the staged source tree (.work/source/src, prepared by run.mjs)
+  // instead of ../src so the shebang-injected index.ts and prototype-crash.ts
+  // are part of the build. rewriteRelativeImportExtensions turns the repo's
+  // `./x.ts` import specifiers into `./x.js` in the emitted output.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./.work/shape-dist/dist",
+    "rootDir": "./.work/source/src",
+    "sourceMap": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["./.work/source/src"],
+  "exclude": ["./.work/source/src/**/*.test.ts"]
+}
