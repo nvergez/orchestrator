@@ -55,7 +55,7 @@ Decision [#5](https://github.com/nvergez/orchestrator/issues/5). Guiding princip
 - **Resume**: any reply in a registered thread, no re-mention needed. Ignored: bot's own messages, `subtype` events, other bots, replies in unregistered threads (never a ghost resume).
 - **States**: `live` (turn in progress, or warm ≤ 30 min after last turn) ⇄ `dormant` (no process; cold-resume via `query({ resume: session_id })`) → `closed` (final).
 - **Concurrency**: FIFO per thread (double-posts queue until next `ResultMessage`); **global cap of 5 live sessions** (env-configurable). At the cap: reap the coldest finished-turn session, else queue the message and post `⏳ queued`. Never a hard reject.
-- **Close**: explicit `@orchestrator close` (posts a closing summary: delegations, cost, turns) or auto-close after **7 days** dormant. Reply in a closed thread → one fixed line, no resume. No implicit close on task completion.
+- **Close**: an explicit `close` — the bare word as the whole thread reply, **mention optional** (it was mention-only while mention-less replies never reached the daemon, [#38](https://github.com/nvergez/orchestrator/issues/38)) — posts a closing summary (delegations, cost, turns); or auto-close after **7 days** dormant. Thread-only: a mention-less `close` at the channel root opens nothing, a mentioned one opens a session. A longer sentence containing the word is an ordinary turn. Reply in a closed thread → one fixed line, no resume. No implicit close on task completion.
 - **Boot rule**: every session comes back **dormant**; a turn orphaned by a crash waits for the next human message (no auto-resume in v1).
 
 ## 4. Repo routing & agent selection
