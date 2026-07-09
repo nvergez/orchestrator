@@ -616,3 +616,25 @@ describe('observe — the card, the 👀 and the ledger', () => {
     await expect(coordinator.observe(THREAD, 'orca terminal list --json', '{}')).resolves.toBeUndefined();
   });
 });
+
+describe('created-but-undispatched worktrees (issue #49)', () => {
+  it('hasUndispatched covers exactly the create→dispatch window', async () => {
+    const { coordinator } = makeCoordinator();
+    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+
+    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    expect(coordinator.hasUndispatched(THREAD)).toBe(true);
+
+    await primeWorker(coordinator);
+    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+  });
+
+  it('a failed create leaves nothing behind — no phantom undispatched work', async () => {
+    const { coordinator } = makeCoordinator();
+
+    await coordinator.observe(THREAD, CREATE_CMD, envelope({ error: 'boom' }));
+
+    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+  });
+});

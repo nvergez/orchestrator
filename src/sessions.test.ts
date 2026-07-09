@@ -60,6 +60,8 @@ interface Harness {
   spawns: Array<{ resumeSessionId: string | null; proc: FakeProcess }>;
   voices: FakeVoice[];
   notices: Array<{ threadTs: string; text: string }>;
+  turnStarts: string[];
+  turnEnds: string[];
 }
 
 const makeHarness = (
@@ -70,12 +72,16 @@ const makeHarness = (
     cap?: number;
     autoCloseMs?: number;
     countDelegations?: (threadTs: string) => number;
+    onTurnStart?: (threadTs: string) => Promise<void>;
+    onTurnEnd?: (threadTs: string) => Promise<void>;
   } = {},
 ): Harness => {
   const store = options.store ?? new SessionStore(':memory:');
   const spawns: Harness['spawns'] = [];
   const voices: FakeVoice[] = [];
   const notices: Harness['notices'] = [];
+  const turnStarts: string[] = [];
+  const turnEnds: string[] = [];
   const manager = new SessionManager({
     store,
     spawn: ({ resumeSessionId }) => {
@@ -99,9 +105,21 @@ const makeHarness = (
     liveSessionCap: options.cap ?? 5,
     autoCloseAfterMs: options.autoCloseMs ?? 7 * DAY,
     countDelegations: options.countDelegations ?? (() => 0),
+    onTurnStart:
+      options.onTurnStart ??
+      ((threadTs) => {
+        turnStarts.push(threadTs);
+        return Promise.resolve();
+      }),
+    onTurnEnd:
+      options.onTurnEnd ??
+      ((threadTs) => {
+        turnEnds.push(threadTs);
+        return Promise.resolve();
+      }),
     logger: createLogger('silent'),
   });
-  return { manager, store, spawns, voices, notices };
+  return { manager, store, spawns, voices, notices, turnStarts, turnEnds };
 };
 
 const chattyScript = (sessionId: string) => (text: string, events: TurnEvents) => {
@@ -224,6 +242,8 @@ describe('SessionManager', () => {
       liveSessionCap: 5,
       autoCloseAfterMs: 7 * DAY,
       countDelegations: () => 0,
+      onTurnStart: () => Promise.resolve(),
+      onTurnEnd: () => Promise.resolve(),
       logger: createLogger('silent'),
     });
 
@@ -774,6 +794,104 @@ describe('SessionManager auto-close sweep (spec §3)', () => {
     expect(notices.at(-1)?.text).toBe(
       'Session closed. Mention me on a new root message to start again.',
     );
+  });
+});
+
+describe('SessionManager turn-lifecycle root ack (issue #49)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('acks the turn start before the turn runs — 👀 lands before any reply text', async () => {
+    const order: string[] = [];
+    const { manager, turnEnds } = makeHarness(
+      (text, events) => {
+        order.push(`turn:${text}`);
+        events.onSessionId('sess-1');
+        return { status: 'success', resultText: 'ok', costUsd: 0 };
+      },
+      {
+        onTurnStart: (threadTs) => {
+          order.push(`start:${threadTs}`);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+
+    expect(order).toEqual([`start:${THREAD}`, 'turn:hello']);
+    expect(turnEnds).toEqual([THREAD]);
+  });
+
+  it('every turn kind acks — open, reply, and orchestration wake alike', async () => {
+    const { manager, turnStarts, turnEnds } = makeHarness(chattyScript('sess-1'));
+
+    manager.open(THREAD, CHANNEL, USER, 'open turn');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'reply turn');
+    await flush();
+    manager.wake(THREAD, CHANNEL, '[orchestration event] worker_done …');
+    await flush();
+
+    expect(turnStarts).toEqual([THREAD, THREAD, THREAD]);
+    expect(turnEnds).toEqual([THREAD, THREAD, THREAD]);
+  });
+
+  it('settles the turn end after a failed turn too — the 👀 never sticks on an error', async () => {
+    const { manager, turnEnds, voices } = makeHarness(() => ({
+      status: 'error',
+      errors: ['boom'],
+    }));
+
+    manager.open(THREAD, CHANNEL, USER, 'explode');
+    await flush();
+
+    expect(voices[0]?.finalized).toBe(true);
+    expect(turnEnds).toEqual([THREAD]);
+  });
+
+  it('a failing ack never blocks the turn', async () => {
+    const { manager, voices, turnEnds } = makeHarness(chattyScript('sess-1'), {
+      onTurnStart: () => Promise.reject(new Error('slack down')),
+    });
+
+    manager.open(THREAD, CHANNEL, USER, 'hello');
+    await flush();
+
+    expect(voices[0]?.finalized).toBe(true);
+    expect(turnEnds).toEqual([THREAD]);
+  });
+
+  it('a failing settle never blocks the drain — the next turn still runs', async () => {
+    const { manager, spawns, voices } = makeHarness(chattyScript('sess-1'), {
+      onTurnEnd: () => Promise.reject(new Error('slack down')),
+    });
+
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'second');
+    await flush();
+
+    expect(spawns).toHaveLength(1);
+    expect(voices).toHaveLength(2);
+    expect(voices[1]?.finalized).toBe(true);
+  });
+
+  it('a message queued at the cap still acks immediately — 👀 within seconds, not when a slot frees', async () => {
+    const { manager, turnStarts, spawns } = makeHarness(undefined, { cap: 1 });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+
+    manager.open(THREAD_2, CHANNEL, USER, 'waiting');
+    await flush();
+
+    expect(spawns).toHaveLength(1); // THREAD_2 still waits for a slot…
+    expect(turnStarts).toEqual([THREAD, THREAD_2]); // …but its 👀 already landed
   });
 });
 

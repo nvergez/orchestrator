@@ -149,6 +149,66 @@ export async function settleRootReaction(
   await applyRootReaction(surface, logger, threadTs, name);
 }
 
+/** The registry slice the turn-end settle reads — in-flight work plus the
+ * pending registries behind the coarse state. */
+export interface TurnAckStore extends PendingStateStore {
+  listInFlightForThread(threadTs: string): DelegationRow[];
+}
+
+/**
+ * The turn-start ack (issue #49): 👀 on the root the moment ANY turn begins
+ * — session open included — the channel-level "I'm on it" before any reply
+ * text. Add-only, deliberately not `applyRootReaction`: the milestone/gate/
+ * done flips own every coarse-state transition, so a pending ❓/🚨 or an
+ * earlier ✅/❌ stays put next to the 👀. Best-effort like every reaction —
+ * the usual failure is Slack's already_reacted, when the 👀 is simply on.
+ */
+export async function ackTurnStart(
+  surface: Pick<ReactionSurface, 'react'>,
+  logger: Logger,
+  threadTs: string,
+): Promise<void> {
+  try {
+    await surface.react(threadTs, 'eyes');
+  } catch (error) {
+    logger.debug({ err: error, threadTs }, 'turn-start 👀 add failed (may already be set)');
+  }
+}
+
+/**
+ * The turn-end counterpart (issue #49): a turn that ends with no delegation
+ * in flight and nothing pending leaves no state worth signalling, so its 👀
+ * comes off — a pure Q&A thread reads clean from the channel. Anything still
+ * open leaves the root alone: the flips that manage in-flight state already
+ * put the honest reaction there. Only the 👀 is touched — a ✅/❌ from an
+ * earlier delegation survives as the thread's durable outcome.
+ */
+export async function settleTurnEnd(
+  store: TurnAckStore,
+  surface: Pick<ReactionSurface, 'unreact'>,
+  logger: Logger,
+  threadTs: string,
+  /** Work the registries cannot see: a created-but-not-yet-dispatched
+   * worktree (the coordinator's create→dispatch window) has a 👀-backed
+   * card but no ledger row, and must keep its milestone 👀 on. */
+  hasUndispatchedWork = false,
+): Promise<void> {
+  if (
+    hasUndispatchedWork ||
+    store.listInFlightForThread(threadTs).length > 0 ||
+    store.listPendingGates(threadTs).length > 0 ||
+    store.listPendingStalls(threadTs).length > 0
+  ) {
+    return;
+  }
+  try {
+    await surface.unreact(threadTs, 'eyes');
+  } catch (error) {
+    // Usually Slack's no_reaction — a flip already took the 👀 off.
+    logger.debug({ err: error, threadTs }, 'turn-end 👀 removal skipped');
+  }
+}
+
 export interface OrchestrationMessage {
   id: string;
   type: string;

@@ -9,7 +9,7 @@ import { SessionStore } from './db.ts';
 import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
-import { GateWatcher } from './watcher.ts';
+import { ackTurnStart, GateWatcher, settleTurnEnd } from './watcher.ts';
 import { BootReconciler } from './reconcile.ts';
 import { Watchdog } from './watchdog.ts';
 import { GateRelay } from './relay.ts';
@@ -174,6 +174,12 @@ try {
     liveSessionCap: config.liveSessionCap,
     autoCloseAfterMs: config.autoCloseAfterMs,
     countDelegations: (threadTs) => delegationStore.countForThread(threadTs),
+    // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
+    // — session open included — and off again when the turn ends with no
+    // delegation in flight and nothing pending.
+    onTurnStart: (threadTs) => ackTurnStart(surface, logger, threadTs),
+    onTurnEnd: (threadTs) =>
+      settleTurnEnd(delegationStore, surface, logger, threadTs, delegations.hasUndispatched(threadTs)),
     logger,
   });
 
