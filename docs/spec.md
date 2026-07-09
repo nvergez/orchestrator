@@ -41,8 +41,9 @@ Stack decision ([#3](https://github.com/nvergez/orchestrator/issues/3), research
 ## 2. Slack surface
 
 Provisioned ([#2](https://github.com/nvergez/orchestrator/issues/2)) on the **lemlist** workspace:
-- App `@nikolai` (`U0BGRT64CPJ`), Socket Mode ON; channel **#orchestrator** = `C0ASJR3LAE6` (bot is a member); authorized user `U09CC6M3W1W`.
-- Bot scopes (6): `chat:write, app_mentions:read, channels:history, groups:history, reactions:write, users:read`. Events: `message.channels`, `app_mention`.
+- App `@nikolai` (`U0BGRT64CPJ`), Socket Mode ON; the single channel is `C0ASJR3LAE6` — a **private** channel, today named **#radical-squad** (bot is a member); authorized user `U09CC6M3W1W`.
+- Bot scopes (6): `chat:write, app_mentions:read, channels:history, groups:history, reactions:write, users:read`. Events: `app_mention`, **`message.groups`** (+ `message.channels`).
+  - The channel's **privacy decides the message event**: Slack emits `message.groups` for private channels and `message.channels` for public ones — `groups:history` is load-bearing, not incidental. Subscribing to only `message.channels` on a private channel silently delivers **no message event at all**, so plain thread replies never reach the daemon while `app_mention` keeps working ([#38](https://github.com/nvergez/orchestrator/issues/38)). Both subscriptions arrive as `type: "message"` (private ones carry `channel_type: "group"`), so one listener handles either; a mention fires the `message` copy *and* `app_mention`, deduped by the filter.
 - `channels:read` is **not granted and not needed in v1** (single pinned channel + single-user allow-list; no `conversations.info/members`).
 - Secrets in `/home/dev/projects/orchestrator/.env` (chmod 600, git-ignored; template `.env.example`).
 
