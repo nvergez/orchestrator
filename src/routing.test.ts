@@ -198,6 +198,29 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('never two round trips');
   });
 
+  it('treats a repo named by canonical name or any listed alias as explicit — no gate (issue #52)', () => {
+    expect(prompt).toContain('canonical name OR any listed alias');
+    expect(prompt).toContain('exactly as explicit as the canonical name');
+    expect(prompt).toContain('delegate directly, no confirmation gate');
+    // The direct path never short-circuits the two-candidate disambiguation.
+    expect(prompt).toContain('Once the ambiguity rules above are settled');
+  });
+
+  it('keeps the gate for keyword-only/inferred matches (issue #52)', () => {
+    expect(prompt).toContain('matched on keywords, the description, or context');
+    // Contiguous on purpose: the gate consequence must live in the INFERRED bullet itself.
+    expect(prompt).toContain('(e.g. "the export dashboard thing") → exactly one line');
+  });
+
+  it('never lets a defaulted agent force a gate — precedence settles it silently (issue #52)', () => {
+    expect(prompt).toContain('A defaulted agent never forces a gate on its own');
+    expect(prompt).toContain('only an agent reference you cannot resolve still gates');
+  });
+
+  it('keeps the numbered disambiguation for two credible candidates (issue #52)', () => {
+    expect(prompt).toContain('Two or more credible candidates → ask ONE numbered question');
+  });
+
   it('states the agent precedence with claude as the global default', () => {
     expect(prompt).toMatch(/explicitly named[\s\S]*default agent from the hints[\s\S]*\*claude\*/);
   });
