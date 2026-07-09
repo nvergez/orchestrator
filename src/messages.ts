@@ -300,6 +300,16 @@ export function orcaUnavailableLine(detail: string): string {
 }
 
 /**
+ * The success cleanup's one visible failure mode (issue #43): the runtime
+ * refused to remove a delivered delegation's worktree (usually a dirty
+ * tree), so it stays on disk for inspection and the thread hears why.
+ * Silence on success — a removed worktree needs no announcement.
+ */
+export function worktreeKeptLine(worktreeName: string, reason: string): string {
+  return `🧹 Could not clean up worktree \`${worktreeName}\` — kept for inspection.\n> ${reason}`;
+}
+
+/**
  * Scenario F′ — live-session cap reached with every session mid-turn: the
  * message waits its turn instead of being rejected (spec §3).
  */

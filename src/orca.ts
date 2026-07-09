@@ -7,8 +7,9 @@ import type { Logger } from './logger.ts';
  * envelope decoder, and the daemon-side calls — `repo list` for the boot
  * healthcheck (orca-health.ts) and the routing allow-list (routing.ts),
  * terminal list/create for the delegation coordinator's mailboxes
- * (dispatch.ts). Spec §10: every orca call is wrapped — callers turn a
- * throw into a log line or a fail-closed denial, never a crash.
+ * (dispatch.ts), worktree rm for the success cleanup (watcher.ts, issue
+ * #43). Spec §10: every orca call is wrapped — callers turn a throw into a
+ * log line or a fail-closed denial, never a crash.
  */
 
 /** Command-runner seam: resolves with stdout, rejects like execFile does. */
@@ -50,6 +51,46 @@ export function parseOrcaEnvelope(stdout: string): Record<string, unknown> | nul
     // fall through to null
   }
   return null;
+}
+
+/**
+ * The error half of the envelope: the runtime's message iff `ok` is false —
+ * a `worktree rm` refusal carries the dirty paths here. Null for anything
+ * unreadable; the caller then falls back to whatever error it already has.
+ */
+export function parseOrcaErrorMessage(stdout: string): string | null {
+  try {
+    const envelope = JSON.parse(stdout.trim()) as { ok?: unknown; error?: { message?: unknown } };
+    if (envelope.ok === false && typeof envelope.error?.message === 'string') {
+      return envelope.error.message;
+    }
+  } catch {
+    // fall through to null
+  }
+  return null;
+}
+
+/**
+ * `orca worktree rm --worktree id:<id> --json` — deliberately WITHOUT
+ * `--force`: the runtime refuses on a dirty tree (probed live, issue #43),
+ * which is the safety net keeping a worker's stray files inspectable; a
+ * clean worktree removes fine even with its terminals still open. Resolves
+ * on removal, throws with the runtime's refusal message otherwise.
+ */
+export async function removeWorktree(run: CommandRunner, worktreeId: string): Promise<void> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run('orca', ['worktree', 'rm', '--worktree', `id:${worktreeId}`, '--json']));
+  } catch (error) {
+    // A refusal exits non-zero — the envelope with the reason rides the
+    // rejected call's captured stdout.
+    const failedStdout = (error as { stdout?: unknown }).stdout;
+    const message = typeof failedStdout === 'string' ? parseOrcaErrorMessage(failedStdout) : null;
+    throw message === null ? error : new Error(message);
+  }
+  if (parseOrcaEnvelope(stdout)?.removed !== true) {
+    throw new Error('unexpected `orca worktree rm` response shape');
+  }
 }
 
 /** `orca repo list --json` → the living registry. Throws when Orca is down. */
