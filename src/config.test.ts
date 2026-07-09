@@ -30,6 +30,7 @@ describe('loadConfig', () => {
       watchWindowMs: 15 * 60_000,
       watchdogSweepIntervalMs: 2 * 60_000,
       watchdogStallAfterMs: 10 * 60_000,
+      watchdogMaxInflightMs: 30 * 60_000,
       autoCloseAfterMs: 7 * 24 * 60 * 60_000,
       sweepIntervalMs: 60 * 60_000,
     });
@@ -164,15 +165,21 @@ describe('loadConfig', () => {
     expect(loadConfig(validEnv).watchdogStallAfterMs).toBe(10 * 60_000);
   });
 
+  it('defaults the max in-flight age to 30 min of bus silence (#48)', () => {
+    expect(loadConfig(validEnv).watchdogMaxInflightMs).toBe(30 * 60_000);
+  });
+
   it('honors the WATCHDOG_* overrides when provided', () => {
     const config = loadConfig({
       ...validEnv,
       WATCHDOG_SWEEP_INTERVAL_MINUTES: '0.5',
       WATCHDOG_STALL_MINUTES: '25',
+      WATCHDOG_MAX_INFLIGHT_MINUTES: '45',
     });
 
     expect(config.watchdogSweepIntervalMs).toBe(30_000);
     expect(config.watchdogStallAfterMs).toBe(25 * 60_000);
+    expect(config.watchdogMaxInflightMs).toBe(45 * 60_000);
   });
 
   it.each([
@@ -180,6 +187,8 @@ describe('loadConfig', () => {
     ['WATCHDOG_SWEEP_INTERVAL_MINUTES', 'often'],
     ['WATCHDOG_STALL_MINUTES', '-5'],
     ['WATCHDOG_STALL_MINUTES', 'soon'],
+    ['WATCHDOG_MAX_INFLIGHT_MINUTES', '0'],
+    ['WATCHDOG_MAX_INFLIGHT_MINUTES', 'later'],
   ])('rejects a %s of %s (must be a positive number)', (key, badValue) => {
     const env = { ...validEnv, [key]: badValue };
 

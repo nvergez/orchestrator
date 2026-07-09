@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from './logger.ts';
 import { DelegationStore } from './delegations.ts';
-import { GateWatcher, type WakeResult, type WatcherSurface } from './watcher.ts';
+import {
+  ackTurnStart,
+  GateWatcher,
+  settleTurnEnd,
+  type WakeResult,
+  type WatcherSurface,
+} from './watcher.ts';
 import type { CommandRunner } from './orca.ts';
 
 const THREAD = '1751970000.000100';
@@ -47,9 +53,15 @@ class FakeSurface implements WatcherSurface {
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
   failPosts = false;
+  /** Fail only the next N posts — a transient Slack outage. */
+  failNextPosts = 0;
   private counter = 0;
 
   post(threadTs: string, text: string): Promise<string> {
+    if (this.failNextPosts > 0) {
+      this.failNextPosts -= 1;
+      return Promise.reject(new Error('slack down'));
+    }
     if (this.failPosts) return Promise.reject(new Error('slack down'));
     this.posts.push({ threadTs, text });
     this.counter += 1;
@@ -176,7 +188,7 @@ describe('worker_done — the happy path', () => {
 
     expect(checkRunner.calls[0]).toBe(
       `orchestration check --wait --terminal ${MAILBOX} ` +
-        '--types worker_done,escalation,decision_gate --timeout-ms 900000 --json',
+        '--types worker_done,escalation,decision_gate,heartbeat,status --timeout-ms 900000 --json',
     );
 
     const row = store.getByDispatchId('ctx_d1');
@@ -620,6 +632,177 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
   });
 });
 
+describe('re-asked questions and closed delegations — gate hygiene (issue #46)', () => {
+  // The timeout re-ask shape from the live incident: the worker's `ask`
+  // expired, it asked the SAME question again — a fresh msg_id each time.
+  const ask = (id: string, over: Partial<Record<string, unknown>> = {}) =>
+    busMessage({
+      id,
+      type: 'decision_gate',
+      subject: 'Question',
+      body: 'Which format should the report file use?',
+      payload: JSON.stringify({
+        question: 'Which format should the report file use?',
+        options: ['markdown', 'json'],
+      }),
+      ...over,
+    });
+
+  it('a re-ask edits the ❓ relay in place — one message, one live gate', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_first')),
+        checkOut(
+          ask('msg_second', {
+            payload: JSON.stringify({
+              // Verbatim modulo case and whitespace — still the same question.
+              question: 'which format should  the report file use?',
+              options: ['markdown', 'json'],
+            }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getGate('msg_first')?.status).toBe('superseded');
+      expect(surface.reactions).toHaveLength(2);
+    });
+
+    // No second ❓ notification: the one relay got edited, with the newest
+    // ask's verbatim wording.
+    expect(surface.posts).toHaveLength(1);
+    expect(surface.updates).toHaveLength(1);
+    expect(surface.updates[0]?.ts).toBe('msg-ts-1');
+    expect(surface.updates[0]?.text).toContain('> which format should  the report file use?');
+
+    expect(store.getGate('msg_first')).toMatchObject({
+      status: 'superseded',
+      supersededBy: 'msg_second',
+    });
+    expect(store.getGate('msg_second')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_second']);
+    // The coarse state never wavers — still one question waiting.
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
+  });
+
+  it('a distinct question from the same worker still relays separately — no over-dedup', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_q1')),
+        checkOut(
+          ask('msg_q2', {
+            payload: JSON.stringify({ question: 'Should the report include raw timings?' }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(2);
+    });
+
+    expect(surface.updates).toEqual([]);
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual([
+      'msg_q1',
+      'msg_q2',
+    ]);
+  });
+
+  it('an escalation wording a pending question identically never dedups across kinds', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_q')),
+        checkOut(
+          busMessage({
+            id: 'msg_esc',
+            type: 'escalation',
+            subject: 'Blocked',
+            body: 'Which format should the report file use?',
+            payload: JSON.stringify({}),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(2);
+    });
+
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId).sort()).toEqual([
+      'msg_esc',
+      'msg_q',
+    ]);
+  });
+
+  it('a re-ask whose original relay never posted posts fresh — the human finally sees it', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(ask('msg_first')), checkOut(ask('msg_second'))],
+    });
+    surface.failNextPosts = 1;
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getGate('msg_first')?.status).toBe('superseded');
+    });
+
+    expect(surface.updates).toEqual([]);
+    expect(surface.posts).toHaveLength(1);
+    expect(store.getGate('msg_second')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
+  });
+
+  it('worker_done leaves zero pending gates for that delegation', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(ask('msg_q')), checkOut(busMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    expect(store.getGate('msg_q')?.status).toBe('closed');
+    expect(store.listPendingGates(THREAD)).toEqual([]);
+    // The moot question no longer holds ❓ — the thread ends delivered.
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'white_check_mark' });
+  });
+
+  it('a sibling’s pending gate survives another delegation’s worker_done', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          ask('msg_q', {
+            from_handle: 'term_w2',
+            payload: JSON.stringify({ question: 'Deploy to staging first?' }),
+          }),
+        ),
+        checkOut(busMessage()),
+      ],
+    });
+    seedDispatch(store);
+    seedDispatch(store, {
+      dispatchId: 'ctx_d2',
+      taskId: 'task_9999',
+      workerHandle: 'term_w2',
+      cardTs: 'card-ts-2',
+    });
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    });
+
+    expect(store.getGate('msg_q')?.status).toBe('pending');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
+  });
+});
+
 describe('rolling windows', () => {
   it('a timeout ({count:0}) is a checkpoint — the window respawns silently', async () => {
     const { watcher, store, surface, checkRunner } = makeWatcher({
@@ -814,5 +997,270 @@ describe('worker_done after boot reconciliation (issue #25)', () => {
     expect(wakes[0]?.text).toContain('sibling shipped');
     expect(slotsFreed()).toBe(1);
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+  });
+});
+
+describe('turn-lifecycle root ack (issue #49)', () => {
+  /** Add/remove recorder — reactions only, no coarse-state sweeps expected. */
+  class AckSurface {
+    added: Array<{ ts: string; name: string }> = [];
+    removed: Array<{ ts: string; name: string }> = [];
+    failAdd = false;
+    failRemove = false;
+
+    react(ts: string, name: string): Promise<void> {
+      if (this.failAdd) return Promise.reject(new Error('already_reacted'));
+      this.added.push({ ts, name });
+      return Promise.resolve();
+    }
+
+    unreact(ts: string, name: string): Promise<void> {
+      if (this.failRemove) return Promise.reject(new Error('no_reaction'));
+      this.removed.push({ ts, name });
+      return Promise.resolve();
+    }
+  }
+
+  const logger = createLogger('silent');
+
+  describe('ackTurnStart', () => {
+    it('adds 👀 on the root and nothing else — no stale-reaction sweep', async () => {
+      const surface = new AckSurface();
+
+      await ackTurnStart(surface, logger, THREAD);
+
+      expect(surface.added).toEqual([{ ts: THREAD, name: 'eyes' }]);
+      // Add-only: a pending ❓/🚨 or an earlier ✅/❌ must survive the ack —
+      // the milestone/gate/done flips own every coarse-state transition.
+      expect(surface.removed).toEqual([]);
+    });
+
+    it('swallows a failed add (already_reacted) — the ack never fails a turn', async () => {
+      const surface = new AckSurface();
+      surface.failAdd = true;
+
+      await expect(ackTurnStart(surface, logger, THREAD)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('settleTurnEnd', () => {
+    const makeStore = () => new DelegationStore(':memory:');
+
+    it('removes the 👀 when nothing is in flight and nothing is pending', async () => {
+      const surface = new AckSurface();
+
+      await settleTurnEnd(makeStore(), surface, logger, THREAD);
+
+      expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
+      expect(surface.added).toEqual([]);
+    });
+
+    it('leaves the root untouched while a delegation is in flight', async () => {
+      const store = makeStore();
+      seedDispatch(store);
+      const surface = new AckSurface();
+
+      await settleTurnEnd(store, surface, logger, THREAD);
+
+      expect(surface.removed).toEqual([]);
+      expect(surface.added).toEqual([]);
+    });
+
+    it('leaves the root untouched while a gate is pending', async () => {
+      const store = makeStore();
+      store.recordGate({
+        msgId: 'msg_g1',
+        threadTs: THREAD,
+        taskId: 'task_3f81',
+        dispatchId: 'ctx_d1',
+        workerHandle: 'term_w1',
+        worktreeName: 'forwardly-84-csv-export',
+        kind: 'decision_gate',
+        question: 'push the branch?',
+        options: [],
+        relayTs: 'msg-ts-1',
+      });
+      const surface = new AckSurface();
+
+      await settleTurnEnd(store, surface, logger, THREAD);
+
+      expect(surface.removed).toEqual([]);
+    });
+
+    it('leaves the root untouched while a stall alert is pending', async () => {
+      const store = makeStore();
+      store.recordStall({
+        dispatchId: 'ctx_d1',
+        threadTs: THREAD,
+        workerHandle: 'term_w1',
+        worktreeName: 'forwardly-84-csv-export',
+        lastOutput: 'npm test (hanging)',
+        fingerprint: '2026-07-08T14:20:00.000Z',
+        relayTs: 'msg-ts-1',
+      });
+      const surface = new AckSurface();
+
+      await settleTurnEnd(store, surface, logger, THREAD);
+
+      expect(surface.removed).toEqual([]);
+    });
+
+    it('leaves the root untouched while a created-but-undispatched worktree waits', async () => {
+      // The create→dispatch window has no ledger row yet — only the
+      // coordinator knows, and its signal must keep the milestone 👀 on.
+      const surface = new AckSurface();
+
+      await settleTurnEnd(makeStore(), surface, logger, THREAD, true);
+
+      expect(surface.removed).toEqual([]);
+    });
+
+    it('a closed delegation no longer pins the 👀 — only in-flight work counts', async () => {
+      const store = makeStore();
+      seedDispatch(store);
+      store.closeDelegation('ctx_d1', 'completed');
+      const surface = new AckSurface();
+
+      await settleTurnEnd(store, surface, logger, THREAD);
+
+      expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
+    });
+
+    it('swallows a failed removal (no_reaction) — the settle never fails a turn', async () => {
+      const surface = new AckSurface();
+      surface.failRemove = true;
+
+      await expect(settleTurnEnd(makeStore(), surface, logger, THREAD)).resolves.toBeUndefined();
+    });
+  });
+});
+
+describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
+  const pendingStall = (store: DelegationStore): void => {
+    store.recordStall({
+      dispatchId: 'ctx_d1',
+      threadTs: THREAD,
+      workerHandle: 'term_w1',
+      worktreeName: 'forwardly-84-csv-export',
+      lastOutput: 'Exit code 1 / Orca is not running.',
+      fingerprint: 'inflight:1751970240000',
+      relayTs: 'alert-ts-1',
+    });
+  };
+
+  it.each(['heartbeat', 'status'])(
+    'a %s message stamps the bus clock and settles the pending ⚠️ — no post, no wake',
+    async (type) => {
+      const { watcher, store, surface, checkRunner, wakes } = makeWatcher({
+        checks: [checkOut(busMessage({ type, subject: 'alive', body: '' }))],
+      });
+      seedDispatch(store);
+      pendingStall(store);
+
+      watcher.arm(THREAD);
+      await vi.waitFor(() => {
+        expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+      });
+
+      expect(store.getStall('ctx_d1')?.status).toBe('answered');
+      // The window listens for liveness types alongside the gate trio.
+      expect(checkRunner.calls[0]).toContain(
+        '--types worker_done,escalation,decision_gate,heartbeat,status',
+      );
+      // The alert cleared, so the root settles back to 👀.
+      expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'eyes' });
+      // The message IS the signal — nothing relays, nobody wakes.
+      expect(surface.posts).toEqual([]);
+      expect(wakes).toEqual([]);
+      // The delegation stays in flight.
+      expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    },
+  );
+
+  it('a heartbeat with no pending alert stamps the clock and touches nothing else', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage({ type: 'heartbeat', subject: 'alive', body: '' }))],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+    });
+
+    expect(surface.posts).toEqual([]);
+    expect(surface.reactions).toEqual([]);
+  });
+
+  it('a heartbeat matching no ledger row is ignored quietly', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({
+            type: 'heartbeat',
+            subject: 'alive',
+            body: '',
+            payload: JSON.stringify({ taskId: 'task_ghost', dispatchId: 'ctx_ghost' }),
+            from_handle: undefined,
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    // The next (dry) window parks — give the handled message a beat to land.
+    await vi.waitFor(() => {
+      expect(watcher.isArmed(THREAD)).toBe(true);
+    });
+
+    expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
+    expect(surface.posts).toEqual([]);
+  });
+
+  it('a straggler heartbeat from a closed dispatch cannot stamp the live ledger', async () => {
+    const { watcher, store } = makeWatcher({
+      checks: [checkOut(busMessage({ type: 'heartbeat', subject: 'alive', body: '' }))],
+    });
+    seedDispatch(store);
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_retry' });
+    store.closeDelegation('ctx_d1', 'failed');
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(watcher.isArmed(THREAD)).toBe(true);
+    });
+
+    expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
+    expect(store.getByDispatchId('ctx_d2')?.lastBusAt).toBeNull();
+  });
+
+  it('an ask is bus liveness too: stamps the clock and supersedes the pending ⚠️', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({
+            id: 'msg_ask1',
+            type: 'decision_gate',
+            subject: 'Question',
+            body: '',
+            payload: JSON.stringify({ question: 'Overwrite bench.json?', options: ['yes', 'no'] }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+    pendingStall(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+    });
+
+    expect(store.getStall('ctx_d1')?.status).toBe('answered');
+    // The gate relay owns the thread's attention now: ❓ posted and set.
+    expect(surface.posts).toHaveLength(1);
+    expect(surface.posts[0]?.text).toContain('Overwrite bench.json?');
+    expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'question' });
   });
 });

@@ -91,7 +91,10 @@ const DEFAULT_RETRY_DELAY_MS = 30_000;
 /** Grace beyond the child's own --timeout-ms before execFile kills it. */
 const CHECK_GRACE_MS = 30_000;
 
-const WATCHED_TYPES = 'worker_done,escalation,decision_gate';
+/** The gate trio plus the liveness types (issue #48): a worker `heartbeat`
+ * (or a bus producer's `status` ping) carries no relay and wakes nobody —
+ * it stamps the delegation's bus clock, the watchdog's in-flight-age source. */
+const WATCHED_TYPES = 'worker_done,escalation,decision_gate,heartbeat,status';
 
 /** The root reactions the daemon manages (spec §8) — one on, the rest off. */
 const ROOT_REACTIONS = ['eyes', 'white_check_mark', 'x', 'question', 'rotating_light'] as const;
@@ -151,6 +154,66 @@ export async function settleRootReaction(
     store.listPendingStalls(threadTs).length > 0;
   const name: RootReaction = alarmed ? 'rotating_light' : gates.length > 0 ? 'question' : 'eyes';
   await applyRootReaction(surface, logger, threadTs, name);
+}
+
+/** The registry slice the turn-end settle reads — in-flight work plus the
+ * pending registries behind the coarse state. */
+export interface TurnAckStore extends PendingStateStore {
+  listInFlightForThread(threadTs: string): DelegationRow[];
+}
+
+/**
+ * The turn-start ack (issue #49): 👀 on the root the moment ANY turn begins
+ * — session open included — the channel-level "I'm on it" before any reply
+ * text. Add-only, deliberately not `applyRootReaction`: the milestone/gate/
+ * done flips own every coarse-state transition, so a pending ❓/🚨 or an
+ * earlier ✅/❌ stays put next to the 👀. Best-effort like every reaction —
+ * the usual failure is Slack's already_reacted, when the 👀 is simply on.
+ */
+export async function ackTurnStart(
+  surface: Pick<ReactionSurface, 'react'>,
+  logger: Logger,
+  threadTs: string,
+): Promise<void> {
+  try {
+    await surface.react(threadTs, 'eyes');
+  } catch (error) {
+    logger.debug({ err: error, threadTs }, 'turn-start 👀 add failed (may already be set)');
+  }
+}
+
+/**
+ * The turn-end counterpart (issue #49): a turn that ends with no delegation
+ * in flight and nothing pending leaves no state worth signalling, so its 👀
+ * comes off — a pure Q&A thread reads clean from the channel. Anything still
+ * open leaves the root alone: the flips that manage in-flight state already
+ * put the honest reaction there. Only the 👀 is touched — a ✅/❌ from an
+ * earlier delegation survives as the thread's durable outcome.
+ */
+export async function settleTurnEnd(
+  store: TurnAckStore,
+  surface: Pick<ReactionSurface, 'unreact'>,
+  logger: Logger,
+  threadTs: string,
+  /** Work the registries cannot see: a created-but-not-yet-dispatched
+   * worktree (the coordinator's create→dispatch window) has a 👀-backed
+   * card but no ledger row, and must keep its milestone 👀 on. */
+  hasUndispatchedWork = false,
+): Promise<void> {
+  if (
+    hasUndispatchedWork ||
+    store.listInFlightForThread(threadTs).length > 0 ||
+    store.listPendingGates(threadTs).length > 0 ||
+    store.listPendingStalls(threadTs).length > 0
+  ) {
+    return;
+  }
+  try {
+    await surface.unreact(threadTs, 'eyes');
+  } catch (error) {
+    // Usually Slack's no_reaction — a flip already took the 👀 off.
+    logger.debug({ err: error, threadTs }, 'turn-end 👀 removal skipped');
+  }
 }
 
 export interface OrchestrationMessage {
@@ -412,8 +475,41 @@ export class GateWatcher {
       await this.handleWorkerDone(threadTs, message);
     } else if (message.type === 'decision_gate' || message.type === 'escalation') {
       await this.handleGateOrEscalation(threadTs, message.type, message);
+    } else if (message.type === 'heartbeat' || message.type === 'status') {
+      await this.handleWorkerLiveness(threadTs, message);
     } else {
       this.logger.warn({ threadTs, type: message.type }, 'unwatched event type slipped through');
+    }
+  }
+
+  /**
+   * `heartbeat`/`status` (issue #48): the message IS the whole signal — no
+   * relay, no wake. It stamps the delegation's bus clock (what the watchdog
+   * measures in-flight age against) and settles any pending ⚠️ alert: a
+   * worker just heard from is a worker no longer needing attention, and the
+   * root's coarse state follows. A message matching no ledger row — or a
+   * straggler naming a closed dispatch — stamps nothing (the store only
+   * updates in-flight rows), so it can never mask a hung retry.
+   */
+  private async handleWorkerLiveness(
+    threadTs: string,
+    message: OrchestrationMessage,
+  ): Promise<void> {
+    const row = this.findRow(threadTs, message);
+    if (row === undefined) {
+      this.logger.debug(
+        { threadTs, msgId: message.id, payload: message.payload },
+        'liveness message matches no ledger row — ignored',
+      );
+      return;
+    }
+    this.store.recordBusActivity(row.dispatchId);
+    if (this.store.answerStall(row.dispatchId)) {
+      this.logger.info(
+        { threadTs: row.threadTs, dispatchId: row.dispatchId },
+        'pending watchdog alert settled — the worker spoke on the bus',
+      );
+      await settleRootReaction(this.store, this.surface, this.logger, row.threadTs);
     }
   }
 
@@ -483,6 +579,13 @@ export class GateWatcher {
    * at relay time, the ❓/🚨 root reaction set. The registry row is the
    * never-lost guarantee — recorded even when the Slack post fails, so the
    * question stays routable and recoverable.
+   *
+   * A re-ask supersedes instead of stacking (issue #46): a worker whose
+   * `ask` timed out asks the SAME question again under a fresh msg_id, and
+   * only the newest ask still listens for a reply. So when the question
+   * matches a live gate from the same terminal, the old row flips to
+   * `superseded` (forwarding to the successor) and the existing ❓ relay is
+   * edited in place — never a second notification for one logical question.
    */
   private async handleGateOrEscalation(
     threadTs: string,
@@ -497,47 +600,92 @@ export class GateWatcher {
       return;
     }
     const row = this.findRow(threadTs, message);
+    // The ask itself is bus liveness (issue #48): stamp the clock, and
+    // settle any pending ⚠️ — the gate relayed below owns the thread's
+    // attention from here (the settle at the end recomputes the root).
+    if (row !== undefined) {
+      this.store.recordBusActivity(row.dispatchId);
+      this.store.answerStall(row.dispatchId);
+    }
     // The row's thread owns the delegation — the human answers there.
     const gateThread = row?.threadTs ?? threadTs;
     // The payload's question is canonical for an `ask`; body/subject cover
     // escalations and any bus producer that skipped the payload.
     const question = firstNonEmpty(message.payload.question, message.body, message.subject);
     const options = message.payload.options ?? [];
+    const taskId = message.payload.taskId ?? row?.taskId ?? null;
+    const workerHandle = message.fromHandle ?? row?.workerHandle ?? null;
+    // The asking terminal is the re-ask's identity; task ids only VETO a
+    // match when both sides name one and disagree — an id-less side (a stray
+    // ask, a pre-#46 row) must not shield a duplicate from the dedup. The
+    // self-exclusion is belt-and-braces: the replay guard above already
+    // filtered this msg_id, and a row must never forward to itself.
+    const reasked = this.store.listPendingGates(gateThread).find(
+      (gate) =>
+        gate.msgId !== message.id &&
+        gate.kind === kind &&
+        gate.workerHandle !== null &&
+        gate.workerHandle === workerHandle &&
+        (gate.taskId === null || taskId === null || gate.taskId === taskId) &&
+        isSameQuestion(gate.question, question),
+    );
 
+    const text = gateRelayMessage({
+      kind,
+      worktreeName: row?.worktreeName ?? null,
+      repo: row?.repo ?? null,
+      issueNumber: row?.issueNumber ?? null,
+      issueUrl:
+        row === undefined
+          ? undefined
+          : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
+      question,
+      options,
+    });
     let relayTs: string | null = null;
-    try {
-      relayTs = await this.surface.post(
-        gateThread,
-        gateRelayMessage({
-          kind,
-          worktreeName: row?.worktreeName ?? null,
-          repo: row?.repo ?? null,
-          issueNumber: row?.issueNumber ?? null,
-          issueUrl:
-            row === undefined
-              ? undefined
-              : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
-          question,
-          options,
-        }),
-      );
-    } catch (error) {
-      this.logger.error(
-        { err: error, threadTs: gateThread, msgId: message.id, kind, question },
-        'gate relay post failed — the registry row below still holds the question',
-      );
+    if (reasked !== undefined && reasked.relayTs !== null) {
+      // The question already sits in the thread — refresh it to the newest
+      // verbatim wording and keep anchoring the registry on that message.
+      relayTs = reasked.relayTs;
+      try {
+        await this.surface.update(reasked.relayTs, text);
+      } catch (error) {
+        this.logger.warn(
+          { err: error, threadTs: gateThread, msgId: message.id, relayTs },
+          're-asked gate relay edit failed — the original relay still shows the question',
+        );
+      }
+    } else {
+      try {
+        relayTs = await this.surface.post(gateThread, text);
+      } catch (error) {
+        this.logger.error(
+          { err: error, threadTs: gateThread, msgId: message.id, kind, question },
+          'gate relay post failed — the registry row below still holds the question',
+        );
+      }
     }
     this.store.recordGate({
       msgId: message.id,
       threadTs: gateThread,
-      taskId: message.payload.taskId ?? row?.taskId ?? null,
-      workerHandle: message.fromHandle ?? row?.workerHandle ?? null,
+      taskId,
+      dispatchId: message.payload.dispatchId ?? row?.dispatchId ?? null,
+      workerHandle,
       worktreeName: row?.worktreeName ?? null,
       kind,
       question,
       options,
       relayTs,
     });
+    // Successor first, then the flip: a crash between the two leaves a
+    // harmless extra pending row, never a question with no live gate.
+    if (reasked !== undefined) {
+      this.store.supersedeGate(reasked.msgId, message.id);
+      this.logger.info(
+        { threadTs: gateThread, msgId: message.id, superseded: reasked.msgId, kind },
+        're-asked question superseded its stale gate — one live gate, no second relay',
+      );
+    }
     // A pending escalation or stall alert outranks a plain question on the
     // root (spec §8): a ❓ arriving while a 🚨 waits must not soften the
     // coarse state. The just-recorded gate is part of the settled set.
@@ -731,6 +879,17 @@ function readPayload(raw: unknown): OrchestrationMessage['payload'] {
 /** The first candidate with content — how the relay picks the question text. */
 function firstNonEmpty(...candidates: Array<string | undefined>): string {
   return candidates.find((text) => text !== undefined && text.trim() !== '') ?? '';
+}
+
+/**
+ * Whether a new ask repeats a live gate's question (issue #46). Workers
+ * re-ask essentially verbatim after an `ask` timeout, so the match stays
+ * deliberately narrow — case and whitespace only — lest two genuinely
+ * distinct questions from one worker ever collapse into each other.
+ */
+function isSameQuestion(a: string, b: string): boolean {
+  const normalize = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ').trim();
+  return normalize(a) === normalize(b);
 }
 
 function sleep(ms: number): Promise<void> {

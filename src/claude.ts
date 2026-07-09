@@ -55,6 +55,19 @@ class Pushable<T> implements AsyncIterable<T> {
 /** How long `end()` waits for the subprocess to finish before abandoning it. */
 const END_DRAIN_TIMEOUT_MS = 30_000;
 
+/**
+ * Gate-denial conduct appended to every session's system prompt (issue #47):
+ * a denied 🚦 travels back as a tool-permission error carrying the human's
+ * verbatim reply, and without these lines the model tended to retry the same
+ * command — an unexplained identical gate from the human's side — or to drop
+ * the question it was mid-way through answering when a read got denied.
+ */
+const GATE_DENIAL_CONDUCT = `## 🚦 gate denials
+
+When a command is denied because the user did not approve the 🚦 gate:
+- Acknowledge it visibly in one short line ("Taking that as a no — skipping \`<command>\`."), then follow whatever the denial reply asked for instead. Never re-run the same command after a denial — a fresh identical 🚦 with no explanation reads as a bug, not persistence.
+- If the denied command was a read you needed to answer the user's question, still answer best-effort from what you already know, saying which check was skipped.`;
+
 class ClaudeProcess {
   private readonly input = new Pushable<SDKUserMessage>();
   private readonly session: Query;
@@ -96,7 +109,7 @@ class ClaudeProcess {
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
-          append: opts.systemPromptAppend,
+          append: `${opts.systemPromptAppend}\n\n${GATE_DENIAL_CONDUCT}`,
         },
         // Enforcement (spec §7): 'default' routes every would-prompt call
         // into canUseTool, and the PreToolUse ask-hook forces even

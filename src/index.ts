@@ -9,11 +9,12 @@ import { SessionStore } from './db.ts';
 import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator } from './dispatch.ts';
 import { SessionManager } from './sessions.ts';
-import { GateWatcher } from './watcher.ts';
+import { ackTurnStart, GateWatcher, settleTurnEnd } from './watcher.ts';
 import { BootReconciler } from './reconcile.ts';
 import { Watchdog } from './watchdog.ts';
 import { GateRelay } from './relay.ts';
 import { createProcessFactory } from './claude.ts';
+import { execFileRunner, safeRegistryIssueUrls } from './orca.ts';
 import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
 import { loadRoutingHints, RepoAllowList, routingInstructions } from './routing.ts';
@@ -173,7 +174,16 @@ try {
     warmTtlMs: config.warmTtlMs,
     liveSessionCap: config.liveSessionCap,
     autoCloseAfterMs: config.autoCloseAfterMs,
-    countDelegations: (threadTs) => delegationStore.countForThread(threadTs),
+    // The 🔚 summary's ledger (issue #51): every delegation with its outcome,
+    // issue links resolved off one registry read — folder repos stay plain.
+    listDelegations: (threadTs) =>
+      safeRegistryIssueUrls(execFileRunner, logger, delegationStore.listForThread(threadTs)),
+    // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
+    // — session open included — and off again when the turn ends with no
+    // delegation in flight and nothing pending.
+    onTurnStart: (threadTs) => ackTurnStart(surface, logger, threadTs),
+    onTurnEnd: (threadTs) =>
+      settleTurnEnd(delegationStore, surface, logger, threadTs, delegations.hasUndispatched(threadTs)),
     logger,
   });
 
@@ -201,11 +211,15 @@ try {
   // The stalled-worker watchdog (spec §5, issue #22): the second detection
   // layer — a periodic staleness sweep over the in-flight delegations'
   // worktrees; a silent worker gets its ⚠️ alert through the same relay
-  // mold as gates, and the reply routes down as terminal keystrokes.
+  // mold as gates, and the reply routes down as terminal keystrokes. The
+  // same sweep carries the max in-flight age signal (issue #48): a worker
+  // whose terminal looks alive but whose bus said nothing for the whole
+  // window alerts through the same mold.
   const watchdog = new Watchdog({
     store: delegationStore,
     surface,
     stallAfterMs: config.watchdogStallAfterMs,
+    maxInflightMs: config.watchdogMaxInflightMs,
     logger,
   });
   const stallSweep = (): void => {

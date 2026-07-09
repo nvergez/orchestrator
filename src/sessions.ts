@@ -7,6 +7,7 @@ import {
   closingSummary,
   costWarningLine,
   queuedLine,
+  type ClosingDelegation,
 } from './messages.ts';
 
 /**
@@ -84,8 +85,16 @@ export interface SessionManagerOptions {
   liveSessionCap: number;
   /** Dormancy span after which `sweepDormant` closes a session (spec §3, 7 days). */
   autoCloseAfterMs: number;
-  /** The thread's delegation count from the #19 ledger — the 🔚 summary's number. */
-  countDelegations: (threadTs: string) => number;
+  /** The thread's delegations from the #19 ledger, outcomes and issue links
+   * resolved — the 🔚 summary's per-delegation lines (issue #51). */
+  listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
+  /** Turn-start ack (issue #49): 👀 on the root before the turn produces
+   * anything — awaited ahead of the slot wait so even a queued message acks
+   * within seconds. */
+  onTurnStart: (threadTs: string) => Promise<void>;
+  /** Turn-end settle (issue #49): takes the 👀 back off when the turn left
+   * nothing in flight and nothing pending. Runs on every outcome. */
+  onTurnEnd: (threadTs: string) => Promise<void>;
   logger: Logger;
 }
 
@@ -98,7 +107,9 @@ export class SessionManager {
   private readonly warmTtlMs: number;
   private readonly liveSessionCap: number;
   private readonly autoCloseAfterMs: number;
-  private readonly countDelegations: (threadTs: string) => number;
+  private readonly listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
+  private readonly onTurnStart: (threadTs: string) => Promise<void>;
+  private readonly onTurnEnd: (threadTs: string) => Promise<void>;
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   /**
@@ -120,7 +131,9 @@ export class SessionManager {
     this.warmTtlMs = options.warmTtlMs;
     this.liveSessionCap = options.liveSessionCap;
     this.autoCloseAfterMs = options.autoCloseAfterMs;
-    this.countDelegations = options.countDelegations;
+    this.listDelegations = options.listDelegations;
+    this.onTurnStart = options.onTurnStart;
+    this.onTurnEnd = options.onTurnEnd;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
     // Nothing here touches a process; the next human message resumes.
@@ -241,13 +254,14 @@ export class SessionManager {
     });
   }
 
-  /** Posts the 🔚 summary from the ledger row; a failed post never blocks the close. */
+  /** Posts the 🔚 summary from the ledger row; a failed outcome read or post
+   * never blocks the close. */
   private async postClosingSummary(row: SessionRow, dormantDays?: number): Promise<void> {
     try {
       await this.notify(
         row.threadTs,
         closingSummary({
-          delegations: this.countDelegations(row.threadTs),
+          delegations: await this.listDelegations(row.threadTs),
           costUsd: row.costUsdTotal,
           turnCount: row.turnCount,
           dormantDays,
@@ -410,6 +424,20 @@ export class SessionManager {
       { threadTs: state.threadTs, mode: state.proc === null ? 'cold' : 'warm' },
       'turn started',
     );
+    // The channel-level "I'm on it" (issue #49) — ahead of the slot wait, so
+    // a message queued at the cap still acks within seconds of arriving.
+    await this.hookSafe(this.onTurnStart, state.threadTs, 'turn-start ack failed');
+    try {
+      await this.runTurnBody(state, text, turnStartedAt);
+    } finally {
+      // Every outcome settles the root (issue #49): a pure Q&A turn takes
+      // its 👀 back off; a turn that left work in flight leaves the root to
+      // the milestone/gate/done flips that own it.
+      await this.hookSafe(this.onTurnEnd, state.threadTs, 'turn-end settle failed');
+    }
+  }
+
+  private async runTurnBody(state: ThreadState, text: string, turnStartedAt: number): Promise<void> {
     if (state.proc === null) {
       await this.acquireSlot(state);
       const row = this.store.get(state.threadTs, state.channelId);
@@ -474,6 +502,20 @@ export class SessionManager {
     await voice.finalize();
     await this.dropProcess(state);
     this.wakeWaiters();
+  }
+
+  /** Runs a turn-lifecycle hook; reactions are ambient state — a failing
+   * hook is logged and never touches the turn (issue #49). */
+  private async hookSafe(
+    hook: (threadTs: string) => Promise<void>,
+    threadTs: string,
+    failLine: string,
+  ): Promise<void> {
+    try {
+      await hook(threadTs);
+    } catch (error) {
+      this.logger.warn({ err: error, threadTs }, failLine);
+    }
   }
 
   /**

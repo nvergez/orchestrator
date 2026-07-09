@@ -19,8 +19,9 @@ import type { Logger } from './logger.ts';
  * - `prepare` (from canUseTool): hard enforcement the LLM cannot drift past.
  *   A reply may only target one of THIS thread's gates (cross-thread routing
  *   is impossible by construction), an answered gate never re-routes, and a
- *   bare option number is rewritten to that option's exact text — fidelity
- *   is absolute, the worker receives the option verbatim.
+ *   bare option number is rewritten to that option's exact text — on the
+ *   reply body and on the gate-answer `terminal send` fallback alike (issue
+ *   #50): fidelity is absolute, the worker receives the option verbatim.
  * - `sanctionsSend` (from canUseTool, before the tier verdict): `terminal
  *   send` is CONFIRM by classification, but a send targeting the worker
  *   terminal of a gate this thread relayed carries a human answer — the
@@ -83,11 +84,17 @@ export class GateRelay implements SessionRelay {
    * Prepends the thread's gate and stall-alert registries to a human message
    * (spec §6: the session routes "anchored on the registry"). Answered
    * entries ride along so the LLM can recognize — and refuse to re-route —
-   * a late correction. A thread that never relayed anything passes through
+   * a late correction, and closed entries so it can tell the human a moot
+   * question apart from an open one (issue #46). Superseded rows stay out:
+   * their question lives on in the re-ask successor, and listing both would
+   * recreate exactly the duplicate-gate disambiguation noise the supersede
+   * exists to kill. A thread that never relayed anything passes through
    * untouched.
    */
   decorateReply(threadTs: string, text: string): string {
-    const gates = this.store.listGatesForThread(threadTs);
+    const gates = this.store
+      .listGatesForThread(threadTs)
+      .filter((gate) => gate.status !== 'superseded');
     const stalls = this.store.listStallsForThread(threadTs);
     if (gates.length === 0 && stalls.length === 0) return text;
     return [
@@ -138,7 +145,7 @@ export class GateRelay implements SessionRelay {
   prepare(threadTs: string, command: string): PrepareVerdict {
     const segments = commandSegments(command);
     const replies = segments.filter((tokens) => isOrcaCommand(tokens, 'orchestration', 'reply'));
-    if (replies.length === 0) return { action: 'proceed', command };
+    if (replies.length === 0) return this.prepareSend(threadTs, command, segments);
     // One reply per command, alone: the observer maps one --json envelope to
     // one gate flip, and the fidelity rewrite must know what it rebuilds.
     if (segments.length > 1) {
@@ -146,13 +153,13 @@ export class GateRelay implements SessionRelay {
         'run `orca orchestration reply` as its own command — nothing chained around it',
       );
     }
-    const tokens = replies[0] as string[];
+    let tokens = replies[0] as string[];
 
     const msgId = flagValue(tokens, '--id');
     if (msgId === undefined) {
       return deny('the reply must target a gate: --id <msg_id> from the relayed-gates context');
     }
-    const gate = this.store.getGate(msgId);
+    let gate = this.store.getGate(msgId);
     if (gate === undefined || gate.threadTs !== threadTs) {
       // Cross-thread routing is impossible by construction (issue #9): a
       // reply in this thread can only reach this thread's own gates.
@@ -161,10 +168,37 @@ export class GateRelay implements SessionRelay {
           "to this thread's own relayed gates (spec §6)",
       );
     }
+    let rewritten = false;
+    if (gate.status === 'superseded') {
+      // A stale re-asked gate forwards to the one ask the worker still
+      // listens on (issue #46): a reply down the stale id returns ok:true
+      // into a void — the known expired-ask trap. Same question, so the
+      // human's answer applies to the successor verbatim.
+      const successor = this.successorOf(gate);
+      if (successor === undefined) {
+        return deny(
+          'that question was re-asked and this gate superseded — reply to the live gate ' +
+            'from the relayed-gates context instead',
+        );
+      }
+      tokens = replaceFlagValue(tokens, '--id', successor.msgId);
+      rewritten = true;
+      this.logger.info(
+        { threadTs, staleMsgId: msgId, msgId: successor.msgId },
+        'reply to a superseded gate forwarded to its live re-ask',
+      );
+      gate = successor;
+    }
+    if (gate.status === 'closed') {
+      return deny(
+        'that question is moot — its delegation already closed with the gate unanswered ' +
+          '(issue #46), so nothing listens for a reply. Tell the user instead of routing it',
+      );
+    }
     if (gate.status === 'answered') {
       // Remember the denial: it sanctions the correction send that follows,
       // and tells observeSend that send answers nothing new.
-      this.lastReply.set(threadTs, { msgId, outcome: 'correction' });
+      this.lastReply.set(threadTs, { msgId: gate.msgId, outcome: 'correction' });
       const handle = gate.workerHandle ?? '<worker handle>';
       return deny(
         'that gate was already answered — an answered gate never re-routes (spec §6). ' +
@@ -184,30 +218,102 @@ export class GateRelay implements SessionRelay {
     // Fidelity is absolute (issue #9): a bare option number goes down as
     // that option's exact text — rewritten here so no paraphrase can slip
     // between the human's "2" and the worker's stdin.
-    const choice = /^(\d+)\.?$/.exec(body.trim());
-    if (choice !== null && gate.options.length > 0) {
-      const index = Number(choice[1]);
-      const option = gate.options[index - 1];
-      if (index < 1 || option === undefined) {
-        return deny(
-          `that gate has ${gate.options.length} option${gate.options.length === 1 ? '' : 's'} — ` +
-            `there is no option ${index}. Ask the human which they meant; do not guess`,
-        );
-      }
-      const rewritten = tokens
-        .map((token, i) => {
-          if (token.startsWith('--body=')) return `--body=${option}`;
-          return tokens[i - 1] === '--body' ? option : token;
-        })
-        .map(shellQuote)
-        .join(' ');
+    const choice = optionChoice(gate, body);
+    if (choice !== null) {
+      if (choice.option === undefined) return noSuchOption(gate, choice.index);
+      tokens = replaceFlagValue(tokens, '--body', choice.option);
+      rewritten = true;
       this.logger.info(
-        { threadTs, msgId, choice: index, option },
+        { threadTs, msgId: gate.msgId, choice: choice.index, option: choice.option },
         'bare option number rewritten to the option text — fidelity',
       );
-      return { action: 'proceed', command: rewritten };
     }
-    return { action: 'proceed', command };
+    if (!rewritten) return { action: 'proceed', command };
+    return { action: 'proceed', command: tokens.map(shellQuote).join(' ') };
+  }
+
+  /**
+   * The same fidelity on the send half (issue #50): the reply-failure
+   * fallback and the late correction type the human's answer straight into
+   * the worker terminal, and a bare digit there is exactly as ambiguous as
+   * on the reply — it only means the right thing against the numbering the
+   * worker happens to hold at that moment (a re-ask may have renumbered,
+   * issue #46). So a lone `terminal send` whose --text is a bare option
+   * number types the selected option's verbatim text instead. Free text —
+   * and every send the registry cannot attribute to an options-carrying
+   * gate — passes through untouched.
+   */
+  private prepareSend(threadTs: string, command: string, segments: string[][]): PrepareVerdict {
+    const untouched: PrepareVerdict = { action: 'proceed', command };
+    // Only a lone send can be rebuilt from tokens — a chained one keeps its
+    // CONFIRM tier anyway (sanctionsSend refuses multi-segment commands).
+    if (segments.length !== 1) return untouched;
+    let tokens = segments[0] as string[];
+    if (!isOrcaCommand(tokens, 'terminal', 'send')) return untouched;
+    const handle = flagValue(tokens, '--terminal');
+    const text = flagValue(tokens, '--text');
+    if (handle === undefined || text === undefined) return untouched;
+    const gate = this.sendGate(threadTs, handle);
+    if (gate === undefined) return untouched;
+    const choice = optionChoice(gate, text);
+    if (choice === null) return untouched;
+    if (choice.option === undefined) return noSuchOption(gate, choice.index);
+    tokens = replaceFlagValue(tokens, '--text', choice.option);
+    this.logger.info(
+      { threadTs, msgId: gate.msgId, workerHandle: handle, choice: choice.index, option: choice.option },
+      'bare option number in a gate-answer send rewritten to the option text — fidelity',
+    );
+    return { action: 'proceed', command: tokens.map(shellQuote).join(' ') };
+  }
+
+  /**
+   * The gate a send to this worker carries an answer for — observeSend's
+   * attribution, applied before the send runs: the gate the thread's last
+   * reply named (followed through any supersede chain, so the options are
+   * the LIVE ask's — the numbering the worker is showing), else the
+   * worker's single pending gate. A pending stall alert on the same worker
+   * blocks that heuristic: stall answers are literal keystrokes for
+   * whatever prompt the terminal shows (issue #22) — only the explicit
+   * last-reply attribution outranks a stall.
+   */
+  private sendGate(threadTs: string, handle: string): PendingGateRow | undefined {
+    const last = this.lastReply.get(threadTs);
+    if (last !== undefined) {
+      const named = this.store.getGate(last.msgId);
+      if (named !== undefined && named.workerHandle === handle) {
+        const live = this.successorOf(named);
+        // A closed gate never routes an answer (issue #46: the question is
+        // moot) — a send after its delegation ended stays untouched rather
+        // than rewritten against a dead ask's numbering.
+        return live?.status === 'closed' ? undefined : live;
+      }
+    }
+    if (this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)) {
+      return undefined;
+    }
+    const pending = this.store
+      .listPendingGates(threadTs)
+      .filter((gate) => gate.workerHandle === handle);
+    return pending.length === 1 ? pending[0] : undefined;
+  }
+
+  /**
+   * The end of a superseded gate's re-ask chain — whatever its terminal
+   * status, so the caller's pending/answered/closed handling applies to the
+   * gate that actually owns the question now. Undefined on a dangling
+   * pointer or a cycle (a hand-edited registry) — refuse rather than guess.
+   */
+  private successorOf(gate: PendingGateRow): PendingGateRow | undefined {
+    const seen = new Set<string>([gate.msgId]);
+    let current = gate;
+    while (current.status === 'superseded') {
+      if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
+      seen.add(current.supersededBy);
+      const next = this.store.getGate(current.supersededBy);
+      if (next === undefined || next.threadTs !== gate.threadTs) return undefined;
+      current = next;
+    }
+    return current;
   }
 
   // ── observe: the PostToolUse seam ────────────────────────────────────────
@@ -323,9 +429,38 @@ export class GateRelay implements SessionRelay {
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });
 
-/** One registry row, flattened for the LLM's turn context. */
+/** A bare "2" / "2." read against a gate's numbered options. Null when the
+ * value is free text or the gate carried no options (both pass verbatim);
+ * `option` stays undefined when the number is out of range. */
+function optionChoice(
+  gate: PendingGateRow,
+  value: string,
+): { index: number; option: string | undefined } | null {
+  const match = /^(\d+)\.?$/.exec(value.trim());
+  if (match === null || gate.options.length === 0) return null;
+  const index = Number(match[1]);
+  return { index, option: index < 1 ? undefined : gate.options[index - 1] };
+}
+
+const noSuchOption = (gate: PendingGateRow, index: number): PrepareVerdict =>
+  deny(
+    `that gate has ${gate.options.length} option${gate.options.length === 1 ? '' : 's'} — ` +
+      `there is no option ${index}. Ask the human which they meant; do not guess`,
+  );
+
+/** Swaps one flag's value in a token list — `--flag value` or `--flag=value`. */
+function replaceFlagValue(tokens: string[], flag: string, value: string): string[] {
+  return tokens.map((token, i) => {
+    if (token.startsWith(`${flag}=`)) return `${flag}=${value}`;
+    return tokens[i - 1] === flag ? value : token;
+  });
+}
+
+/** One registry row, flattened for the LLM's turn context. Superseded rows
+ * never reach here — decorateReply filters them before the map. */
 function contextLine(gate: PendingGateRow): string {
-  const status = gate.status === 'pending' ? 'PENDING' : 'ANSWERED';
+  const status =
+    gate.status === 'pending' ? 'PENDING' : gate.status === 'closed' ? 'CLOSED' : 'ANSWERED';
   const kind = gate.kind === 'escalation' ? '🚨 escalation' : '❓ question';
   const from = gate.worktreeName === null ? 'an unmatched worker' : `\`${gate.worktreeName}\``;
   const parts = [

@@ -42,6 +42,7 @@ const seedGate = (
     msgId: GATE,
     threadTs: THREAD,
     taskId: 'task_13c7',
+    dispatchId: 'ctx_13c7',
     workerHandle: WORKER,
     worktreeName: 'scratch-21-bench',
     kind: 'decision_gate',
@@ -210,6 +211,123 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   });
 });
 
+describe('prepare — option fidelity on the gate-answer terminal send (issue #50)', () => {
+  const send = (text: string) =>
+    `orca terminal send --terminal ${WORKER} --text "${text}" --enter --json`;
+
+  it('rewrites the fallback send’s bare number to the option text after a failed reply', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    // The reply to GATE fails (ask timed out) — the fallback send follows.
+    await relay.observe(THREAD, replyCommand('2'), '');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
+    });
+  });
+
+  it('rewrites against the worker’s single pending gate when no reply preceded', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    expect(relay.prepare(THREAD, send('3.'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text 'merge both into flat config' --enter --json`,
+    });
+  });
+
+  it('denies an out-of-range option number instead of typing the digit', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const verdict = relay.prepare(THREAD, send('7'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('no option 7');
+  });
+
+  it('passes free text verbatim — only a bare option number rewrites', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const free = send('use the flat config');
+    expect(relay.prepare(THREAD, free)).toEqual({ action: 'proceed', command: free });
+  });
+
+  it('passes a bare number verbatim when the gate carried no options', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store, { options: [] });
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('never rewrites with two pending gates on the worker — attribution is ambiguous', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_two' });
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('keeps a stalled worker’s keystrokes literal — a stall answer is typed as-is (issue #22)', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedStall(store);
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('the failed reply’s attribution outranks the stall — the fallback still rewrites', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedStall(store);
+    await relay.observe(THREAD, replyCommand('2'), '');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
+    });
+  });
+
+  it('a correction send after an answered-gate denial carries the option text too', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    store.answerGate(GATE);
+    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+
+    expect(relay.prepare(THREAD, send('1'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text root --enter --json`,
+    });
+  });
+
+  it('takes the option text from the LIVE re-ask when the reply’s gate got superseded (issue #46)', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    // The reply against the original ask fails, then the worker re-asks with
+    // renumbered options — the digit must resolve against the live numbering.
+    await relay.observe(THREAD, replyCommand('2'), '');
+    seedGate(store, { msgId: 'msg_reask', options: ['markdown table', 'CSV file', 'HTML page'] });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text 'CSV file' --enter --json`,
+    });
+  });
+
+  it('leaves a chained send untouched — the rewrite only rebuilds a lone command', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const chained = `${send('2')} && ls`;
+    expect(relay.prepare(THREAD, chained)).toEqual({ action: 'proceed', command: chained });
+  });
+});
+
 describe('sanctionsSend — the registry-anchored terminal send', () => {
   const SEND = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
 
@@ -271,6 +389,132 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
     expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
       false,
     );
+  });
+});
+
+describe('gate registry hygiene — superseded and closed gates (issue #46)', () => {
+  const seedDispatch = (
+    store: DelegationStore,
+    over: Partial<Parameters<DelegationStore['recordDispatch']>[0]> = {},
+  ): void => {
+    store.recordDispatch({
+      taskId: 'task_13c7',
+      dispatchId: 'ctx_13c7',
+      worktreeId: null,
+      worktreeName: 'scratch-21-bench',
+      worktreePath: null,
+      repo: 'scratch',
+      issueNumber: 21,
+      agent: 'claude',
+      workerHandle: WORKER,
+      threadTs: THREAD,
+      channelId: 'C0TEST',
+      cardTs: null,
+      title: 'bench harness',
+      ...over,
+    });
+  };
+
+  it('decorateReply lists the live re-ask once — superseded rows stay out of the context', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    const decorated = relay.decorateReply(THREAD, 'root');
+    expect(decorated).toContain('[PENDING] ❓ question msg_reask');
+    expect(decorated).not.toContain(GATE);
+  });
+
+  it('decorateReply marks a closed gate CLOSED — the moot question stays recognizable', () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    expect(relay.decorateReply(THREAD, 'root')).toContain(`[CLOSED] ❓ question ${GATE}`);
+  });
+
+  it('forwards a reply aimed at a superseded gate to its live re-ask — with option fidelity', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    expect(relay.prepare(THREAD, replyCommand('2'))).toEqual({
+      action: 'proceed',
+      command: 'orca orchestration reply --id msg_reask --body app/ --json',
+    });
+  });
+
+  it('follows a chain of re-asks to the newest live gate', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_r1' });
+    seedGate(store, { msgId: 'msg_r2' });
+    store.supersedeGate(GATE, 'msg_r1');
+    store.supersedeGate('msg_r1', 'msg_r2');
+
+    expect(relay.prepare(THREAD, replyCommand('use the flat config'))).toEqual({
+      action: 'proceed',
+      command: "orca orchestration reply --id msg_r2 --body 'use the flat config' --json",
+    });
+  });
+
+  it('a forwarded reply landing on an answered re-ask hits the answered denial', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+    store.answerGate('msg_reask');
+
+    const verdict = relay.prepare(THREAD, replyCommand('actually 1'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('never re-routes');
+  });
+
+  it('denies a reply to a closed gate — the worker is gone, the question moot', () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('moot');
+  });
+
+  it('refuses a broken re-ask chain instead of guessing a target', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    store.supersedeGate(GATE, 'msg_ghost');
+
+    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('re-asked');
+  });
+
+  it('the fallback send never rewrites against a closed gate — the question went moot (issue #50)', async () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    // The reply fails, then the delegation closes before the fallback runs.
+    await relay.observe(THREAD, replyCommand('2'), '');
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    const numeric = `orca terminal send --terminal ${WORKER} --text "2" --enter --json`;
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('sanctionsSend lapses once the delegation close mooted the worker’s gates', () => {
+    const { relay, store } = makeRelay();
+    const send = `orca terminal send --terminal ${WORKER} --text "root" --enter --json`;
+    seedDispatch(store);
+    seedGate(store);
+    expect(relay.sanctionsSend(THREAD, send)).toBe(true);
+
+    store.closeDelegation('ctx_13c7', 'completed');
+    expect(relay.sanctionsSend(THREAD, send)).toBe(false);
   });
 });
 

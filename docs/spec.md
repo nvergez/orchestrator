@@ -84,7 +84,7 @@ orca orchestration dispatch --task <taskId> --to <handle> --inject --json
 
 The brief travels via **`dispatch --inject`** (never `--prompt` at create time — the worker must get the coordinator preamble to emit `worker_done`). `--issue <n>` links the GitHub issue: the durable home for status/results beyond the Slack thread.
 
-**State detection — two layers.** Authority = structured messages (`worker_done`, `escalation`, `decision_gate` via `check --wait`) + `task-list`. Watchdog = `worktree ps` `agents[].state` / stale `lastOutputAt` / `tui-idle`, to catch a worker stalled at a prompt without an `ask` → "needs attention" in the thread. A `check` timeout or `{count:0}` is a checkpoint, not a failure.
+**State detection — two layers.** Authority = structured messages (`worker_done`, `escalation`, `decision_gate` via `check --wait`) + `task-list`. Watchdog = `worktree ps` `agents[].state` / stale `lastOutputAt` / `tui-idle`, to catch a worker stalled at a prompt without an `ask` → "needs attention" in the thread. A second watchdog signal ([#48](https://github.com/nvergez/orchestrator/issues/48)) catches the inverse — a worker that LOOKS alive (a TUI spinner keeps `lastOutputAt` fresh) but whose bus said nothing (no heartbeat, ask or done) past a max in-flight age (`WATCHDOG_MAX_INFLIGHT_MINUTES`, default 30): same ⚠️ mold, quoting the agent's `state` + `lastAssistantMessage` from `worktree ps`; any bus message from the worker resets the clock. A `check` timeout or `{count:0}` is a checkpoint, not a failure.
 
 **Parallelism**: one coordinator (mailbox) per thread → no cross-thread leakage on the runtime-global bus; multi-repo fan-out in waves; a self-imposed global cap on concurrent workers.
 
@@ -96,7 +96,7 @@ Decision [#9](https://github.com/nvergez/orchestrator/issues/9). Architecture: *
 
 - After a dispatch the session **ends its turn** and may doze; the **daemon** holds one child `orca orchestration check --wait --terminal <mailbox> --types worker_done,escalation,decision_gate` per thread with in-flight work (rolling windows). The mailbox is a lightweight terminal `slack-<thread_ts>`, lazily created at first dispatch, remembered in SQLite, passed as `--from` at dispatch.
 - An event **wakes the session exactly like a human message**. Wakes are uniform: human message, orchestration event, watchdog alert — three inputs, one pipe. At boot the daemon re-arms all watchers from SQLite.
-- **Relay up** (new message, never an edit): worktree name + issue link, the worker's question **verbatim** (blockquote, never paraphrased), numbered options if any, "reply in this thread". `escalation` = same, marked 🚨. Watchdog = same mold + last terminal output.
+- **Relay up** (new message, never an edit): worktree name + issue link, the worker's question **verbatim** (blockquote, never paraphrased), numbered options if any, "reply in this thread". `escalation` = same, marked 🚨. Watchdog = same mold + last terminal output. One exception ([#46](https://github.com/nvergez/orchestrator/issues/46)): a worker re-asking the same question after an `ask` timeout **edits** the existing relay in place — one notification per logical question; the stale gate flips to `superseded`, forwarding to the re-ask.
 - **Route back down** — the LLM routes the human reply, anchored on the SQLite `pending_gates` registry:
   - `decision_gate` / `escalation` → `orca orchestration reply --id <msg_id> --body "<answer>"` (nominal path);
   - worker stalled at a TUI prompt (no `ask`) → `orca terminal send --terminal <handle> --text "…" --enter`;
@@ -138,7 +138,7 @@ One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTR
 
 - **`sessions`** — key `thread_ts` (+ `channel_id`): `session_id`, `root_user`, `status ∈ {open, closed}`, `created_at`, `last_activity_at`, `turn_count`, `cost_usd_total`. (#5)
 - **`delegations`** — `task_id`, `dispatch_id`, `worktree_id`, `issue#`, `repo`, `thread_ts`, `status`; written at dispatch, closed on `worker_done`; drives boot reconciliation. (#8)
-- **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered}`; written by the daemon at relay time; anchors answer routing. (#9)
+- **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `dispatch_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered, superseded, closed}` + `superseded_by`; written by the daemon at relay time; anchors answer routing — which only ever considers `pending` rows: a re-ask supersedes its stale gate, and a closing delegation closes its unanswered ones. (#9, #46)
 - Mailbox terminal handles per thread are also remembered here (#9).
 - Pure runtime state (process handles, throttle buffers, warm flags) is **not** persisted — lost harmlessly on restart.
 

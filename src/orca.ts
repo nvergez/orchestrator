@@ -228,13 +228,51 @@ export async function safeRegistryIssueUrl(
   }
 }
 
+/**
+ * `safeRegistryIssueUrl` for a whole ledger slice on ONE registry read
+ * (issue #51): the 🔚 close summary links every delegation at once, where
+ * per-row lookups would cost one `orca repo list` each. Same degradation,
+ * batch-wide: a row without a linkable repo, a folder repo with no remote,
+ * or an unreachable Orca (warned) leaves `issueUrl` unset and the rendering
+ * falls back to the plain `repo#n`.
+ */
+export async function safeRegistryIssueUrls<
+  Row extends { repo: string | null; issueNumber: number | null },
+>(run: CommandRunner, logger: Logger, rows: Row[]): Promise<Array<Row & { issueUrl?: string }>> {
+  if (!rows.some((row) => row.repo !== null && row.issueNumber !== null)) return rows;
+  let registry: RegistryRepo[];
+  try {
+    registry = await listRegistryRepos(run);
+  } catch (error) {
+    logger.warn({ err: error }, 'registry lookup for the issue links failed — plain references');
+    return rows;
+  }
+  const keysByName = new Map(
+    registry.flatMap((repo) =>
+      repo.canonicalKey === undefined ? [] : [[repo.name, repo.canonicalKey] as const],
+    ),
+  );
+  return rows.map((row) => {
+    const key = row.repo === null ? undefined : keysByName.get(row.repo);
+    return key === undefined || row.issueNumber === null
+      ? row
+      : { ...row, issueUrl: `https://${key}/issues/${row.issueNumber}` };
+  });
+}
+
 /** The liveness signals `orca worktree ps` reports for one worktree —
  * everything the watchdog's staleness clock reads (issue #22). */
 export interface WorktreeActivity {
   /** Last terminal output in the worktree, epoch ms; null when untracked. */
   lastOutputAt: number | null;
-  /** Every agent pane's state clock — a fresh one means someone is alive. */
-  agents: Array<{ state: string; stateStartedAt: number | null; updatedAt: number | null }>;
+  /** Every agent pane's state clock — a fresh one means someone is alive —
+   * plus its last assistant message, the in-flight alert's excerpt (#48). */
+  agents: Array<{
+    state: string;
+    stateStartedAt: number | null;
+    updatedAt: number | null;
+    lastAssistantMessage: string | null;
+  }>;
 }
 
 /** `orca worktree ps --json` → activity by worktree id. Throws when Orca is down. */
@@ -254,10 +292,11 @@ export async function listWorktreeActivity(
     if (typeof record.worktreeId !== 'string') continue;
     const agents = Array.isArray(record.agents)
       ? record.agents.flatMap((agent: unknown) => {
-          const { state, stateStartedAt, updatedAt } = agent as {
+          const { state, stateStartedAt, updatedAt, lastAssistantMessage } = agent as {
             state?: unknown;
             stateStartedAt?: unknown;
             updatedAt?: unknown;
+            lastAssistantMessage?: unknown;
           };
           if (typeof state !== 'string') return [];
           return [
@@ -265,6 +304,8 @@ export async function listWorktreeActivity(
               state,
               stateStartedAt: typeof stateStartedAt === 'number' ? stateStartedAt : null,
               updatedAt: typeof updatedAt === 'number' ? updatedAt : null,
+              lastAssistantMessage:
+                typeof lastAssistantMessage === 'string' ? lastAssistantMessage : null,
             },
           ];
         })

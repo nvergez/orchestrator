@@ -202,6 +202,51 @@ export function stalledWorkerAlert(opts: {
 }
 
 /**
+ * The watchdog's second signal (issue #48): the worker LOOKS alive — a TUI
+ * spinner keeps its terminal clocks fresh, so `stalledWorkerAlert` can never
+ * fire — but the bus has heard nothing from it for the whole in-flight
+ * window. Same mold as the stall alert; what it quotes instead of terminal
+ * output is the runtime's view of the agent (`worktree ps` state) and its
+ * last assistant message — where the live incident's root cause was sitting.
+ */
+export function inflightWorkerAlert(opts: {
+  worktreeName: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+  /** How long the delegation has been in flight with a mute bus. */
+  inFlightForMs: number;
+  /** The agent state `worktree ps` reports; null when unreported. */
+  agentState: string | null;
+  /** The agent's last assistant message, truncated upstream; '' when unreadable. */
+  lastAssistantMessage: string;
+}): string {
+  const who = opts.worktreeName === null ? '*A worker*' : `*\`${opts.worktreeName}\`*`;
+  const plainRef =
+    opts.repo !== null && opts.issueNumber !== null ? `${opts.repo}#${opts.issueNumber}` : null;
+  const ref =
+    plainRef === null
+      ? ''
+      : ` (${opts.issueUrl === undefined ? plainRef : `<${opts.issueUrl}|${plainRef}>`})`;
+  const quoted =
+    opts.lastAssistantMessage.trim() === ''
+      ? ['> (no assistant message could be read)']
+      : opts.lastAssistantMessage
+          .split('\n')
+          .map((line) => (line.trim() === '' ? '>' : `> \`${line.replaceAll('`', "'")}\``));
+  return [
+    `⚠️ ${who}${ref} needs attention —`,
+    `in flight for ${formatDuration(opts.inFlightForMs)} without a word on the bus ` +
+      `(agent state: \`${opts.agentState ?? 'unknown'}\`). Last assistant message:`,
+    '',
+    ...quoted,
+    '',
+    "Tell me what to answer, I'll relay it to its terminal.",
+  ].join('\n');
+}
+
+/**
  * Scenario C end — the fixed acknowledgment after an answer went back down.
  * Rendered by the session's voice (the routing turn's one visible line); the
  * template lives here so the system prompt and the tests share one source.
@@ -296,13 +341,52 @@ export const CLOSED_THREAD_LINE =
   'Session closed. Mention me on a new root message to start again.';
 
 /**
+ * One ledger delegation as the 🔚 summary names it (issue #51): the fields
+ * `DelegationRow` durably holds, plus the registry-derived issue link — absent
+ * for a folder repo without a remote, so the line degrades to the plain
+ * `repo#n` exactly like the card.
+ */
+export interface ClosingDelegation {
+  repo: string | null;
+  issueNumber: number | null;
+  /** The naming fallback for a row that never resolved a `repo#n`. */
+  worktreeName: string | null;
+  taskId: string;
+  status: 'dispatched' | 'completed' | 'failed';
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+}
+
+/** The card vocabulary (spec §8): ✅ done · ❌ failed · ⚙️ still in flight. */
+const CLOSING_STATUS_ICON = { completed: '✅', failed: '❌', dispatched: '⚙️' } as const;
+
+/** `• ✅ <url|repo#n>` — one delegation's line in the 🔚 summary (issue #51). */
+function closingDelegationLine(delegation: ClosingDelegation): string {
+  const plainRef =
+    delegation.repo !== null && delegation.issueNumber !== null
+      ? `${delegation.repo}#${delegation.issueNumber}`
+      : null;
+  const name =
+    plainRef !== null
+      ? delegation.issueUrl === undefined
+        ? plainRef
+        : `<${delegation.issueUrl}|${plainRef}>`
+      : delegation.worktreeName !== null
+        ? `\`${delegation.worktreeName}\``
+        : delegation.taskId;
+  const tail = delegation.status === 'dispatched' ? ' — still in flight' : '';
+  return `• ${CLOSING_STATUS_ICON[delegation.status]} ${name}${tail}`;
+}
+
+/**
  * "Brief moments" — the 🔚 closing summary, posted by an explicit
  * `@orchestrator close` or by the dormancy auto-close (which names its
- * reason). The count now comes from the delegations ledger (#19); listing
- * each delegation with its PR link like the mock waits for #20's results.
+ * reason). Each of the thread's delegations gets its own line with the final
+ * outcome and issue link (issue #51, from the #19 ledger) — the thread's
+ * durable at-a-glance record; the cost/turn line stays the mock's verbatim.
  */
 export function closingSummary(opts: {
-  delegations: number;
+  delegations: ClosingDelegation[];
   costUsd: number;
   turnCount: number;
   /** Set by the auto-close sweep — says why the session closed on its own. */
@@ -314,7 +398,9 @@ export function closingSummary(opts: {
       : `🔚 Session closed — dormant for ${formatDays(opts.dormantDays)}.`;
   return [
     header,
-    `• ${opts.delegations} delegation${opts.delegations === 1 ? '' : 's'}`,
+    ...(opts.delegations.length === 0
+      ? ['• no delegations']
+      : opts.delegations.map(closingDelegationLine)),
     `• thread cost: $${opts.costUsd.toFixed(2)} · ${opts.turnCount} turn${opts.turnCount === 1 ? '' : 's'}`,
     'Mention me on a new root message to start again.',
   ].join('\n');

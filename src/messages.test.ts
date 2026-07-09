@@ -11,6 +11,7 @@ import {
   gateAnswerAck,
   gateLine,
   gateRelayMessage,
+  inflightWorkerAlert,
   milestoneLine,
   orcaUnavailableLine,
   queuedLine,
@@ -70,25 +71,100 @@ describe('CLOSED_THREAD_LINE', () => {
 });
 
 describe('closingSummary', () => {
-  it('follows the UX mock shape (docs/prototypes/slack-ux, explicit close)', () => {
-    expect(closingSummary({ delegations: 0, costUsd: 6.84, turnCount: 19 })).toBe(
+  const delegation = {
+    repo: 'forwardly',
+    issueNumber: 84,
+    worktreeName: 'forwardly-84-csv-export',
+    taskId: 'task_a1b2c3d4e5f6',
+    status: 'completed',
+  } as const;
+
+  it('names each delegation with its outcome and issue link (issue #51, explicit close mock)', () => {
+    const summary = closingSummary({
+      delegations: [
+        { ...delegation, issueUrl: 'https://github.com/lemlist/forwardly/issues/84' },
+        {
+          ...delegation,
+          issueNumber: 91,
+          issueUrl: 'https://github.com/lemlist/forwardly/issues/91',
+        },
+      ],
+      costUsd: 6.84,
+      turnCount: 19,
+    });
+
+    expect(summary).toBe(
       '🔚 Session closed.\n' +
-        '• 0 delegations\n' +
+        '• ✅ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+        '• ✅ <https://github.com/lemlist/forwardly/issues/91|forwardly#91>\n' +
         '• thread cost: $6.84 · 19 turns\n' +
         'Mention me on a new root message to start again.',
     );
   });
 
-  it('goes singular for one delegation and one turn', () => {
-    const summary = closingSummary({ delegations: 1, costUsd: 0.5, turnCount: 1 });
+  it('marks a failed delegation ❌ and an in-flight one ⚙️ — the card vocabulary', () => {
+    const summary = closingSummary({
+      delegations: [
+        {
+          ...delegation,
+          status: 'failed',
+          issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+        },
+        { ...delegation, issueNumber: 91, status: 'dispatched' },
+      ],
+      costUsd: 1.2,
+      turnCount: 3,
+    });
 
-    expect(summary).toContain('• 1 delegation\n');
+    expect(summary).toContain(
+      '• ❌ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n',
+    );
+    expect(summary).toContain('• ⚙️ forwardly#91 — still in flight\n');
+  });
+
+  it('degrades to plain repo#n for a folder repo without a remote, like the card', () => {
+    const summary = closingSummary({
+      delegations: [{ ...delegation }],
+      costUsd: 0.5,
+      turnCount: 2,
+    });
+
+    expect(summary).toContain('• ✅ forwardly#84\n');
+    expect(summary).not.toContain('<');
+  });
+
+  it('falls back to the worktree name, then the task id, when the row never resolved repo#n', () => {
+    const summary = closingSummary({
+      delegations: [
+        { ...delegation, repo: null },
+        { ...delegation, repo: null, worktreeName: null },
+      ],
+      costUsd: 0.5,
+      turnCount: 2,
+    });
+
+    expect(summary).toContain('• ✅ `forwardly-84-csv-export`\n');
+    expect(summary).toContain('• ✅ task_a1b2c3d4e5f6\n');
+  });
+
+  it('keeps the summary shape when the thread never delegated', () => {
+    expect(closingSummary({ delegations: [], costUsd: 6.84, turnCount: 19 })).toBe(
+      '🔚 Session closed.\n' +
+        '• no delegations\n' +
+        '• thread cost: $6.84 · 19 turns\n' +
+        'Mention me on a new root message to start again.',
+    );
+  });
+
+  it('goes singular for one turn', () => {
+    const summary = closingSummary({ delegations: [], costUsd: 0.5, turnCount: 1 });
+
     expect(summary).toContain('· 1 turn\n');
   });
 
   it('names the dormancy span when the auto-close sweep is the closer', () => {
     const summary = closingSummary({
-      delegations: 0,
+      delegations: [],
       costUsd: 2.1,
       turnCount: 4,
       dormantDays: 7,
@@ -98,7 +174,7 @@ describe('closingSummary', () => {
   });
 
   it('always shows the cost with two decimals', () => {
-    expect(closingSummary({ delegations: 0, costUsd: 5, turnCount: 2 })).toContain('$5.00');
+    expect(closingSummary({ delegations: [], costUsd: 5, turnCount: 2 })).toContain('$5.00');
   });
 });
 
@@ -382,6 +458,57 @@ describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
     expect(message).toContain('⚠️ *A worker* seems stalled —');
     expect(message).toContain('no sign for 2 h 10 min');
     expect(message).toContain('> (no recent output could be read)');
+  });
+});
+
+describe('inflightWorkerAlert — the watchdog’s second signal ⚠️ (issue #48)', () => {
+  it('renders who, the mute-bus span, agent state, quoted last assistant message, reply instruction', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: 'scratch-2-report',
+      repo: 'scratch',
+      issueNumber: 2,
+      issueUrl: 'https://github.com/nvergez/scratch/issues/2',
+      inFlightForMs: 32 * 60_000,
+      agentState: 'working',
+      lastAssistantMessage: 'Exit code 1 / Orca is not running.',
+    });
+    expect(message).toBe(
+      [
+        '⚠️ *`scratch-2-report`* (<https://github.com/nvergez/scratch/issues/2|scratch#2>) needs attention —',
+        'in flight for 32 min without a word on the bus (agent state: `working`). Last assistant message:',
+        '',
+        '> `Exit code 1 / Orca is not running.`',
+        '',
+        "Tell me what to answer, I'll relay it to its terminal.",
+      ].join('\n'),
+    );
+  });
+
+  it('quotes a multi-line message line by line, stabilizing backticks', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: 'scratch-2-report',
+      repo: 'scratch',
+      issueNumber: 2,
+      inFlightForMs: 45 * 60_000,
+      agentState: 'working',
+      lastAssistantMessage: 'retrying `orca open`…\n\nstill failing',
+    });
+    expect(message).toContain("> `retrying 'orca open'…`\n>\n> `still failing`");
+  });
+
+  it('degrades: plain ref, "A worker", unknown agent state, no readable message', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: null,
+      repo: null,
+      issueNumber: null,
+      inFlightForMs: 90 * 60_000,
+      agentState: null,
+      lastAssistantMessage: '  ',
+    });
+    expect(message).toContain('⚠️ *A worker* needs attention —');
+    expect(message).toContain('in flight for 1 h 30 min without a word on the bus');
+    expect(message).toContain('(agent state: `unknown`)');
+    expect(message).toContain('> (no assistant message could be read)');
   });
 });
 
