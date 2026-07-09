@@ -102,9 +102,10 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   const spokenText = humanText(event);
   if (event.type === 'message') {
     if (spokenText.includes(botTag)) {
-      // A mention fires both message.channels and app_mention for the same
+      // A mention fires both the message event and app_mention for the same
       // Slack message; acting on the app_mention copy only prevents doubled
-      // turns.
+      // turns. Dead code until #38 (the message event never arrived), and the
+      // guard that keeps mentions to one turn now that it does.
       return { action: 'ignore', reason: 'mention_duplicate' };
     }
     if (event.thread_ts === undefined) {

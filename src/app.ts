@@ -30,7 +30,12 @@ const CLOSE_LOG_LINES: Record<CloseResult, string> = {
   unregistered: 'close in unregistered thread ignored',
 };
 
-/** Routes every subscribed event (app_mention, message.channels) through the filter. */
+/**
+ * Routes every subscribed event through the filter: `app_mention`, plus the
+ * message event of whichever channel type is pinned — `message.groups` for a
+ * private channel, `message.channels` for a public one (#38). Both arrive as
+ * `type: "message"`, so one listener covers either.
+ */
 export function registerHandlers(
   app: App,
   guard: Guard,
