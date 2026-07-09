@@ -488,6 +488,15 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     this.slots.release();
   }
 
+  /**
+   * Whether the thread holds created-but-not-yet-dispatched worktrees
+   * (issue #49): they carry a 👀-backed card but no ledger row yet, so the
+   * turn-end settle must ask here — the registries cannot see this window.
+   */
+  hasUndispatched(threadTs: string): boolean {
+    return (this.threads.get(threadTs)?.pending.size ?? 0) > 0;
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────────
 
   private tracker(threadTs: string): ThreadTracker {

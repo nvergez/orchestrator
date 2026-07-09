@@ -178,7 +178,8 @@ try {
     // — session open included — and off again when the turn ends with no
     // delegation in flight and nothing pending.
     onTurnStart: (threadTs) => ackTurnStart(surface, logger, threadTs),
-    onTurnEnd: (threadTs) => settleTurnEnd(delegationStore, surface, logger, threadTs),
+    onTurnEnd: (threadTs) =>
+      settleTurnEnd(delegationStore, surface, logger, threadTs, delegations.hasUndispatched(threadTs)),
     logger,
   });
 

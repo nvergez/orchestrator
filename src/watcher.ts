@@ -188,8 +188,13 @@ export async function settleTurnEnd(
   surface: Pick<ReactionSurface, 'unreact'>,
   logger: Logger,
   threadTs: string,
+  /** Work the registries cannot see: a created-but-not-yet-dispatched
+   * worktree (the coordinator's create→dispatch window) has a 👀-backed
+   * card but no ledger row, and must keep its milestone 👀 on. */
+  hasUndispatchedWork = false,
 ): Promise<void> {
   if (
+    hasUndispatchedWork ||
     store.listInFlightForThread(threadTs).length > 0 ||
     store.listPendingGates(threadTs).length > 0 ||
     store.listPendingStalls(threadTs).length > 0

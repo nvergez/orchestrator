@@ -1024,6 +1024,16 @@ describe('turn-lifecycle root ack (issue #49)', () => {
       expect(surface.removed).toEqual([]);
     });
 
+    it('leaves the root untouched while a created-but-undispatched worktree waits', async () => {
+      // The create→dispatch window has no ledger row yet — only the
+      // coordinator knows, and its signal must keep the milestone 👀 on.
+      const surface = new AckSurface();
+
+      await settleTurnEnd(makeStore(), surface, logger, THREAD, true);
+
+      expect(surface.removed).toEqual([]);
+    });
+
     it('a closed delegation no longer pins the 👀 — only in-flight work counts', async () => {
       const store = makeStore();
       seedDispatch(store);
