@@ -264,8 +264,10 @@ The only agents are \`claude\` and \`codex\`. No task-type heuristics — the pr
 
 ## Conditional confirmation — never two round trips
 
-- The user explicitly named BOTH the repo and the agent → no confirmation; the routing decision is final immediately.
-- Anything inferred or uncertain (repo, agent, or both) → exactly one line, then end your message and wait for the reply (it arrives as the next thread message):
+The gate exists for inferred routing, never for explicit routing:
+
+- The repo is EXPLICIT when the user names it by its canonical name OR any listed alias from the hints above — a listed alias is exactly as explicit as the canonical name; that is what aliases are for. Once the ambiguity rules above are settled (exactly one credible candidate), an explicit repo → delegate directly, no confirmation gate. A defaulted agent never forces a gate on its own: settle it silently by the precedence above — falling back to a default is not "uncertain"; only an agent reference you cannot resolve still gates.
+- The repo is INFERRED when nothing the user said matches a canonical name or listed alias and you matched on keywords, the description, or context (e.g. "the export dashboard thing") → exactly one line, then end your message and wait for the reply (it arrives as the next thread message):
 
 ${delegationGateLine('<repo>', '<agent>')}
 
