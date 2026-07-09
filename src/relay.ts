@@ -19,8 +19,9 @@ import type { Logger } from './logger.ts';
  * - `prepare` (from canUseTool): hard enforcement the LLM cannot drift past.
  *   A reply may only target one of THIS thread's gates (cross-thread routing
  *   is impossible by construction), an answered gate never re-routes, and a
- *   bare option number is rewritten to that option's exact text — fidelity
- *   is absolute, the worker receives the option verbatim.
+ *   bare option number is rewritten to that option's exact text — on the
+ *   reply body and on the gate-answer `terminal send` fallback alike (issue
+ *   #50): fidelity is absolute, the worker receives the option verbatim.
  * - `sanctionsSend` (from canUseTool, before the tier verdict): `terminal
  *   send` is CONFIRM by classification, but a send targeting the worker
  *   terminal of a gate this thread relayed carries a human answer — the
@@ -144,7 +145,7 @@ export class GateRelay implements SessionRelay {
   prepare(threadTs: string, command: string): PrepareVerdict {
     const segments = commandSegments(command);
     const replies = segments.filter((tokens) => isOrcaCommand(tokens, 'orchestration', 'reply'));
-    if (replies.length === 0) return { action: 'proceed', command };
+    if (replies.length === 0) return this.prepareSend(threadTs, command, segments);
     // One reply per command, alone: the observer maps one --json envelope to
     // one gate flip, and the fidelity rewrite must know what it rebuilds.
     if (segments.length > 1) {
@@ -217,25 +218,77 @@ export class GateRelay implements SessionRelay {
     // Fidelity is absolute (issue #9): a bare option number goes down as
     // that option's exact text — rewritten here so no paraphrase can slip
     // between the human's "2" and the worker's stdin.
-    const choice = /^(\d+)\.?$/.exec(body.trim());
-    if (choice !== null && gate.options.length > 0) {
-      const index = Number(choice[1]);
-      const option = gate.options[index - 1];
-      if (index < 1 || option === undefined) {
-        return deny(
-          `that gate has ${gate.options.length} option${gate.options.length === 1 ? '' : 's'} — ` +
-            `there is no option ${index}. Ask the human which they meant; do not guess`,
-        );
-      }
-      tokens = replaceFlagValue(tokens, '--body', option);
+    const choice = optionChoice(gate, body);
+    if (choice !== null) {
+      if (choice.option === undefined) return noSuchOption(gate, choice.index);
+      tokens = replaceFlagValue(tokens, '--body', choice.option);
       rewritten = true;
       this.logger.info(
-        { threadTs, msgId: gate.msgId, choice: index, option },
+        { threadTs, msgId: gate.msgId, choice: choice.index, option: choice.option },
         'bare option number rewritten to the option text — fidelity',
       );
     }
     if (!rewritten) return { action: 'proceed', command };
     return { action: 'proceed', command: tokens.map(shellQuote).join(' ') };
+  }
+
+  /**
+   * The same fidelity on the send half (issue #50): the reply-failure
+   * fallback and the late correction type the human's answer straight into
+   * the worker terminal, and a bare digit there is exactly as ambiguous as
+   * on the reply — it only means the right thing against the numbering the
+   * worker happens to hold at that moment (a re-ask may have renumbered,
+   * issue #46). So a lone `terminal send` whose --text is a bare option
+   * number types the selected option's verbatim text instead. Free text —
+   * and every send the registry cannot attribute to an options-carrying
+   * gate — passes through untouched.
+   */
+  private prepareSend(threadTs: string, command: string, segments: string[][]): PrepareVerdict {
+    const untouched: PrepareVerdict = { action: 'proceed', command };
+    // Only a lone send can be rebuilt from tokens — a chained one keeps its
+    // CONFIRM tier anyway (sanctionsSend refuses multi-segment commands).
+    if (segments.length !== 1) return untouched;
+    let tokens = segments[0] as string[];
+    if (!isOrcaCommand(tokens, 'terminal', 'send')) return untouched;
+    const handle = flagValue(tokens, '--terminal');
+    const text = flagValue(tokens, '--text');
+    if (handle === undefined || text === undefined) return untouched;
+    const gate = this.sendGate(threadTs, handle);
+    if (gate === undefined) return untouched;
+    const choice = optionChoice(gate, text);
+    if (choice === null) return untouched;
+    if (choice.option === undefined) return noSuchOption(gate, choice.index);
+    tokens = replaceFlagValue(tokens, '--text', choice.option);
+    this.logger.info(
+      { threadTs, msgId: gate.msgId, workerHandle: handle, choice: choice.index, option: choice.option },
+      'bare option number in a gate-answer send rewritten to the option text — fidelity',
+    );
+    return { action: 'proceed', command: tokens.map(shellQuote).join(' ') };
+  }
+
+  /**
+   * The gate a send to this worker carries an answer for — observeSend's
+   * attribution, applied before the send runs: the gate the thread's last
+   * reply named (followed through any supersede chain, so the options are
+   * the LIVE ask's — the numbering the worker is showing), else the
+   * worker's single pending gate. A pending stall alert on the same worker
+   * blocks that heuristic: stall answers are literal keystrokes for
+   * whatever prompt the terminal shows (issue #22) — only the explicit
+   * last-reply attribution outranks a stall.
+   */
+  private sendGate(threadTs: string, handle: string): PendingGateRow | undefined {
+    const last = this.lastReply.get(threadTs);
+    if (last !== undefined) {
+      const named = this.store.getGate(last.msgId);
+      if (named !== undefined && named.workerHandle === handle) return this.successorOf(named);
+    }
+    if (this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)) {
+      return undefined;
+    }
+    const pending = this.store
+      .listPendingGates(threadTs)
+      .filter((gate) => gate.workerHandle === handle);
+    return pending.length === 1 ? pending[0] : undefined;
   }
 
   /**
@@ -369,6 +422,25 @@ export class GateRelay implements SessionRelay {
 }
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });
+
+/** A bare "2" / "2." read against a gate's numbered options. Null when the
+ * value is free text or the gate carried no options (both pass verbatim);
+ * `option` stays undefined when the number is out of range. */
+function optionChoice(
+  gate: PendingGateRow,
+  value: string,
+): { index: number; option: string | undefined } | null {
+  const match = /^(\d+)\.?$/.exec(value.trim());
+  if (match === null || gate.options.length === 0) return null;
+  const index = Number(match[1]);
+  return { index, option: index < 1 ? undefined : gate.options[index - 1] };
+}
+
+const noSuchOption = (gate: PendingGateRow, index: number): PrepareVerdict =>
+  deny(
+    `that gate has ${gate.options.length} option${gate.options.length === 1 ? '' : 's'} — ` +
+      `there is no option ${index}. Ask the human which they meant; do not guess`,
+  );
 
 /** Swaps one flag's value in a token list — `--flag value` or `--flag=value`. */
 function replaceFlagValue(tokens: string[], flag: string, value: string): string[] {

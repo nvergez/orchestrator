@@ -211,6 +211,123 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   });
 });
 
+describe('prepare — option fidelity on the gate-answer terminal send (issue #50)', () => {
+  const send = (text: string) =>
+    `orca terminal send --terminal ${WORKER} --text "${text}" --enter --json`;
+
+  it('rewrites the fallback send’s bare number to the option text after a failed reply', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    // The reply to GATE fails (ask timed out) — the fallback send follows.
+    await relay.observe(THREAD, replyCommand('2'), '');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
+    });
+  });
+
+  it('rewrites against the worker’s single pending gate when no reply preceded', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    expect(relay.prepare(THREAD, send('3.'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text 'merge both into flat config' --enter --json`,
+    });
+  });
+
+  it('denies an out-of-range option number instead of typing the digit', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const verdict = relay.prepare(THREAD, send('7'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('no option 7');
+  });
+
+  it('passes free text verbatim — only a bare option number rewrites', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const free = send('use the flat config');
+    expect(relay.prepare(THREAD, free)).toEqual({ action: 'proceed', command: free });
+  });
+
+  it('passes a bare number verbatim when the gate carried no options', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store, { options: [] });
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('never rewrites with two pending gates on the worker — attribution is ambiguous', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_two' });
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('keeps a stalled worker’s keystrokes literal — a stall answer is typed as-is (issue #22)', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedStall(store);
+
+    const numeric = send('2');
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
+  it('the failed reply’s attribution outranks the stall — the fallback still rewrites', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedStall(store);
+    await relay.observe(THREAD, replyCommand('2'), '');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
+    });
+  });
+
+  it('a correction send after an answered-gate denial carries the option text too', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    store.answerGate(GATE);
+    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+
+    expect(relay.prepare(THREAD, send('1'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text root --enter --json`,
+    });
+  });
+
+  it('takes the option text from the LIVE re-ask when the reply’s gate got superseded (issue #46)', async () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    // The reply against the original ask fails, then the worker re-asks with
+    // renumbered options — the digit must resolve against the live numbering.
+    await relay.observe(THREAD, replyCommand('2'), '');
+    seedGate(store, { msgId: 'msg_reask', options: ['markdown table', 'CSV file', 'HTML page'] });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    expect(relay.prepare(THREAD, send('2'))).toEqual({
+      action: 'proceed',
+      command: `orca terminal send --terminal ${WORKER} --text 'CSV file' --enter --json`,
+    });
+  });
+
+  it('leaves a chained send untouched — the rewrite only rebuilds a lone command', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+
+    const chained = `${send('2')} && ls`;
+    expect(relay.prepare(THREAD, chained)).toEqual({ action: 'proceed', command: chained });
+  });
+});
+
 describe('sanctionsSend — the registry-anchored terminal send', () => {
   const SEND = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
 
