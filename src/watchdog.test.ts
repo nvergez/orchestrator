@@ -277,6 +277,7 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
       msgId: 'msg_gate',
       threadTs: THREAD,
       taskId: 'task_bench',
+      dispatchId: 'ctx_w1',
       workerHandle: WORKER,
       worktreeName: 'scratch-21-bench',
       kind: 'decision_gate',

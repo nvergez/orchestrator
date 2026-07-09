@@ -83,11 +83,17 @@ export class GateRelay implements SessionRelay {
    * Prepends the thread's gate and stall-alert registries to a human message
    * (spec §6: the session routes "anchored on the registry"). Answered
    * entries ride along so the LLM can recognize — and refuse to re-route —
-   * a late correction. A thread that never relayed anything passes through
+   * a late correction, and closed entries so it can tell the human a moot
+   * question apart from an open one (issue #46). Superseded rows stay out:
+   * their question lives on in the re-ask successor, and listing both would
+   * recreate exactly the duplicate-gate disambiguation noise the supersede
+   * exists to kill. A thread that never relayed anything passes through
    * untouched.
    */
   decorateReply(threadTs: string, text: string): string {
-    const gates = this.store.listGatesForThread(threadTs);
+    const gates = this.store
+      .listGatesForThread(threadTs)
+      .filter((gate) => gate.status !== 'superseded');
     const stalls = this.store.listStallsForThread(threadTs);
     if (gates.length === 0 && stalls.length === 0) return text;
     return [
@@ -146,13 +152,13 @@ export class GateRelay implements SessionRelay {
         'run `orca orchestration reply` as its own command — nothing chained around it',
       );
     }
-    const tokens = replies[0] as string[];
+    let tokens = replies[0] as string[];
 
     const msgId = flagValue(tokens, '--id');
     if (msgId === undefined) {
       return deny('the reply must target a gate: --id <msg_id> from the relayed-gates context');
     }
-    const gate = this.store.getGate(msgId);
+    let gate = this.store.getGate(msgId);
     if (gate === undefined || gate.threadTs !== threadTs) {
       // Cross-thread routing is impossible by construction (issue #9): a
       // reply in this thread can only reach this thread's own gates.
@@ -161,10 +167,37 @@ export class GateRelay implements SessionRelay {
           "to this thread's own relayed gates (spec §6)",
       );
     }
+    let rewritten = false;
+    if (gate.status === 'superseded') {
+      // A stale re-asked gate forwards to the one ask the worker still
+      // listens on (issue #46): a reply down the stale id returns ok:true
+      // into a void — the known expired-ask trap. Same question, so the
+      // human's answer applies to the successor verbatim.
+      const successor = this.successorOf(gate);
+      if (successor === undefined) {
+        return deny(
+          'that question was re-asked and this gate superseded — reply to the live gate ' +
+            'from the relayed-gates context instead',
+        );
+      }
+      tokens = replaceFlagValue(tokens, '--id', successor.msgId);
+      rewritten = true;
+      this.logger.info(
+        { threadTs, staleMsgId: msgId, msgId: successor.msgId },
+        'reply to a superseded gate forwarded to its live re-ask',
+      );
+      gate = successor;
+    }
+    if (gate.status === 'closed') {
+      return deny(
+        'that question is moot — its delegation already closed with the gate unanswered ' +
+          '(issue #46), so nothing listens for a reply. Tell the user instead of routing it',
+      );
+    }
     if (gate.status === 'answered') {
       // Remember the denial: it sanctions the correction send that follows,
       // and tells observeSend that send answers nothing new.
-      this.lastReply.set(threadTs, { msgId, outcome: 'correction' });
+      this.lastReply.set(threadTs, { msgId: gate.msgId, outcome: 'correction' });
       const handle = gate.workerHandle ?? '<worker handle>';
       return deny(
         'that gate was already answered — an answered gate never re-routes (spec §6). ' +
@@ -194,20 +227,34 @@ export class GateRelay implements SessionRelay {
             `there is no option ${index}. Ask the human which they meant; do not guess`,
         );
       }
-      const rewritten = tokens
-        .map((token, i) => {
-          if (token.startsWith('--body=')) return `--body=${option}`;
-          return tokens[i - 1] === '--body' ? option : token;
-        })
-        .map(shellQuote)
-        .join(' ');
+      tokens = replaceFlagValue(tokens, '--body', option);
+      rewritten = true;
       this.logger.info(
-        { threadTs, msgId, choice: index, option },
+        { threadTs, msgId: gate.msgId, choice: index, option },
         'bare option number rewritten to the option text — fidelity',
       );
-      return { action: 'proceed', command: rewritten };
     }
-    return { action: 'proceed', command };
+    if (!rewritten) return { action: 'proceed', command };
+    return { action: 'proceed', command: tokens.map(shellQuote).join(' ') };
+  }
+
+  /**
+   * The end of a superseded gate's re-ask chain — whatever its terminal
+   * status, so the caller's pending/answered/closed handling applies to the
+   * gate that actually owns the question now. Undefined on a dangling
+   * pointer or a cycle (a hand-edited registry) — refuse rather than guess.
+   */
+  private successorOf(gate: PendingGateRow): PendingGateRow | undefined {
+    const seen = new Set<string>([gate.msgId]);
+    let current = gate;
+    while (current.status === 'superseded') {
+      if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
+      seen.add(current.supersededBy);
+      const next = this.store.getGate(current.supersededBy);
+      if (next === undefined || next.threadTs !== gate.threadTs) return undefined;
+      current = next;
+    }
+    return current;
   }
 
   // ── observe: the PostToolUse seam ────────────────────────────────────────
@@ -323,9 +370,19 @@ export class GateRelay implements SessionRelay {
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });
 
-/** One registry row, flattened for the LLM's turn context. */
+/** Swaps one flag's value in a token list — `--flag value` or `--flag=value`. */
+function replaceFlagValue(tokens: string[], flag: string, value: string): string[] {
+  return tokens.map((token, i) => {
+    if (token.startsWith(`${flag}=`)) return `${flag}=${value}`;
+    return tokens[i - 1] === flag ? value : token;
+  });
+}
+
+/** One registry row, flattened for the LLM's turn context. Superseded rows
+ * never reach here — decorateReply filters them before the map. */
 function contextLine(gate: PendingGateRow): string {
-  const status = gate.status === 'pending' ? 'PENDING' : 'ANSWERED';
+  const status =
+    gate.status === 'pending' ? 'PENDING' : gate.status === 'closed' ? 'CLOSED' : 'ANSWERED';
   const kind = gate.kind === 'escalation' ? '🚨 escalation' : '❓ question';
   const from = gate.worktreeName === null ? 'an unmatched worker' : `\`${gate.worktreeName}\``;
   const parts = [

@@ -425,6 +425,13 @@ export class GateWatcher {
    * at relay time, the ❓/🚨 root reaction set. The registry row is the
    * never-lost guarantee — recorded even when the Slack post fails, so the
    * question stays routable and recoverable.
+   *
+   * A re-ask supersedes instead of stacking (issue #46): a worker whose
+   * `ask` timed out asks the SAME question again under a fresh msg_id, and
+   * only the newest ask still listens for a reply. So when the question
+   * matches a live gate from the same terminal, the old row flips to
+   * `superseded` (forwarding to the successor) and the existing ❓ relay is
+   * edited in place — never a second notification for one logical question.
    */
   private async handleGateOrEscalation(
     threadTs: string,
@@ -445,41 +452,79 @@ export class GateWatcher {
     // escalations and any bus producer that skipped the payload.
     const question = firstNonEmpty(message.payload.question, message.body, message.subject);
     const options = message.payload.options ?? [];
+    const taskId = message.payload.taskId ?? row?.taskId ?? null;
+    const workerHandle = message.fromHandle ?? row?.workerHandle ?? null;
+    // The asking terminal is the re-ask's identity; task ids only VETO a
+    // match when both sides name one and disagree — an id-less side (a stray
+    // ask, a pre-#46 row) must not shield a duplicate from the dedup. The
+    // self-exclusion is belt-and-braces: the replay guard above already
+    // filtered this msg_id, and a row must never forward to itself.
+    const reasked = this.store.listPendingGates(gateThread).find(
+      (gate) =>
+        gate.msgId !== message.id &&
+        gate.kind === kind &&
+        gate.workerHandle !== null &&
+        gate.workerHandle === workerHandle &&
+        (gate.taskId === null || taskId === null || gate.taskId === taskId) &&
+        isSameQuestion(gate.question, question),
+    );
 
+    const text = gateRelayMessage({
+      kind,
+      worktreeName: row?.worktreeName ?? null,
+      repo: row?.repo ?? null,
+      issueNumber: row?.issueNumber ?? null,
+      issueUrl:
+        row === undefined
+          ? undefined
+          : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
+      question,
+      options,
+    });
     let relayTs: string | null = null;
-    try {
-      relayTs = await this.surface.post(
-        gateThread,
-        gateRelayMessage({
-          kind,
-          worktreeName: row?.worktreeName ?? null,
-          repo: row?.repo ?? null,
-          issueNumber: row?.issueNumber ?? null,
-          issueUrl:
-            row === undefined
-              ? undefined
-              : await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
-          question,
-          options,
-        }),
-      );
-    } catch (error) {
-      this.logger.error(
-        { err: error, threadTs: gateThread, msgId: message.id, kind, question },
-        'gate relay post failed — the registry row below still holds the question',
-      );
+    if (reasked !== undefined && reasked.relayTs !== null) {
+      // The question already sits in the thread — refresh it to the newest
+      // verbatim wording and keep anchoring the registry on that message.
+      relayTs = reasked.relayTs;
+      try {
+        await this.surface.update(reasked.relayTs, text);
+      } catch (error) {
+        this.logger.warn(
+          { err: error, threadTs: gateThread, msgId: message.id, relayTs },
+          're-asked gate relay edit failed — the original relay still shows the question',
+        );
+      }
+    } else {
+      try {
+        relayTs = await this.surface.post(gateThread, text);
+      } catch (error) {
+        this.logger.error(
+          { err: error, threadTs: gateThread, msgId: message.id, kind, question },
+          'gate relay post failed — the registry row below still holds the question',
+        );
+      }
     }
     this.store.recordGate({
       msgId: message.id,
       threadTs: gateThread,
-      taskId: message.payload.taskId ?? row?.taskId ?? null,
-      workerHandle: message.fromHandle ?? row?.workerHandle ?? null,
+      taskId,
+      dispatchId: message.payload.dispatchId ?? row?.dispatchId ?? null,
+      workerHandle,
       worktreeName: row?.worktreeName ?? null,
       kind,
       question,
       options,
       relayTs,
     });
+    // Successor first, then the flip: a crash between the two leaves a
+    // harmless extra pending row, never a question with no live gate.
+    if (reasked !== undefined) {
+      this.store.supersedeGate(reasked.msgId, message.id);
+      this.logger.info(
+        { threadTs: gateThread, msgId: message.id, superseded: reasked.msgId, kind },
+        're-asked question superseded its stale gate — one live gate, no second relay',
+      );
+    }
     // A pending escalation or stall alert outranks a plain question on the
     // root (spec §8): a ❓ arriving while a 🚨 waits must not soften the
     // coarse state. The just-recorded gate is part of the settled set.
@@ -673,6 +718,17 @@ function readPayload(raw: unknown): OrchestrationMessage['payload'] {
 /** The first candidate with content — how the relay picks the question text. */
 function firstNonEmpty(...candidates: Array<string | undefined>): string {
   return candidates.find((text) => text !== undefined && text.trim() !== '') ?? '';
+}
+
+/**
+ * Whether a new ask repeats a live gate's question (issue #46). Workers
+ * re-ask essentially verbatim after an `ask` timeout, so the match stays
+ * deliberately narrow — case and whitespace only — lest two genuinely
+ * distinct questions from one worker ever collapse into each other.
+ */
+function isSameQuestion(a: string, b: string): boolean {
+  const normalize = (text: string): string => text.toLowerCase().replace(/\s+/g, ' ').trim();
+  return normalize(a) === normalize(b);
 }
 
 function sleep(ms: number): Promise<void> {

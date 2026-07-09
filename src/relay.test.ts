@@ -42,6 +42,7 @@ const seedGate = (
     msgId: GATE,
     threadTs: THREAD,
     taskId: 'task_13c7',
+    dispatchId: 'ctx_13c7',
     workerHandle: WORKER,
     worktreeName: 'scratch-21-bench',
     kind: 'decision_gate',
@@ -271,6 +272,120 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
     expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
       false,
     );
+  });
+});
+
+describe('gate registry hygiene — superseded and closed gates (issue #46)', () => {
+  const seedDispatch = (
+    store: DelegationStore,
+    over: Partial<Parameters<DelegationStore['recordDispatch']>[0]> = {},
+  ): void => {
+    store.recordDispatch({
+      taskId: 'task_13c7',
+      dispatchId: 'ctx_13c7',
+      worktreeId: null,
+      worktreeName: 'scratch-21-bench',
+      worktreePath: null,
+      repo: 'scratch',
+      issueNumber: 21,
+      agent: 'claude',
+      workerHandle: WORKER,
+      threadTs: THREAD,
+      channelId: 'C0TEST',
+      cardTs: null,
+      title: 'bench harness',
+      ...over,
+    });
+  };
+
+  it('decorateReply lists the live re-ask once — superseded rows stay out of the context', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    const decorated = relay.decorateReply(THREAD, 'root');
+    expect(decorated).toContain('[PENDING] ❓ question msg_reask');
+    expect(decorated).not.toContain(GATE);
+  });
+
+  it('decorateReply marks a closed gate CLOSED — the moot question stays recognizable', () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    expect(relay.decorateReply(THREAD, 'root')).toContain(`[CLOSED] ❓ question ${GATE}`);
+  });
+
+  it('forwards a reply aimed at a superseded gate to its live re-ask — with option fidelity', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+
+    expect(relay.prepare(THREAD, replyCommand('2'))).toEqual({
+      action: 'proceed',
+      command: 'orca orchestration reply --id msg_reask --body app/ --json',
+    });
+  });
+
+  it('follows a chain of re-asks to the newest live gate', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_r1' });
+    seedGate(store, { msgId: 'msg_r2' });
+    store.supersedeGate(GATE, 'msg_r1');
+    store.supersedeGate('msg_r1', 'msg_r2');
+
+    expect(relay.prepare(THREAD, replyCommand('use the flat config'))).toEqual({
+      action: 'proceed',
+      command: "orca orchestration reply --id msg_r2 --body 'use the flat config' --json",
+    });
+  });
+
+  it('a forwarded reply landing on an answered re-ask hits the answered denial', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    seedGate(store, { msgId: 'msg_reask' });
+    store.supersedeGate(GATE, 'msg_reask');
+    store.answerGate('msg_reask');
+
+    const verdict = relay.prepare(THREAD, replyCommand('actually 1'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('never re-routes');
+  });
+
+  it('denies a reply to a closed gate — the worker is gone, the question moot', () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('moot');
+  });
+
+  it('refuses a broken re-ask chain instead of guessing a target', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store);
+    store.supersedeGate(GATE, 'msg_ghost');
+
+    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    expect(verdict.action).toBe('deny');
+    expect((verdict as { message: string }).message).toContain('re-asked');
+  });
+
+  it('sanctionsSend lapses once the delegation close mooted the worker’s gates', () => {
+    const { relay, store } = makeRelay();
+    const send = `orca terminal send --terminal ${WORKER} --text "root" --enter --json`;
+    seedDispatch(store);
+    seedGate(store);
+    expect(relay.sanctionsSend(THREAD, send)).toBe(true);
+
+    store.closeDelegation('ctx_13c7', 'completed');
+    expect(relay.sanctionsSend(THREAD, send)).toBe(false);
   });
 });
 

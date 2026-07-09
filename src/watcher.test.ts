@@ -47,9 +47,15 @@ class FakeSurface implements WatcherSurface {
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
   failPosts = false;
+  /** Fail only the next N posts — a transient Slack outage. */
+  failNextPosts = 0;
   private counter = 0;
 
   post(threadTs: string, text: string): Promise<string> {
+    if (this.failNextPosts > 0) {
+      this.failNextPosts -= 1;
+      return Promise.reject(new Error('slack down'));
+    }
     if (this.failPosts) return Promise.reject(new Error('slack down'));
     this.posts.push({ threadTs, text });
     this.counter += 1;
@@ -536,6 +542,177 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
       worktreeName: null,
       taskId: null,
     });
+  });
+});
+
+describe('re-asked questions and closed delegations — gate hygiene (issue #46)', () => {
+  // The timeout re-ask shape from the live incident: the worker's `ask`
+  // expired, it asked the SAME question again — a fresh msg_id each time.
+  const ask = (id: string, over: Partial<Record<string, unknown>> = {}) =>
+    busMessage({
+      id,
+      type: 'decision_gate',
+      subject: 'Question',
+      body: 'Which format should the report file use?',
+      payload: JSON.stringify({
+        question: 'Which format should the report file use?',
+        options: ['markdown', 'json'],
+      }),
+      ...over,
+    });
+
+  it('a re-ask edits the ❓ relay in place — one message, one live gate', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_first')),
+        checkOut(
+          ask('msg_second', {
+            payload: JSON.stringify({
+              // Verbatim modulo case and whitespace — still the same question.
+              question: 'which format should  the report file use?',
+              options: ['markdown', 'json'],
+            }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getGate('msg_first')?.status).toBe('superseded');
+      expect(surface.reactions).toHaveLength(2);
+    });
+
+    // No second ❓ notification: the one relay got edited, with the newest
+    // ask's verbatim wording.
+    expect(surface.posts).toHaveLength(1);
+    expect(surface.updates).toHaveLength(1);
+    expect(surface.updates[0]?.ts).toBe('msg-ts-1');
+    expect(surface.updates[0]?.text).toContain('> which format should  the report file use?');
+
+    expect(store.getGate('msg_first')).toMatchObject({
+      status: 'superseded',
+      supersededBy: 'msg_second',
+    });
+    expect(store.getGate('msg_second')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_second']);
+    // The coarse state never wavers — still one question waiting.
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
+  });
+
+  it('a distinct question from the same worker still relays separately — no over-dedup', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_q1')),
+        checkOut(
+          ask('msg_q2', {
+            payload: JSON.stringify({ question: 'Should the report include raw timings?' }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(2);
+    });
+
+    expect(surface.updates).toEqual([]);
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual([
+      'msg_q1',
+      'msg_q2',
+    ]);
+  });
+
+  it('an escalation wording a pending question identically never dedups across kinds', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(ask('msg_q')),
+        checkOut(
+          busMessage({
+            id: 'msg_esc',
+            type: 'escalation',
+            subject: 'Blocked',
+            body: 'Which format should the report file use?',
+            payload: JSON.stringify({}),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(surface.posts).toHaveLength(2);
+    });
+
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId).sort()).toEqual([
+      'msg_esc',
+      'msg_q',
+    ]);
+  });
+
+  it('a re-ask whose original relay never posted posts fresh — the human finally sees it', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(ask('msg_first')), checkOut(ask('msg_second'))],
+    });
+    surface.failNextPosts = 1;
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getGate('msg_first')?.status).toBe('superseded');
+    });
+
+    expect(surface.updates).toEqual([]);
+    expect(surface.posts).toHaveLength(1);
+    expect(store.getGate('msg_second')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
+  });
+
+  it('worker_done leaves zero pending gates for that delegation', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(ask('msg_q')), checkOut(busMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    expect(store.getGate('msg_q')?.status).toBe('closed');
+    expect(store.listPendingGates(THREAD)).toEqual([]);
+    // The moot question no longer holds ❓ — the thread ends delivered.
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'white_check_mark' });
+  });
+
+  it('a sibling’s pending gate survives another delegation’s worker_done', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          ask('msg_q', {
+            from_handle: 'term_w2',
+            payload: JSON.stringify({ question: 'Deploy to staging first?' }),
+          }),
+        ),
+        checkOut(busMessage()),
+      ],
+    });
+    seedDispatch(store);
+    seedDispatch(store, {
+      dispatchId: 'ctx_d2',
+      taskId: 'task_9999',
+      workerHandle: 'term_w2',
+      cardTs: 'card-ts-2',
+    });
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    });
+
+    expect(store.getGate('msg_q')?.status).toBe('pending');
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
   });
 });
 

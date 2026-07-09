@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { DelegationStore } from './delegations.ts';
 
@@ -195,20 +199,21 @@ describe('DelegationStore — mailboxes', () => {
   });
 });
 
-describe('DelegationStore — pending_gates registry (issue #21)', () => {
-  const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
-    msgId: 'msg_6a8c14d55c7d',
-    threadTs: THREAD,
-    taskId: 'task_13c700f151b3',
-    workerHandle: 'term_300035ab',
-    worktreeName: 'scratch-21-bench',
-    kind: 'decision_gate' as const,
-    question: 'Which lint config is authoritative for CI?',
-    options: ['root', 'app/', 'merge both'],
-    relayTs: '1751970002.000300',
-    ...overrides,
-  });
+const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
+  msgId: 'msg_6a8c14d55c7d',
+  threadTs: THREAD,
+  taskId: 'task_13c700f151b3',
+  dispatchId: 'ctx_8b685db09a47',
+  workerHandle: 'term_300035ab',
+  worktreeName: 'scratch-21-bench',
+  kind: 'decision_gate' as const,
+  question: 'Which lint config is authoritative for CI?',
+  options: ['root', 'app/', 'merge both'],
+  relayTs: '1751970002.000300',
+  ...overrides,
+});
 
+describe('DelegationStore — pending_gates registry (issue #21)', () => {
   it('records a relayed gate and reads it back pending, options intact', () => {
     const store = openStore();
 
@@ -217,6 +222,7 @@ describe('DelegationStore — pending_gates registry (issue #21)', () => {
     expect(store.getGate('msg_6a8c14d55c7d')).toEqual({
       ...gateRow(),
       status: 'pending',
+      supersededBy: null,
       relayedAt: '2026-07-08T12:00:00.000Z',
       answeredAt: null,
     });
@@ -406,5 +412,158 @@ describe('DelegationStore — any-status task lookup (issue #25)', () => {
     expect(store.latestByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_8b685db09a47');
     expect(store.latestByTaskId('1751970099.000900', 'task_13c700f151b3')).toBeUndefined();
     expect(store.latestByTaskId(THREAD, 'task_none')).toBeUndefined();
+  });
+});
+
+describe('DelegationStore — gate registry hygiene (issue #46)', () => {
+  it('supersedes a pending gate exactly once, remembering its successor', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+
+    expect(store.supersedeGate('msg_6a8c14d55c7d', 'msg_reask')).toBe(true);
+    expect(store.supersedeGate('msg_6a8c14d55c7d', 'msg_other')).toBe(false);
+
+    expect(store.getGate('msg_6a8c14d55c7d')).toMatchObject({
+      status: 'superseded',
+      supersededBy: 'msg_reask',
+    });
+  });
+
+  it('never supersedes an answered gate — its reply already went down', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.answerGate('msg_6a8c14d55c7d');
+
+    expect(store.supersedeGate('msg_6a8c14d55c7d', 'msg_reask')).toBe(false);
+    expect(store.getGate('msg_6a8c14d55c7d')).toMatchObject({
+      status: 'answered',
+      supersededBy: null,
+    });
+  });
+
+  it('the pending view is the LIVE set — superseded and closed gates drop out', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordGate(gateRow({ msgId: 'msg_stale' }));
+    store.recordGate(gateRow({ msgId: 'msg_live' }));
+    store.supersedeGate('msg_stale', 'msg_live');
+    store.recordGate(
+      gateRow({ msgId: 'msg_moot', dispatchId: 'ctx_done', taskId: 'task_done', workerHandle: 'term_done' }),
+    );
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_done', taskId: 'task_done', workerHandle: 'term_done' }),
+    );
+    store.closeDelegation('ctx_done', 'completed');
+
+    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_live']);
+    // The full ledger view still shows every row — history is never erased.
+    expect(store.listGatesForThread(THREAD).map((gate) => gate.msgId)).toEqual([
+      'msg_stale',
+      'msg_live',
+      'msg_moot',
+    ]);
+  });
+
+  it('closing a delegation closes its still-pending gates — by dispatch id or identity fallback', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    // Three attribution shapes, all this delegation's: the full id, a
+    // taskId-only row, a handle-only row (the migrated pre-#46 shape).
+    store.recordGate(gateRow({ msgId: 'msg_by_dispatch' }));
+    store.recordGate(gateRow({ msgId: 'msg_by_task', dispatchId: null, workerHandle: null }));
+    store.recordGate(gateRow({ msgId: 'msg_by_handle', dispatchId: null, taskId: null }));
+    // A sibling's gate and an already-answered gate must both survive.
+    store.recordGate(
+      gateRow({ msgId: 'msg_sibling', dispatchId: 'ctx_s', taskId: 'task_s', workerHandle: 'term_s' }),
+    );
+    store.recordGate(gateRow({ msgId: 'msg_answered' }));
+    store.answerGate('msg_answered');
+
+    expect(store.closeDelegation('ctx_8b685db09a47', 'completed')).toBe(true);
+
+    expect(store.getGate('msg_by_dispatch')?.status).toBe('closed');
+    expect(store.getGate('msg_by_task')?.status).toBe('closed');
+    expect(store.getGate('msg_by_handle')?.status).toBe('closed');
+    expect(store.getGate('msg_sibling')?.status).toBe('pending');
+    expect(store.getGate('msg_answered')?.status).toBe('answered');
+  });
+
+  it('a duplicate close touches no gates — a retry’s fresh ask stays live', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'failed');
+    store.recordGate(gateRow({ msgId: 'msg_retry_ask', dispatchId: 'ctx_retry' }));
+
+    expect(store.closeDelegation('ctx_8b685db09a47', 'completed')).toBe(false);
+    expect(store.getGate('msg_retry_ask')?.status).toBe('pending');
+  });
+
+  it('never closes another thread’s gates, whatever their identity', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordGate(gateRow({ msgId: 'msg_elsewhere', threadTs: '1751970099.000900' }));
+
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.getGate('msg_elsewhere')?.status).toBe('pending');
+  });
+
+  it('migrates a pre-#46 pending_gates table in place — rows survive, new statuses work', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-gates-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE pending_gates (
+          msg_id        TEXT PRIMARY KEY,
+          thread_ts     TEXT NOT NULL,
+          task_id       TEXT,
+          worker_handle TEXT,
+          worktree_name TEXT,
+          kind          TEXT NOT NULL
+                        CHECK (kind IN ('decision_gate', 'escalation')),
+          question      TEXT NOT NULL,
+          options       TEXT NOT NULL,
+          relay_ts      TEXT,
+          status        TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'answered')),
+          relayed_at    TEXT NOT NULL,
+          answered_at   TEXT
+        ) STRICT;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO pending_gates
+             (msg_id, thread_ts, task_id, worker_handle, worktree_name,
+              kind, question, options, relay_ts, status, relayed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        )
+        .run(
+          'msg_d658da142a94',
+          THREAD,
+          'task_old',
+          'term_old',
+          'scratch-2-report',
+          'decision_gate',
+          'which format should the report file use?',
+          '[]',
+          '1751970002.000300',
+          '2026-07-09T12:31:04.000Z',
+        );
+      legacy.close();
+
+      const store = new DelegationStore(dbPath);
+      expect(store.getGate('msg_d658da142a94')).toMatchObject({
+        question: 'which format should the report file use?',
+        status: 'pending',
+        dispatchId: null,
+        supersededBy: null,
+      });
+      expect(store.supersedeGate('msg_d658da142a94', 'msg_reask')).toBe(true);
+      expect(store.recordGate(gateRow())).toBe(true);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
