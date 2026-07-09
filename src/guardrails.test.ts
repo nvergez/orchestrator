@@ -59,6 +59,40 @@ describe('classifyCommand — orca tiers', () => {
   });
 
   it.each([
+    'orca worktree list --repo id:r1 --json',
+    'orca worktree show --worktree id:wt1 --json',
+    'orca worktree current --json',
+    'orca terminal read --terminal h1 --cursor 0 --limit 200 --json',
+    'orca terminal show --terminal h1 --json',
+    'orca orchestration task-show --task t1 --json',
+    'orca orchestration dispatch-show --task t1 --json',
+    'orca orchestration inbox --json',
+  ])('AUTO diagnostic read (issue #45): %s', (command) => {
+    expect(tierOf(command)).toBe('auto');
+  });
+
+  it.each([
+    'orca --help',
+    'orca worktree --help',
+    'orca terminal read --help',
+    'orca orchestration --help',
+    'orca automations --help',
+    'orca worktree rm --help',
+    'orca help',
+    'orca help worktree',
+  ])('AUTO: help prints usage and mutates nothing (issue #45) — %s', (command) => {
+    expect(tierOf(command)).toBe('auto');
+  });
+
+  it('AUTO: a status question that only reads crosses zero gates (issue #45)', () => {
+    expect(
+      tierOf(
+        'orca orchestration task-list --json && orca terminal read --terminal h1 --json && orca worktree ps --json',
+      ),
+    ).toBe('auto');
+  });
+
+  it.each([
     'orca worktree create --repo id:r1 --name forwardly-84-csv --agent claude --issue 84 --no-parent --json',
     'orca orchestration task-create --spec "the brief" --task-title "short" --display-name "forwardly#84" --json',
     'orca orchestration dispatch --task t1 --to h1 --inject --json',
@@ -88,6 +122,18 @@ describe('classifyCommand — orca tiers', () => {
   it('CONFIRM: unknown orca subcommands fail toward the gate, not silence', () => {
     expect(tierOf('orca worktree archive x')).toBe('confirm');
     expect(tierOf('orca browser open https://example.com')).toBe('confirm');
+  });
+
+  it.each([
+    'orca worktree rm --worktree id:wt1 --json',
+    'orca worktree set --worktree active --comment "waiting on review"',
+    'orca terminal stop --worktree active --json',
+    'orca terminal create --worktree active --command "codex"',
+    'orca orchestration task-update --task t1 --status done',
+    'orca orchestration gate-list --json',
+    'orca orchestration reset',
+  ])('CONFIRM retained (issue #45): mutations and gate-* stay gated — %s', (command) => {
+    expect(tierOf(command)).toBe('confirm');
   });
 
   it.each([

@@ -351,9 +351,13 @@ function commandWords(args: string[], count: number): (string | undefined)[] {
 
 const ORCA_AUTO: Record<string, Set<string>> = {
   // Reads plus the full delegation sequence (issue #8: no double ceremony —
-  // the routing gate of #10 already covers inferred delegations).
-  worktree: new Set(['ps', 'create']),
-  terminal: new Set(['list', 'wait']),
+  // the routing gate of #10 already covers inferred delegations). The read
+  // verbs were widened in issue #45 after auditing the live CLI: every
+  // listed action only prints state. `task-show` does not exist in today's
+  // CLI (the real spelling is `dispatch-show`) but sessions type it when
+  // guessing — letting it run costs a fast usage error instead of a 🚦.
+  worktree: new Set(['ps', 'list', 'show', 'current', 'create']),
+  terminal: new Set(['list', 'show', 'read', 'wait']),
   // `reply` is AUTO for relays carrying a human reply (spec §7). The
   // "carrying a human reply" half is not checkable from the command string —
   // the relay coordinator (issue #21) enforces it on the pending_gates
@@ -361,7 +365,10 @@ const ORCA_AUTO: Record<string, Set<string>> = {
   // denied there before it runs.
   orchestration: new Set([
     'check',
+    'inbox',
     'task-list',
+    'task-show',
+    'dispatch-show',
     'task-create',
     'dispatch',
     'reply',
@@ -369,7 +376,14 @@ const ORCA_AUTO: Record<string, Set<string>> = {
 };
 
 function classifyOrca(args: string[]): Verdict {
+  // Help output mutates nothing (issue #45) — even on gated or forbidden
+  // topics, because the CLI short-circuits on `--help` before touching
+  // required flags (verified live: `orca worktree rm --help` prints usage
+  // and exits 0). Checked before every other rule so a help lookup can
+  // never burn a gate.
+  if (args.includes('--help')) return auto('`--help` prints usage');
   const [topic, action] = commandWords(args, 2);
+  if (topic === 'help') return auto('`orca help` prints usage');
   if (topic === 'automation' || topic === 'automations') {
     return forbidden('Orca automation management from Slack is out of scope (spec §7)');
   }
