@@ -94,7 +94,7 @@ Decision [#9](https://github.com/nvergez/orchestrator/issues/9). Architecture: *
 
 - After a dispatch the session **ends its turn** and may doze; the **daemon** holds one child `orca orchestration check --wait --terminal <mailbox> --types worker_done,escalation,decision_gate` per thread with in-flight work (rolling windows). The mailbox is a lightweight terminal `slack-<thread_ts>`, lazily created at first dispatch, remembered in SQLite, passed as `--from` at dispatch.
 - An event **wakes the session exactly like a human message**. Wakes are uniform: human message, orchestration event, watchdog alert — three inputs, one pipe. At boot the daemon re-arms all watchers from SQLite.
-- **Relay up** (new message, never an edit): worktree name + issue link, the worker's question **verbatim** (blockquote, never paraphrased), numbered options if any, "reply in this thread". `escalation` = same, marked 🚨. Watchdog = same mold + last terminal output.
+- **Relay up** (new message, never an edit): worktree name + issue link, the worker's question **verbatim** (blockquote, never paraphrased), numbered options if any, "reply in this thread". `escalation` = same, marked 🚨. Watchdog = same mold + last terminal output. One exception ([#46](https://github.com/nvergez/orchestrator/issues/46)): a worker re-asking the same question after an `ask` timeout **edits** the existing relay in place — one notification per logical question; the stale gate flips to `superseded`, forwarding to the re-ask.
 - **Route back down** — the LLM routes the human reply, anchored on the SQLite `pending_gates` registry:
   - `decision_gate` / `escalation` → `orca orchestration reply --id <msg_id> --body "<answer>"` (nominal path);
   - worker stalled at a TUI prompt (no `ask`) → `orca terminal send --terminal <handle> --text "…" --enter`;
@@ -136,7 +136,7 @@ One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTR
 
 - **`sessions`** — key `thread_ts` (+ `channel_id`): `session_id`, `root_user`, `status ∈ {open, closed}`, `created_at`, `last_activity_at`, `turn_count`, `cost_usd_total`. (#5)
 - **`delegations`** — `task_id`, `dispatch_id`, `worktree_id`, `issue#`, `repo`, `thread_ts`, `status`; written at dispatch, closed on `worker_done`; drives boot reconciliation. (#8)
-- **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered}`; written by the daemon at relay time; anchors answer routing. (#9)
+- **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `dispatch_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered, superseded, closed}` + `superseded_by`; written by the daemon at relay time; anchors answer routing — which only ever considers `pending` rows: a re-ask supersedes its stale gate, and a closing delegation closes its unanswered ones. (#9, #46)
 - Mailbox terminal handles per thread are also remembered here (#9).
 - Pure runtime state (process handles, throttle buffers, warm flags) is **not** persisted — lost harmlessly on restart.
 

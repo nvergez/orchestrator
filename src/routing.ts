@@ -297,6 +297,7 @@ When a worker asks a question or escalates, the daemon posts the gate message in
 - After the reply command succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<what went down>')} — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
 - If the reply command fails (the worker's ask likely hit its timeout), say so in one short line, then forward the SAME text with \`orca terminal send --terminal <the gate's worker terminal> --text "<the answer>" --enter --json\` — it runs without a gate because the registry vouches for it.
 - An ANSWERED gate never re-routes. If the human revises a decision that already went down, say it was already passed on and relay the correction best-effort via the same \`orca terminal send\` — no cancellation guarantee.
+- A CLOSED gate never routes either: its worker's delegation ended before anyone answered, so the question is moot — say so in one line instead of replying.
 - Never use \`orca orchestration gate-resolve\` — DAG gates are not part of this relay.
 
 ## Watchdog stall alerts — nudging a stalled worker (spec §5/§6)

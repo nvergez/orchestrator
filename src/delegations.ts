@@ -32,6 +32,9 @@ export interface PendingGateRow {
   msgId: string;
   threadTs: string;
   taskId: string | null;
+  /** The owning delegation (`ctx_…`), when the relay could resolve one —
+   * what invalidate-on-close matches first (issue #46). */
+  dispatchId: string | null;
   /** The asking terminal — where a `terminal send` fallback/correction lands. */
   workerHandle: string | null;
   worktreeName: string | null;
@@ -42,7 +45,12 @@ export interface PendingGateRow {
   options: string[];
   /** Slack ts of the relayed gate message; null when the post failed. */
   relayTs: string | null;
-  status: 'pending' | 'answered';
+  /** `superseded` = replaced by a re-ask; `closed` = the delegation ended
+   * with the question unanswered (issue #46). Routing only sees `pending`. */
+  status: 'pending' | 'answered' | 'superseded' | 'closed';
+  /** The re-ask (`msg_…`) that replaced this gate — where a reply aimed at
+   * the stale id forwards to; null unless status is `superseded`. */
+  supersededBy: string | null;
   relayedAt: string;
   answeredAt: string | null;
 }
@@ -67,6 +75,29 @@ export interface StallAlertRow {
   alertedAt: string;
   answeredAt: string | null;
 }
+
+/**
+ * The pending_gates columns — one definition shared by the fresh CREATE and
+ * the issue #46 migration rebuild, so the two shapes can never drift.
+ */
+const PENDING_GATES_COLUMNS = `(
+        msg_id        TEXT PRIMARY KEY,
+        thread_ts     TEXT NOT NULL,
+        task_id       TEXT,
+        dispatch_id   TEXT,
+        worker_handle TEXT,
+        worktree_name TEXT,
+        kind          TEXT NOT NULL
+                      CHECK (kind IN ('decision_gate', 'escalation')),
+        question      TEXT NOT NULL,
+        options       TEXT NOT NULL,
+        relay_ts      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'answered', 'superseded', 'closed')),
+        superseded_by TEXT,
+        relayed_at    TEXT NOT NULL,
+        answered_at   TEXT
+      ) STRICT`;
 
 /**
  * The `delegations` + `mailboxes` + `pending_gates` + `stall_alerts` share of
@@ -128,22 +159,7 @@ export class DelegationStore {
         fingerprint TEXT NOT NULL,
         posted_at   TEXT NOT NULL
       ) STRICT;
-      CREATE TABLE IF NOT EXISTS pending_gates (
-        msg_id        TEXT PRIMARY KEY,
-        thread_ts     TEXT NOT NULL,
-        task_id       TEXT,
-        worker_handle TEXT,
-        worktree_name TEXT,
-        kind          TEXT NOT NULL
-                      CHECK (kind IN ('decision_gate', 'escalation')),
-        question      TEXT NOT NULL,
-        options       TEXT NOT NULL,
-        relay_ts      TEXT,
-        status        TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (status IN ('pending', 'answered')),
-        relayed_at    TEXT NOT NULL,
-        answered_at   TEXT
-      ) STRICT;
+      CREATE TABLE IF NOT EXISTS pending_gates ${PENDING_GATES_COLUMNS};
       CREATE TABLE IF NOT EXISTS stall_alerts (
         dispatch_id   TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
@@ -157,6 +173,34 @@ export class DelegationStore {
         alerted_at    TEXT NOT NULL,
         answered_at   TEXT
       ) STRICT;
+    `);
+    this.migratePendingGates();
+  }
+
+  /**
+   * Rebuilds a pre-#46 pending_gates table into the current shape (new
+   * `dispatch_id`/`superseded_by` columns, two extra statuses). SQLite bakes
+   * CHECK constraints into the table, so widening the status set needs the
+   * copy-and-rename dance; existing rows ride across with the new columns
+   * null. A table already carrying `superseded` is current — no-op.
+   */
+  private migratePendingGates(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pending_gates'`)
+      .get() as { sql?: unknown } | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes('superseded')) return;
+    this.db.exec(`
+      BEGIN;
+      CREATE TABLE pending_gates_next ${PENDING_GATES_COLUMNS};
+      INSERT INTO pending_gates_next
+        (msg_id, thread_ts, task_id, worker_handle, worktree_name,
+         kind, question, options, relay_ts, status, relayed_at, answered_at)
+        SELECT msg_id, thread_ts, task_id, worker_handle, worktree_name,
+               kind, question, options, relay_ts, status, relayed_at, answered_at
+        FROM pending_gates;
+      DROP TABLE pending_gates;
+      ALTER TABLE pending_gates_next RENAME TO pending_gates;
+      COMMIT;
     `);
   }
 
@@ -212,7 +256,31 @@ export class DelegationStore {
     // all. Settle it so the worker never lingers as a silent AUTO send
     // target and the alert drops out of the pending coarse state.
     this.answerStall(dispatchId);
+    // Its unanswered gates are moot the same way (issue #46): the worker no
+    // longer waits on any reply, so nothing may stay `pending` — a stale
+    // live gate would pollute routing disambiguation forever.
+    this.closeGatesForDelegation(dispatchId);
     return true;
+  }
+
+  /**
+   * Invalidate-on-close (issue #46): every still-pending gate the closing
+   * delegation owns flips to `closed`. Ownership is the recorded dispatch
+   * id; rows without one (pre-#46, or relays that could not resolve the
+   * dispatch) fall back to the task id / asking-terminal identity, scoped —
+   * like every gate query — to the delegation's own thread.
+   */
+  private closeGatesForDelegation(dispatchId: string): void {
+    const row = this.getByDispatchId(dispatchId);
+    if (row === undefined) return;
+    this.db
+      .prepare(
+        `UPDATE pending_gates SET status = 'closed'
+         WHERE thread_ts = ? AND status = 'pending'
+           AND (dispatch_id = ?
+                OR (dispatch_id IS NULL AND (task_id = ? OR worker_handle = ?)))`,
+      )
+      .run(row.threadTs, dispatchId, row.taskId, row.workerHandle);
   }
 
   getByDispatchId(dispatchId: string): DelegationRow | undefined {
@@ -376,19 +444,20 @@ export class DelegationStore {
    * call inserted the row.
    */
   recordGate(
-    row: Omit<PendingGateRow, 'status' | 'relayedAt' | 'answeredAt'>,
+    row: Omit<PendingGateRow, 'status' | 'supersededBy' | 'relayedAt' | 'answeredAt'>,
   ): boolean {
     const { changes } = this.db
       .prepare(
         `INSERT OR IGNORE INTO pending_gates
-           (msg_id, thread_ts, task_id, worker_handle, worktree_name,
+           (msg_id, thread_ts, task_id, dispatch_id, worker_handle, worktree_name,
             kind, question, options, relay_ts, status, relayed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         row.msgId,
         row.threadTs,
         row.taskId,
+        row.dispatchId,
         row.workerHandle,
         row.worktreeName,
         row.kind,
@@ -397,6 +466,22 @@ export class DelegationStore {
         row.relayTs,
         this.now(),
       );
+    return Number(changes) > 0;
+  }
+
+  /**
+   * Flips a re-asked question's stale gate out of the live set (issue #46):
+   * pending → superseded, remembering the successor so a reply aimed at the
+   * stale msg_id can forward to the one ask the worker still listens on.
+   * Only a pending gate flips — an answered gate's reply already went down.
+   */
+  supersedeGate(msgId: string, successorMsgId: string): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE pending_gates SET status = 'superseded', superseded_by = ?
+         WHERE msg_id = ? AND status = 'pending'`,
+      )
+      .run(successorMsgId, msgId);
     return Number(changes) > 0;
   }
 
@@ -522,6 +607,7 @@ function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {
     msgId: row.msg_id as string,
     threadTs: row.thread_ts as string,
     taskId: row.task_id as string | null,
+    dispatchId: row.dispatch_id as string | null,
     workerHandle: row.worker_handle as string | null,
     worktreeName: row.worktree_name as string | null,
     kind: row.kind as PendingGateRow['kind'],
@@ -529,6 +615,7 @@ function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {
     options: readOptions(row.options),
     relayTs: row.relay_ts as string | null,
     status: row.status as PendingGateRow['status'],
+    supersededBy: row.superseded_by as string | null,
     relayedAt: row.relayed_at as string,
     answeredAt: row.answered_at as string | null,
   };
