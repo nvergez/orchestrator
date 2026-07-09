@@ -97,6 +97,23 @@ describe('GateKeeper.tryResolve', () => {
     });
   });
 
+  it('"go — <comment>" approves with the comment preserved in the verdict reply (issue #47)', async () => {
+    const { gates } = makeHarness();
+    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    await tick();
+    const reply = 'go — and from here on, consider plain reads fine without asking in this thread.';
+    expect(gates.tryResolve(THREAD, USER, reply)).toBe(true);
+    await expect(pending).resolves.toEqual({ approved: true, reply });
+  });
+
+  it('"no — <reason>" denies with the reason preserved verbatim (issue #47)', async () => {
+    const { gates } = makeHarness();
+    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    await tick();
+    expect(gates.tryResolve(THREAD, USER, 'no — rebase on main first')).toBe(true);
+    await expect(pending).resolves.toEqual({ approved: false, reply: 'no — rebase on main first' });
+  });
+
   it('only the authorized user can resolve a gate (spec §7 / issue AC)', async () => {
     const { gates } = makeHarness();
     const pending = gates.request(THREAD, '🚦 `git push` — go?');
@@ -159,8 +176,37 @@ describe('isApproval', () => {
     },
   );
 
+  // Approval-prefix (issue #47): approval token + punctuation separator +
+  // free text approves; the comment rides back in the verdict verbatim.
+  it.each([
+    'go — and from here on, consider plain reads fine without asking in this thread.',
+    'Go — comment',
+    'go – en-dash comment',
+    'go - spaced hyphen comment',
+    'go, do it',
+    'go! and tell me when it lands',
+    'go... but slowly',
+    'go\nalso post the summary here',
+    'go ahead, but keep an eye on CI',
+    'yes, but keep an eye on CI',
+    'ok. also update the ticket',
+    'okay; then close it',
+    'approved: ship it',
+  ])('approves the approval-prefixed %j', (text) => {
+    expect(isApproval(text)).toBe(true);
+  });
+
   it.each(['no', 'No', 'nope', 'stop', 'cancel', "don't", 'not yet', 'go later maybe', 'gopher', 'push to prod instead', 'sure, but rebase first', ''])(
     'anything else denies, fail-closed: %j',
+    (text) => {
+      expect(isApproval(text)).toBe(false);
+    },
+  );
+
+  // The prefix rule must not over-trigger: whitespace alone is not a
+  // separator, a glued hyphen reads as a compound word, "?" is a question.
+  it.each(['no — rebase on main first', 'ok-ish', 'go? really?', 'yeah nah', 'yes we should discuss this first'])(
+    'stays fail-closed despite looking prefix-like: %j',
     (text) => {
       expect(isApproval(text)).toBe(false);
     },
