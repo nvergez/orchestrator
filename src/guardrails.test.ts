@@ -84,6 +84,14 @@ describe('classifyCommand — orca tiers', () => {
     expect(tierOf(command)).toBe('auto');
   });
 
+  it.each([
+    ['orca terminal send --terminal h1 --text --help', 'value-position --help may be consumed by --text'],
+    ["orca terminal send --terminal h1 --text '--help' --enter", 'quoting is stripped before classification'],
+    ['orca orchestration reset -- --help', 'tokens after a literal -- are operands, not flags'],
+  ])('CONFIRM: a --help the CLI may not honor never lifts the tier — %s (%s)', (command) => {
+    expect(tierOf(command)).toBe('confirm');
+  });
+
   it('AUTO: a status question that only reads crosses zero gates (issue #45)', () => {
     expect(
       tierOf(

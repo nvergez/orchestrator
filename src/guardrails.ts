@@ -354,8 +354,10 @@ const ORCA_AUTO: Record<string, Set<string>> = {
   // the routing gate of #10 already covers inferred delegations). The read
   // verbs were widened in issue #45 after auditing the live CLI: every
   // listed action only prints state. `task-show` does not exist in today's
-  // CLI (the real spelling is `dispatch-show`) but sessions type it when
-  // guessing — letting it run costs a fast usage error instead of a 🚦.
+  // CLI (the real read is spelled `dispatch-show`) — it stays listed because
+  // it is the spelling the live session guessed during the #45 gate spiral
+  // and the issue's acceptance pins it AUTO; running it costs a fast usage
+  // error instead of a 🚦.
   worktree: new Set(['ps', 'list', 'show', 'current', 'create']),
   terminal: new Set(['list', 'show', 'read', 'wait']),
   // `reply` is AUTO for relays carrying a human reply (spec §7). The
@@ -375,13 +377,34 @@ const ORCA_AUTO: Record<string, Set<string>> = {
   ]),
 };
 
+/**
+ * A `--help` the CLI is guaranteed to honor as the help flag. Presence alone
+ * is not enough: quote-stripping makes `--text '--help'` identical to
+ * `--text --help`, where a CLI parser may consume the token as the flag's
+ * value and run the command anyway — so a `--help` sitting right after a
+ * value-taking-looking flag falls through to the normal rules, and nothing
+ * after a literal `--` counts (operands, not flags). Misreads land on the
+ * stricter tier, per the module contract.
+ */
+function carriesHelp(args: string[]): boolean {
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i] as string;
+    if (token === '--') return false;
+    if (token !== '--help') continue;
+    const prev = args[i - 1];
+    if (prev !== undefined && prev.startsWith('-') && !prev.includes('=')) continue;
+    return true;
+  }
+  return false;
+}
+
 function classifyOrca(args: string[]): Verdict {
-  // Help output mutates nothing (issue #45) — even on gated or forbidden
-  // topics, because the CLI short-circuits on `--help` before touching
-  // required flags (verified live: `orca worktree rm --help` prints usage
-  // and exits 0). Checked before every other rule so a help lookup can
-  // never burn a gate.
-  if (args.includes('--help')) return auto('`--help` prints usage');
+  // Help output mutates nothing (issue #45) — AUTO even on gated or
+  // forbidden topics, because the CLI short-circuits on `--help` before
+  // validating required flags (verified live: `orca worktree rm --help`
+  // prints usage and exits 0). Checked before every other rule so a help
+  // lookup can never burn a gate.
+  if (carriesHelp(args)) return auto('`--help` prints usage');
   const [topic, action] = commandWords(args, 2);
   if (topic === 'help') return auto('`orca help` prints usage');
   if (topic === 'automation' || topic === 'automations') {
