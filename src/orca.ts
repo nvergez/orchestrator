@@ -192,8 +192,14 @@ export async function safeRegistryIssueUrl(
 export interface WorktreeActivity {
   /** Last terminal output in the worktree, epoch ms; null when untracked. */
   lastOutputAt: number | null;
-  /** Every agent pane's state clock — a fresh one means someone is alive. */
-  agents: Array<{ state: string; stateStartedAt: number | null; updatedAt: number | null }>;
+  /** Every agent pane's state clock — a fresh one means someone is alive —
+   * plus its last assistant message, the in-flight alert's excerpt (#48). */
+  agents: Array<{
+    state: string;
+    stateStartedAt: number | null;
+    updatedAt: number | null;
+    lastAssistantMessage: string | null;
+  }>;
 }
 
 /** `orca worktree ps --json` → activity by worktree id. Throws when Orca is down. */
@@ -213,10 +219,11 @@ export async function listWorktreeActivity(
     if (typeof record.worktreeId !== 'string') continue;
     const agents = Array.isArray(record.agents)
       ? record.agents.flatMap((agent: unknown) => {
-          const { state, stateStartedAt, updatedAt } = agent as {
+          const { state, stateStartedAt, updatedAt, lastAssistantMessage } = agent as {
             state?: unknown;
             stateStartedAt?: unknown;
             updatedAt?: unknown;
+            lastAssistantMessage?: unknown;
           };
           if (typeof state !== 'string') return [];
           return [
@@ -224,6 +231,8 @@ export async function listWorktreeActivity(
               state,
               stateStartedAt: typeof stateStartedAt === 'number' ? stateStartedAt : null,
               updatedAt: typeof updatedAt === 'number' ? updatedAt : null,
+              lastAssistantMessage:
+                typeof lastAssistantMessage === 'string' ? lastAssistantMessage : null,
             },
           ];
         })

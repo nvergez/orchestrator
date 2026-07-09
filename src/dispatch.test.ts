@@ -513,6 +513,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
         title: 'CSV export of send metrics',
         status: 'dispatched',
         dispatchedAt: expect.any(String) as string,
+        lastBusAt: null,
         closedAt: null,
       },
     ]);

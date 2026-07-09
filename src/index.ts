@@ -207,11 +207,15 @@ try {
   // The stalled-worker watchdog (spec §5, issue #22): the second detection
   // layer — a periodic staleness sweep over the in-flight delegations'
   // worktrees; a silent worker gets its ⚠️ alert through the same relay
-  // mold as gates, and the reply routes down as terminal keystrokes.
+  // mold as gates, and the reply routes down as terminal keystrokes. The
+  // same sweep carries the max in-flight age signal (issue #48): a worker
+  // whose terminal looks alive but whose bus said nothing for the whole
+  // window alerts through the same mold.
   const watchdog = new Watchdog({
     store: delegationStore,
     surface,
     stallAfterMs: config.watchdogStallAfterMs,
+    maxInflightMs: config.watchdogMaxInflightMs,
     logger,
   });
   const stallSweep = (): void => {

@@ -41,6 +41,7 @@ describe('DelegationStore — delegations ledger', () => {
         ...dispatchRow(),
         status: 'dispatched',
         dispatchedAt: '2026-07-08T12:00:00.000Z',
+        lastBusAt: null,
         closedAt: null,
       },
     ]);
@@ -64,6 +65,85 @@ describe('DelegationStore — delegations ledger', () => {
     store.recordDispatch(dispatchRow({ dispatchId: 'ctx_2', taskId: 'task_2' }));
 
     expect(store.inFlightCount()).toBe(2);
+  });
+
+  it('recordBusActivity stamps the in-flight row’s bus clock (issue #48)', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+
+    expect(store.recordBusActivity('ctx_8b685db09a47')).toBe(true);
+
+    expect(store.getByDispatchId('ctx_8b685db09a47')?.lastBusAt).toBe('2026-07-08T12:00:01.000Z');
+  });
+
+  it('a bus straggler stamps neither a closed dispatch nor an unknown one', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.recordBusActivity('ctx_8b685db09a47')).toBe(false);
+    expect(store.recordBusActivity('ctx_never_seen')).toBe(false);
+
+    expect(store.getByDispatchId('ctx_8b685db09a47')?.lastBusAt).toBeNull();
+  });
+
+  it('a replayed dispatch resets the bus clock — a fresh hand-off starts silent', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordBusActivity('ctx_8b685db09a47');
+
+    store.recordDispatch(dispatchRow({ title: 'bench harness, retried' }));
+
+    expect(store.getByDispatchId('ctx_8b685db09a47')?.lastBusAt).toBeNull();
+  });
+
+  it('migrates a pre-#48 delegations table in place — rows survive, the bus clock works', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-delegations-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE delegations (
+          dispatch_id   TEXT PRIMARY KEY,
+          task_id       TEXT NOT NULL,
+          worktree_id   TEXT,
+          worktree_name TEXT,
+          worktree_path TEXT,
+          repo          TEXT,
+          issue_number  INTEGER,
+          agent         TEXT,
+          worker_handle TEXT,
+          thread_ts     TEXT NOT NULL,
+          channel_id    TEXT NOT NULL,
+          card_ts       TEXT,
+          title         TEXT,
+          status        TEXT NOT NULL DEFAULT 'dispatched'
+                        CHECK (status IN ('dispatched', 'completed', 'failed')),
+          dispatched_at TEXT NOT NULL,
+          closed_at     TEXT
+        ) STRICT;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO delegations
+             (dispatch_id, task_id, thread_ts, channel_id, status, dispatched_at)
+           VALUES (?, ?, ?, ?, 'dispatched', ?)`,
+        )
+        .run('ctx_pre48', 'task_pre48', THREAD, CHANNEL, '2026-07-08T11:00:00.000Z');
+      legacy.close();
+
+      const store = new DelegationStore(dbPath);
+      expect(store.getByDispatchId('ctx_pre48')).toMatchObject({
+        taskId: 'task_pre48',
+        status: 'dispatched',
+        lastBusAt: null,
+      });
+      expect(store.recordBusActivity('ctx_pre48')).toBe(true);
+      expect(store.getByDispatchId('ctx_pre48')?.lastBusAt).not.toBeNull();
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('close flips the status and stamps closed_at — the #20 seam', () => {

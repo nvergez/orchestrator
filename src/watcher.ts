@@ -87,7 +87,10 @@ const DEFAULT_RETRY_DELAY_MS = 30_000;
 /** Grace beyond the child's own --timeout-ms before execFile kills it. */
 const CHECK_GRACE_MS = 30_000;
 
-const WATCHED_TYPES = 'worker_done,escalation,decision_gate';
+/** The gate trio plus the liveness types (issue #48): a worker `heartbeat`
+ * (or a bus producer's `status` ping) carries no relay and wakes nobody —
+ * it stamps the delegation's bus clock, the watchdog's in-flight-age source. */
+const WATCHED_TYPES = 'worker_done,escalation,decision_gate,heartbeat,status';
 
 /** The root reactions the daemon manages (spec §8) — one on, the rest off. */
 const ROOT_REACTIONS = ['eyes', 'white_check_mark', 'x', 'question', 'rotating_light'] as const;
@@ -420,8 +423,41 @@ export class GateWatcher {
       await this.handleWorkerDone(threadTs, message);
     } else if (message.type === 'decision_gate' || message.type === 'escalation') {
       await this.handleGateOrEscalation(threadTs, message.type, message);
+    } else if (message.type === 'heartbeat' || message.type === 'status') {
+      await this.handleWorkerLiveness(threadTs, message);
     } else {
       this.logger.warn({ threadTs, type: message.type }, 'unwatched event type slipped through');
+    }
+  }
+
+  /**
+   * `heartbeat`/`status` (issue #48): the message IS the whole signal — no
+   * relay, no wake. It stamps the delegation's bus clock (what the watchdog
+   * measures in-flight age against) and settles any pending ⚠️ alert: a
+   * worker just heard from is a worker no longer needing attention, and the
+   * root's coarse state follows. A message matching no ledger row — or a
+   * straggler naming a closed dispatch — stamps nothing (the store only
+   * updates in-flight rows), so it can never mask a hung retry.
+   */
+  private async handleWorkerLiveness(
+    threadTs: string,
+    message: OrchestrationMessage,
+  ): Promise<void> {
+    const row = this.findRow(threadTs, message);
+    if (row === undefined) {
+      this.logger.debug(
+        { threadTs, msgId: message.id, payload: message.payload },
+        'liveness message matches no ledger row — ignored',
+      );
+      return;
+    }
+    this.store.recordBusActivity(row.dispatchId);
+    if (this.store.answerStall(row.dispatchId)) {
+      this.logger.info(
+        { threadTs: row.threadTs, dispatchId: row.dispatchId },
+        'pending watchdog alert settled — the worker spoke on the bus',
+      );
+      await settleRootReaction(this.store, this.surface, this.logger, row.threadTs);
     }
   }
 
@@ -506,6 +542,13 @@ export class GateWatcher {
       return;
     }
     const row = this.findRow(threadTs, message);
+    // The ask itself is bus liveness (issue #48): stamp the clock, and
+    // settle any pending ⚠️ — the gate relayed below owns the thread's
+    // attention from here (the settle at the end recomputes the root).
+    if (row !== undefined) {
+      this.store.recordBusActivity(row.dispatchId);
+      this.store.answerStall(row.dispatchId);
+    }
     // The row's thread owns the delegation — the human answers there.
     const gateThread = row?.threadTs ?? threadTs;
     // The payload's question is canonical for an `ask`; body/subject cover

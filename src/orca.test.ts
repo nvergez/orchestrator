@@ -156,7 +156,12 @@ describe('listWorktreeActivity (issue #22)', () => {
               worktreeId: 'r1::/p1',
               lastOutputAt: 1783528800000,
               agents: [
-                { state: 'working', stateStartedAt: 1783528000000, updatedAt: 1783528700000 },
+                {
+                  state: 'working',
+                  stateStartedAt: 1783528000000,
+                  updatedAt: 1783528700000,
+                  lastAssistantMessage: 'Exit code 1 — Orca is not running.',
+                },
                 { state: 'done' },
                 { notAnAgent: true },
               ],
@@ -171,8 +176,13 @@ describe('listWorktreeActivity (issue #22)', () => {
     expect(activity.get('r1::/p1')).toEqual({
       lastOutputAt: 1783528800000,
       agents: [
-        { state: 'working', stateStartedAt: 1783528000000, updatedAt: 1783528700000 },
-        { state: 'done', stateStartedAt: null, updatedAt: null },
+        {
+          state: 'working',
+          stateStartedAt: 1783528000000,
+          updatedAt: 1783528700000,
+          lastAssistantMessage: 'Exit code 1 — Orca is not running.',
+        },
+        { state: 'done', stateStartedAt: null, updatedAt: null, lastAssistantMessage: null },
       ],
     });
     expect(activity.get('r2::/p2')).toEqual({ lastOutputAt: null, agents: [] });
