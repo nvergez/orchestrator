@@ -494,6 +494,18 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     expect((verdict as { message: string }).message).toContain('re-asked');
   });
 
+  it('the fallback send never rewrites against a closed gate — the question went moot (issue #50)', async () => {
+    const { relay, store } = makeRelay();
+    seedDispatch(store);
+    seedGate(store);
+    // The reply fails, then the delegation closes before the fallback runs.
+    await relay.observe(THREAD, replyCommand('2'), '');
+    store.closeDelegation('ctx_13c7', 'completed');
+
+    const numeric = `orca terminal send --terminal ${WORKER} --text "2" --enter --json`;
+    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+  });
+
   it('sanctionsSend lapses once the delegation close mooted the worker’s gates', () => {
     const { relay, store } = makeRelay();
     const send = `orca terminal send --terminal ${WORKER} --text "root" --enter --json`;

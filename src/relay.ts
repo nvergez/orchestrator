@@ -280,7 +280,13 @@ export class GateRelay implements SessionRelay {
     const last = this.lastReply.get(threadTs);
     if (last !== undefined) {
       const named = this.store.getGate(last.msgId);
-      if (named !== undefined && named.workerHandle === handle) return this.successorOf(named);
+      if (named !== undefined && named.workerHandle === handle) {
+        const live = this.successorOf(named);
+        // A closed gate never routes an answer (issue #46: the question is
+        // moot) — a send after its delegation ended stays untouched rather
+        // than rewritten against a dead ask's numbering.
+        return live?.status === 'closed' ? undefined : live;
+      }
     }
     if (this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)) {
       return undefined;
