@@ -84,7 +84,7 @@ orca orchestration dispatch --task <taskId> --to <handle> --inject --json
 
 The brief travels via **`dispatch --inject`** (never `--prompt` at create time — the worker must get the coordinator preamble to emit `worker_done`). `--issue <n>` links the GitHub issue: the durable home for status/results beyond the Slack thread.
 
-**State detection — two layers.** Authority = structured messages (`worker_done`, `escalation`, `decision_gate` via `check --wait`) + `task-list`. Watchdog = `worktree ps` `agents[].state` / stale `lastOutputAt` / `tui-idle`, to catch a worker stalled at a prompt without an `ask` → "needs attention" in the thread. A `check` timeout or `{count:0}` is a checkpoint, not a failure.
+**State detection — two layers.** Authority = structured messages (`worker_done`, `escalation`, `decision_gate` via `check --wait`) + `task-list`. Watchdog = `worktree ps` `agents[].state` / stale `lastOutputAt` / `tui-idle`, to catch a worker stalled at a prompt without an `ask` → "needs attention" in the thread. A second watchdog signal ([#48](https://github.com/nvergez/orchestrator/issues/48)) catches the inverse — a worker that LOOKS alive (a TUI spinner keeps `lastOutputAt` fresh) but whose bus said nothing (no heartbeat, ask or done) past a max in-flight age (`WATCHDOG_MAX_INFLIGHT_MINUTES`, default 30): same ⚠️ mold, quoting the agent's `state` + `lastAssistantMessage` from `worktree ps`; any bus message from the worker resets the clock. A `check` timeout or `{count:0}` is a checkpoint, not a failure.
 
 **Parallelism**: one coordinator (mailbox) per thread → no cross-thread leakage on the runtime-global bus; multi-repo fan-out in waves; a self-imposed global cap on concurrent workers.
 

@@ -11,6 +11,7 @@ import {
   gateAnswerAck,
   gateLine,
   gateRelayMessage,
+  inflightWorkerAlert,
   milestoneLine,
   orcaUnavailableLine,
   queuedLine,
@@ -382,6 +383,57 @@ describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
     expect(message).toContain('⚠️ *A worker* seems stalled —');
     expect(message).toContain('no sign for 2 h 10 min');
     expect(message).toContain('> (no recent output could be read)');
+  });
+});
+
+describe('inflightWorkerAlert — the watchdog’s second signal ⚠️ (issue #48)', () => {
+  it('renders who, the mute-bus span, agent state, quoted last assistant message, reply instruction', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: 'scratch-2-report',
+      repo: 'scratch',
+      issueNumber: 2,
+      issueUrl: 'https://github.com/nvergez/scratch/issues/2',
+      inFlightForMs: 32 * 60_000,
+      agentState: 'working',
+      lastAssistantMessage: 'Exit code 1 / Orca is not running.',
+    });
+    expect(message).toBe(
+      [
+        '⚠️ *`scratch-2-report`* (<https://github.com/nvergez/scratch/issues/2|scratch#2>) needs attention —',
+        'in flight for 32 min without a word on the bus (agent state: `working`). Last assistant message:',
+        '',
+        '> `Exit code 1 / Orca is not running.`',
+        '',
+        "Tell me what to answer, I'll relay it to its terminal.",
+      ].join('\n'),
+    );
+  });
+
+  it('quotes a multi-line message line by line, stabilizing backticks', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: 'scratch-2-report',
+      repo: 'scratch',
+      issueNumber: 2,
+      inFlightForMs: 45 * 60_000,
+      agentState: 'working',
+      lastAssistantMessage: 'retrying `orca open`…\n\nstill failing',
+    });
+    expect(message).toContain("> `retrying 'orca open'…`\n>\n> `still failing`");
+  });
+
+  it('degrades: plain ref, "A worker", unknown agent state, no readable message', () => {
+    const message = inflightWorkerAlert({
+      worktreeName: null,
+      repo: null,
+      issueNumber: null,
+      inFlightForMs: 90 * 60_000,
+      agentState: null,
+      lastAssistantMessage: '  ',
+    });
+    expect(message).toContain('⚠️ *A worker* needs attention —');
+    expect(message).toContain('in flight for 1 h 30 min without a word on the bus');
+    expect(message).toContain('(agent state: `unknown`)');
+    expect(message).toContain('> (no assistant message could be read)');
   });
 });
 

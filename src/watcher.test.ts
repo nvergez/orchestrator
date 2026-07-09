@@ -176,7 +176,7 @@ describe('worker_done — the happy path', () => {
 
     expect(checkRunner.calls[0]).toBe(
       `orchestration check --wait --terminal ${MAILBOX} ` +
-        '--types worker_done,escalation,decision_gate --timeout-ms 900000 --json',
+        '--types worker_done,escalation,decision_gate,heartbeat,status --timeout-ms 900000 --json',
     );
 
     const row = store.getByDispatchId('ctx_d1');
@@ -1051,5 +1051,135 @@ describe('turn-lifecycle root ack (issue #49)', () => {
 
       await expect(settleTurnEnd(makeStore(), surface, logger, THREAD)).resolves.toBeUndefined();
     });
+  });
+});
+
+describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
+  const pendingStall = (store: DelegationStore): void => {
+    store.recordStall({
+      dispatchId: 'ctx_d1',
+      threadTs: THREAD,
+      workerHandle: 'term_w1',
+      worktreeName: 'forwardly-84-csv-export',
+      lastOutput: 'Exit code 1 / Orca is not running.',
+      fingerprint: 'inflight:1751970240000',
+      relayTs: 'alert-ts-1',
+    });
+  };
+
+  it.each(['heartbeat', 'status'])(
+    'a %s message stamps the bus clock and settles the pending ⚠️ — no post, no wake',
+    async (type) => {
+      const { watcher, store, surface, checkRunner, wakes } = makeWatcher({
+        checks: [checkOut(busMessage({ type, subject: 'alive', body: '' }))],
+      });
+      seedDispatch(store);
+      pendingStall(store);
+
+      watcher.arm(THREAD);
+      await vi.waitFor(() => {
+        expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+      });
+
+      expect(store.getStall('ctx_d1')?.status).toBe('answered');
+      // The window listens for liveness types alongside the gate trio.
+      expect(checkRunner.calls[0]).toContain(
+        '--types worker_done,escalation,decision_gate,heartbeat,status',
+      );
+      // The alert cleared, so the root settles back to 👀.
+      expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'eyes' });
+      // The message IS the signal — nothing relays, nobody wakes.
+      expect(surface.posts).toEqual([]);
+      expect(wakes).toEqual([]);
+      // The delegation stays in flight.
+      expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    },
+  );
+
+  it('a heartbeat with no pending alert stamps the clock and touches nothing else', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage({ type: 'heartbeat', subject: 'alive', body: '' }))],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+    });
+
+    expect(surface.posts).toEqual([]);
+    expect(surface.reactions).toEqual([]);
+  });
+
+  it('a heartbeat matching no ledger row is ignored quietly', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({
+            type: 'heartbeat',
+            subject: 'alive',
+            body: '',
+            payload: JSON.stringify({ taskId: 'task_ghost', dispatchId: 'ctx_ghost' }),
+            from_handle: undefined,
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    // The next (dry) window parks — give the handled message a beat to land.
+    await vi.waitFor(() => {
+      expect(watcher.isArmed(THREAD)).toBe(true);
+    });
+
+    expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
+    expect(surface.posts).toEqual([]);
+  });
+
+  it('a straggler heartbeat from a closed dispatch cannot stamp the live ledger', async () => {
+    const { watcher, store } = makeWatcher({
+      checks: [checkOut(busMessage({ type: 'heartbeat', subject: 'alive', body: '' }))],
+    });
+    seedDispatch(store);
+    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_retry' });
+    store.closeDelegation('ctx_d1', 'failed');
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(watcher.isArmed(THREAD)).toBe(true);
+    });
+
+    expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
+    expect(store.getByDispatchId('ctx_d2')?.lastBusAt).toBeNull();
+  });
+
+  it('an ask is bus liveness too: stamps the clock and supersedes the pending ⚠️', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [
+        checkOut(
+          busMessage({
+            id: 'msg_ask1',
+            type: 'decision_gate',
+            subject: 'Question',
+            body: '',
+            payload: JSON.stringify({ question: 'Overwrite bench.json?', options: ['yes', 'no'] }),
+          }),
+        ),
+      ],
+    });
+    seedDispatch(store);
+    pendingStall(store);
+
+    watcher.arm(THREAD);
+    await vi.waitFor(() => {
+      expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
+    });
+
+    expect(store.getStall('ctx_d1')?.status).toBe('answered');
+    // The gate relay owns the thread's attention now: ❓ posted and set.
+    expect(surface.posts).toHaveLength(1);
+    expect(surface.posts[0]?.text).toContain('Overwrite bench.json?');
+    expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'question' });
   });
 });

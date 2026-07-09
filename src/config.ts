@@ -29,6 +29,8 @@ export interface Config {
   watchdogSweepIntervalMs: number;
   /** Silence across every worktree signal before a worker counts stalled (#22). */
   watchdogStallAfterMs: number;
+  /** In-flight age with a mute bus before the ⚠️ needs-attention alert (#48). */
+  watchdogMaxInflightMs: number;
   /** Dormancy span after which the sweep auto-closes a session (spec §3: 7 days). */
   autoCloseAfterMs: number;
   /** How often the dormancy sweep runs. */
@@ -54,6 +56,8 @@ const DEFAULT_WATCH_WINDOW_MINUTES = 15;
 const DEFAULT_WATCHDOG_SWEEP_MINUTES = 2;
 
 const DEFAULT_WATCHDOG_STALL_MINUTES = 10;
+
+const DEFAULT_WATCHDOG_MAX_INFLIGHT_MINUTES = 30;
 
 const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
 
@@ -123,6 +127,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     'minutes',
   );
 
+  const watchdogMaxInflightMinutes = positiveNumber(
+    'WATCHDOG_MAX_INFLIGHT_MINUTES',
+    DEFAULT_WATCHDOG_MAX_INFLIGHT_MINUTES,
+    'minutes',
+  );
+
   const sweepIntervalMinutes = positiveNumber(
     'SESSION_SWEEP_INTERVAL_MINUTES',
     DEFAULT_SWEEP_INTERVAL_MINUTES,
@@ -159,6 +169,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     watchWindowMs: watchWindowMinutes * 60_000,
     watchdogSweepIntervalMs: watchdogSweepMinutes * 60_000,
     watchdogStallAfterMs: watchdogStallMinutes * 60_000,
+    watchdogMaxInflightMs: watchdogMaxInflightMinutes * 60_000,
     autoCloseAfterMs: autoCloseDays * DAY_MS,
     sweepIntervalMs: sweepIntervalMinutes * 60_000,
   };

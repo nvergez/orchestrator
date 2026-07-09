@@ -202,6 +202,51 @@ export function stalledWorkerAlert(opts: {
 }
 
 /**
+ * The watchdog's second signal (issue #48): the worker LOOKS alive — a TUI
+ * spinner keeps its terminal clocks fresh, so `stalledWorkerAlert` can never
+ * fire — but the bus has heard nothing from it for the whole in-flight
+ * window. Same mold as the stall alert; what it quotes instead of terminal
+ * output is the runtime's view of the agent (`worktree ps` state) and its
+ * last assistant message — where the live incident's root cause was sitting.
+ */
+export function inflightWorkerAlert(opts: {
+  worktreeName: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+  /** How long the delegation has been in flight with a mute bus. */
+  inFlightForMs: number;
+  /** The agent state `worktree ps` reports; null when unreported. */
+  agentState: string | null;
+  /** The agent's last assistant message, truncated upstream; '' when unreadable. */
+  lastAssistantMessage: string;
+}): string {
+  const who = opts.worktreeName === null ? '*A worker*' : `*\`${opts.worktreeName}\`*`;
+  const plainRef =
+    opts.repo !== null && opts.issueNumber !== null ? `${opts.repo}#${opts.issueNumber}` : null;
+  const ref =
+    plainRef === null
+      ? ''
+      : ` (${opts.issueUrl === undefined ? plainRef : `<${opts.issueUrl}|${plainRef}>`})`;
+  const quoted =
+    opts.lastAssistantMessage.trim() === ''
+      ? ['> (no assistant message could be read)']
+      : opts.lastAssistantMessage
+          .split('\n')
+          .map((line) => (line.trim() === '' ? '>' : `> \`${line.replaceAll('`', "'")}\``));
+  return [
+    `⚠️ ${who}${ref} needs attention —`,
+    `in flight for ${formatDuration(opts.inFlightForMs)} without a word on the bus ` +
+      `(agent state: \`${opts.agentState ?? 'unknown'}\`). Last assistant message:`,
+    '',
+    ...quoted,
+    '',
+    "Tell me what to answer, I'll relay it to its terminal.",
+  ].join('\n');
+}
+
+/**
  * Scenario C end — the fixed acknowledgment after an answer went back down.
  * Rendered by the session's voice (the routing turn's one visible line); the
  * template lives here so the system prompt and the tests share one source.

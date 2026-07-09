@@ -23,6 +23,10 @@ export interface DelegationRow {
   title: string | null;
   status: 'dispatched' | 'completed' | 'failed';
   dispatchedAt: string;
+  /** When the worker last said ANYTHING structured on the bus (heartbeat,
+   * ask, done) — the watchdog's in-flight-age clock (issue #48); null until
+   * the first message, so the dispatch time is the floor. */
+  lastBusAt: string | null;
   closedAt: string | null;
 }
 
@@ -146,6 +150,7 @@ export class DelegationStore {
         status        TEXT NOT NULL DEFAULT 'dispatched'
                       CHECK (status IN ('dispatched', 'completed', 'failed')),
         dispatched_at TEXT NOT NULL,
+        last_bus_at   TEXT,
         closed_at     TEXT
       ) STRICT;
       CREATE TABLE IF NOT EXISTS mailboxes (
@@ -175,6 +180,20 @@ export class DelegationStore {
       ) STRICT;
     `);
     this.migratePendingGates();
+    this.migrateDelegations();
+  }
+
+  /**
+   * Adds the issue #48 `last_bus_at` column to a pre-#48 delegations table.
+   * A plain nullable add — ALTER TABLE suffices, no rebuild; existing rows
+   * read null, so their dispatch time stays the in-flight floor.
+   */
+  private migrateDelegations(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delegations'`)
+      .get() as { sql?: unknown } | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes('last_bus_at')) return;
+    this.db.exec(`ALTER TABLE delegations ADD COLUMN last_bus_at TEXT`);
   }
 
   /**
@@ -210,7 +229,7 @@ export class DelegationStore {
    * runtime-issued, so two rows with one id can only be the same hand-off.
    */
   recordDispatch(
-    row: Omit<DelegationRow, 'status' | 'dispatchedAt' | 'closedAt'>,
+    row: Omit<DelegationRow, 'status' | 'dispatchedAt' | 'lastBusAt' | 'closedAt'>,
   ): void {
     this.db
       .prepare(
@@ -236,6 +255,22 @@ export class DelegationStore {
         row.title,
         this.now(),
       );
+  }
+
+  /**
+   * Stamps the in-flight row's bus clock (issue #48): any structured message
+   * from the worker — heartbeat, ask, done — proves its bus is alive, and
+   * resets the watchdog's in-flight-age fingerprint. Only an in-flight row
+   * stamps; a straggler from an already-closed dispatch changes nothing.
+   */
+  recordBusActivity(dispatchId: string): boolean {
+    const { changes } = this.db
+      .prepare(
+        `UPDATE delegations SET last_bus_at = ?
+         WHERE dispatch_id = ? AND status = 'dispatched'`,
+      )
+      .run(this.now(), dispatchId);
+    return Number(changes) > 0;
   }
 
   /**
@@ -649,6 +684,7 @@ function toDelegationRow(row: Record<string, unknown>): DelegationRow {
     title: row.title as string | null,
     status: row.status as DelegationRow['status'],
     dispatchedAt: row.dispatched_at as string,
+    lastBusAt: (row.last_bus_at ?? null) as string | null,
     closedAt: row.closed_at as string | null,
   };
 }
