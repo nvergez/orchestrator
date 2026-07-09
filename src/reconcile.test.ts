@@ -93,9 +93,12 @@ interface RunnerScript {
   repoList?: string | Error;
   /** `orchestration check --all` stdout per `--terminal` handle. */
   checks?: Record<string, string | Error>;
+  /** `worktree rm --json` stdout, or a refusal; default: a clean removal. */
+  worktreeRm?: string | Error;
 }
 
-/** Dispatches on the orca subcommand — reconciliation's four read-only calls. */
+/** Dispatches on the orca subcommand — reconciliation's read-only calls,
+ * plus the one write: the success cleanup's `worktree rm` (issue #43). */
 const makeRunner = (script: RunnerScript) => {
   const calls: string[][] = [];
   const answer = (value: string | Error | undefined, what: string): Promise<{ stdout: string }> => {
@@ -108,6 +111,9 @@ const makeRunner = (script: RunnerScript) => {
       return answer(script.taskList, 'task-list');
     }
     if (args[0] === 'worktree' && args[1] === 'ps') return answer(script.ps, 'worktree ps');
+    if (args[0] === 'worktree' && args[1] === 'rm') {
+      return answer(script.worktreeRm ?? envelope({ removed: true }), 'worktree rm');
+    }
     if (args[0] === 'repo' && args[1] === 'list') {
       return answer(script.repoList ?? REPO_LIST_OUT, 'repo list');
     }
@@ -168,7 +174,7 @@ describe('BootReconciler — completions missed during the outage', () => {
     const store = new DelegationStore(':memory:');
     seedDispatch(store);
     store.setMailbox(THREAD, CHANNEL, MAILBOX);
-    const { reconciler, surface } = makeReconciler(store, {
+    const { reconciler, surface, calls } = makeReconciler(store, {
       taskList: taskListOut({ id: 'task_3f81', status: 'completed' }),
       ps: psOut(),
       checks: { [MAILBOX]: checkOut(workerDone()) },
@@ -177,6 +183,11 @@ describe('BootReconciler — completions missed during the outage', () => {
     await reconciler.reconcile();
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    // The outage completion gets the same success cleanup as the live path
+    // (issue #43) — silently, since the removal succeeded.
+    expect(calls.filter((args) => args[1] === 'rm')).toEqual([
+      ['worktree', 'rm', '--worktree', 'id:wt-1', '--json'],
+    ]);
     // The card flipped to its final ✅ state with the report's PR link.
     expect(surface.updates).toHaveLength(1);
     expect(surface.updates[0]?.ts).toBe('card-ts-1');
@@ -246,6 +257,41 @@ describe('BootReconciler — completions missed during the outage', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
     expect(restartPosts(surface)[0]).toContain('❌ failed during the outage');
+  });
+
+  it('never cleans up a failed closure — the worktree is the debugging evidence', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, calls } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'failed' }),
+      ps: psOut(psWorktree()),
+      checks: { [MAILBOX]: checkOut() },
+    });
+
+    await reconciler.reconcile();
+
+    expect(calls.filter((args) => args[1] === 'rm')).toEqual([]);
+  });
+
+  it('a cleanup refusal keeps the worktree, posts the 🧹 line, and never blocks the ⚠️ notice', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'completed' }),
+      ps: psOut(),
+      checks: { [MAILBOX]: checkOut(workerDone()) },
+      worktreeRm: new Error('orca down'),
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    expect(
+      surface.posts.some((post) => post.text.includes('🧹 Could not clean up worktree `scratch-21-bench`')),
+    ).toBe(true);
+    expect(restartPosts(surface)).toHaveLength(1);
   });
 
   it('keeps the mailbox peek read-only — check runs with --all, never --unread', async () => {

@@ -88,6 +88,8 @@ The brief travels via **`dispatch --inject`** (never `--prompt` at create time �
 
 **Parallelism**: one coordinator (mailbox) per thread → no cross-thread leakage on the runtime-global bus; multi-repo fan-out in waves; a self-imposed global cap on concurrent workers.
 
+**Cleanup on success** ([#43](https://github.com/nvergez/orchestrator/issues/43)): once a delegation closes as completed — at `worker_done` time or by boot reconciliation — the daemon removes the worktree it created (`orca worktree rm`, deliberately **without** `--force`: a dirty tree makes the runtime refuse, the worktree stays on disk for inspection and the thread gets one 🧹 line saying why). A **failed** delegation always keeps its worktree for debugging. This daemon-side removal is not a session Bash call, so §7's CONFIRM tier does not apply — the gate remains for any deletion the *coordinator session* attempts itself.
+
 ## 6. Gate relay — worker questions into the thread and back
 
 Decision [#9](https://github.com/nvergez/orchestrator/issues/9). Architecture: **the daemon listens, the session thinks.**

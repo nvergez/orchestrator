@@ -9,6 +9,7 @@ import {
 } from './orca.ts';
 import {
   applyRootReaction,
+  cleanupDeliveredWorktree,
   flipCardFinal,
   isFailureSubject,
   readCheckMessages,
@@ -29,7 +30,10 @@ import type { Logger } from './logger.ts';
  * and each affected thread gets exactly ONE ⚠️ line with the observed truth.
  *
  * The boundaries are the point:
- * - never kill or restart a worker — every orca call here is a read;
+ * - never kill or restart a worker — every orca call here is a read, with
+ *   ONE write exception: a row closed as completed gets its worktree
+ *   removed, the same success cleanup as the live worker_done path (issue
+ *   #43) and gated on the same positive signal; failures keep theirs;
  * - never wake a session — completions missed during the outage close their
  *   ledger row and flip their card right here, daemon-side, so no watcher
  *   ever turns them into a wake; the session stays dormant (#5's boot rule)
@@ -167,6 +171,9 @@ export class BootReconciler {
         'delegation closed by boot reconciliation',
       );
       await this.finishCard(item);
+      if (item.kind === 'completed') {
+        await cleanupDeliveredWorktree(this.run, this.surface, this.logger, item.row);
+      }
     }
     await this.updateRootReaction(threadTs, items, closed);
 

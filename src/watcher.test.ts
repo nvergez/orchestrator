@@ -115,6 +115,8 @@ interface HarnessOptions {
   checks?: Array<string | Error>;
   wakeResult?: WakeResult;
   registryDown?: boolean;
+  /** `worktree rm --json` stdout or a refusal; default: a clean removal. */
+  rmResult?: string | Error;
 }
 
 const makeWatcher = (options: HarnessOptions = {}) => {
@@ -125,6 +127,18 @@ const makeWatcher = (options: HarnessOptions = {}) => {
   const checkRunner = makeCheckRunner(options.checks ?? []);
   const wakes: Array<{ threadTs: string; channelId: string; text: string }> = [];
   let closed = 0;
+  // The short daemon-side runner, dispatched on the subcommand: the registry
+  // lookup for issue links, and the success cleanup's `worktree rm` (#43).
+  const rmCalls: string[] = [];
+  const run: CommandRunner = (_command, args) => {
+    if (options.registryDown === true) return Promise.reject(new Error('orca down'));
+    if (args[0] === 'worktree' && args[1] === 'rm') {
+      rmCalls.push(args.join(' '));
+      const result = options.rmResult ?? envelope({ removed: true });
+      return result instanceof Error ? Promise.reject(result) : Promise.resolve({ stdout: result });
+    }
+    return Promise.resolve({ stdout: REPO_LIST_OUT });
+  };
   const watcher = new GateWatcher({
     store,
     surface,
@@ -139,12 +153,10 @@ const makeWatcher = (options: HarnessOptions = {}) => {
     windowMs: 900_000,
     retryDelayMs: 0,
     runCheck: checkRunner.run,
-    run: options.registryDown === true
-      ? () => Promise.reject(new Error('orca down'))
-      : () => Promise.resolve({ stdout: REPO_LIST_OUT }),
+    run,
     now: () => new Date('2026-07-08T14:31:00.000Z'),
   });
-  return { watcher, store, surface, checkRunner, wakes, slotsFreed: () => closed };
+  return { watcher, store, surface, checkRunner, wakes, rmCalls, slotsFreed: () => closed };
 };
 
 const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
@@ -154,7 +166,7 @@ const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
 
 describe('worker_done — the happy path', () => {
   it('closes the row, flips the card to ✅ with durable links, swaps 👀 for ✅, wakes the session', async () => {
-    const { watcher, store, surface, checkRunner, wakes, slotsFreed } = makeWatcher({
+    const { watcher, store, surface, checkRunner, wakes, rmCalls, slotsFreed } = makeWatcher({
       checks: [checkOut(busMessage())],
     });
     seedDispatch(store);
@@ -193,6 +205,9 @@ describe('worker_done — the happy path', () => {
     expect(wakes[0]?.text).toContain('https://github.com/lemlist/forwardly/pull/87');
     expect(wakes[0]?.text).toContain('✅ Delivered');
     expect(surface.posts).toEqual([]);
+
+    // The delivered worktree went away, silently (issue #43).
+    expect(rmCalls).toEqual(['worktree rm --worktree id:wt-1 --json']);
   });
 
   it('matches on the task id when the payload lost the dispatch id', async () => {
@@ -290,8 +305,8 @@ describe('worker_done — the happy path', () => {
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
   });
 
-  it('ignores a duplicated worker_done — one close, one freed slot, one wake', async () => {
-    const { watcher, store, wakes, slotsFreed } = makeWatcher({
+  it('ignores a duplicated worker_done — one close, one freed slot, one wake, one cleanup', async () => {
+    const { watcher, store, wakes, rmCalls, slotsFreed } = makeWatcher({
       checks: [checkOut(busMessage(), busMessage())],
     });
     seedDispatch(store);
@@ -302,6 +317,7 @@ describe('worker_done — the happy path', () => {
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     expect(slotsFreed()).toBe(1);
     expect(wakes).toHaveLength(1);
+    expect(rmCalls).toHaveLength(1);
   });
 
   it('surfaces an unmatched completion raw — never lost, nothing closed', async () => {
@@ -328,7 +344,7 @@ describe('worker_done — the happy path', () => {
 
 describe('worker_done — failure', () => {
   it('closes as failed: ❌ card with the reason, ❌ root reaction, failure wake', async () => {
-    const { watcher, store, surface, wakes } = makeWatcher({
+    const { watcher, store, surface, wakes, rmCalls } = makeWatcher({
       checks: [
         checkOut(
           busMessage({
@@ -350,6 +366,9 @@ describe('worker_done — failure', () => {
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
     expect(wakes[0]?.text).toContain('FAILED');
     expect(wakes[0]?.text).toContain('❌ Failed');
+
+    // The failure's worktree is the debugging evidence — never cleaned up.
+    expect(rmCalls).toEqual([]);
   });
 
   it('surfaces a failure as ❌ even while siblings are still in flight', async () => {
@@ -363,6 +382,68 @@ describe('worker_done — failure', () => {
     await vi.waitFor(() => {
       expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
     });
+  });
+});
+
+describe('worker_done — worktree cleanup (issue #43)', () => {
+  it('a dirty-tree refusal keeps the worktree and posts the 🧹 line with the runtime’s reason', async () => {
+    const refusal = Object.assign(new Error('Command failed: orca'), {
+      stdout: JSON.stringify({
+        id: 'x',
+        ok: false,
+        error: {
+          code: 'runtime_error',
+          message: 'Failed to delete worktree at /home/dev/orca/workspaces/forwardly/forwardly-84-csv-export. ?? notes.md',
+        },
+      }),
+    });
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage())],
+      rmResult: refusal,
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    // The delegation still closed cleanly — cleanup is janitorial.
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    expect(surface.posts).toEqual([
+      {
+        threadTs: THREAD,
+        text:
+          '🧹 Could not clean up worktree `forwardly-84-csv-export` — kept for inspection.\n' +
+          '> Failed to delete worktree at /home/dev/orca/workspaces/forwardly/forwardly-84-csv-export. ?? notes.md',
+      },
+    ]);
+  });
+
+  it('an unreadable rm response is a refusal too — kept and surfaced, never a crash', async () => {
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage())],
+      rmResult: 'not json at all',
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    expect(surface.posts[0]?.text).toContain('🧹 Could not clean up worktree');
+  });
+
+  it('a row with no worktree id skips cleanup silently', async () => {
+    const { watcher, store, surface, rmCalls } = makeWatcher({
+      checks: [checkOut(busMessage())],
+    });
+    seedDispatch(store, { worktreeId: null, worktreeName: null, worktreePath: null });
+
+    watcher.arm(THREAD);
+    await stopped(watcher);
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    expect(rmCalls).toEqual([]);
+    expect(surface.posts).toEqual([]);
   });
 });
 

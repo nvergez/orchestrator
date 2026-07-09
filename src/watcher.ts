@@ -3,11 +3,13 @@ import {
   extractPullRequestLinks,
   gateRelayMessage,
   workerDoneFallbackLine,
+  worktreeKeptLine,
 } from './messages.ts';
 import {
   execFileRunner,
   makeExecFileRunner,
   parseOrcaEnvelope,
+  removeWorktree,
   safeRegistryIssueUrl,
   type CommandRunner,
 } from './orca.ts';
@@ -28,7 +30,9 @@ import type { Logger } from './logger.ts';
  * final ✅/❌ state (the durable home for links), swaps the root reaction,
  * and wakes the session through the SAME input pipe as a human message —
  * the session's voice writes the short summary; the daemon only posts one
- * itself when no session can take the wake.
+ * itself when no session can take the wake. A delivered delegation's
+ * worktree is then removed (issue #43); a failed one keeps its worktree
+ * for debugging.
  *
  * A `decision_gate`/`escalation` is relayed up in full (issue #21): the
  * daemon itself posts the fixed-contract gate message — the worker's
@@ -209,6 +213,54 @@ export async function flipCardFinal(
 }
 
 /**
+ * The success cleanup (issue #43): a delivered delegation's worktree goes
+ * away — the work lives on in the pushed branch/PR and the card keeps the
+ * links. `worktree rm` runs deliberately WITHOUT `--force`, so a dirty tree
+ * makes the runtime refuse and the worktree stays inspectable; the refusal
+ * surfaces as one thread line. Failed delegations never reach here — their
+ * worktree is the debugging evidence. Best-effort like every janitorial
+ * move: an error is a warn line, never a crash. Shared by the watcher's
+ * worker_done path and boot reconciliation's outage closures (issue #25).
+ */
+export async function cleanupDeliveredWorktree(
+  run: CommandRunner,
+  surface: Pick<WatcherSurface, 'post'>,
+  logger: Logger,
+  row: DelegationRow,
+): Promise<void> {
+  if (row.worktreeId === null) {
+    logger.warn(
+      { threadTs: row.threadTs, dispatchId: row.dispatchId },
+      'closed delegation carries no worktree id — cleanup skipped',
+    );
+    return;
+  }
+  try {
+    await removeWorktree(run, row.worktreeId);
+    logger.info(
+      { threadTs: row.threadTs, dispatchId: row.dispatchId, worktreeId: row.worktreeId },
+      'delivered worktree removed',
+    );
+  } catch (error) {
+    logger.warn(
+      { err: error, threadTs: row.threadTs, worktreeId: row.worktreeId },
+      'worktree cleanup refused — kept for inspection',
+    );
+    try {
+      await surface.post(
+        row.threadTs,
+        worktreeKeptLine(
+          row.worktreeName ?? row.worktreeId,
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+    } catch (postError) {
+      logger.warn({ err: postError, threadTs: row.threadTs }, 'worktree-kept line post failed');
+    }
+  }
+}
+
+/**
  * `orchestration check --json` stdout → the readable bus messages, with the
  * raw array riding along for the caller's dropped-entries log line. Throws
  * on a shapeless envelope. Shared with boot reconciliation (issue #25),
@@ -367,9 +419,10 @@ export class GateWatcher {
 
   /**
    * `worker_done` (issue #20): ledger row closed, card flipped to ✅/❌ with
-   * the durable links, root reaction swapped, session woken for the summary.
-   * Failure is still a worker_done — the preamble fixes the subject shape
-   * ("Failed: <reason>"), which is all the signal there is.
+   * the durable links, root reaction swapped, session woken for the summary,
+   * and on success the worktree cleaned up (issue #43). Failure is still a
+   * worker_done — the preamble fixes the subject shape ("Failed: <reason>"),
+   * which is all the signal there is.
    */
   private async handleWorkerDone(threadTs: string, message: OrchestrationMessage): Promise<void> {
     const row = this.findRow(threadTs, message);
@@ -416,6 +469,11 @@ export class GateWatcher {
         'no session took the worker_done wake — posting the fallback summary',
       );
       await this.postSafe(row.threadTs, workerDoneFallbackLine(message.subject, failed));
+    }
+    // Janitorial last — the human-facing card, reaction and wake never wait
+    // on it. A failure keeps its worktree as the debugging evidence.
+    if (!failed) {
+      await cleanupDeliveredWorktree(this.run, this.surface, this.logger, row);
     }
   }
 
