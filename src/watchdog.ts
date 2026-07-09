@@ -155,17 +155,20 @@ export class Watchdog {
     const stalledForMs = this.now().getTime() - lastActivityAt;
     if (stalledForMs < this.stallAfterMs) return false;
 
-    // One alert per stall state: same last-activity clock ⇒ already alerted
-    // — unless that alert never reached Slack AND nobody answered it through
-    // the turn context, in which case nobody has seen it and the next sweep
-    // retries the post rather than losing the stall to a transient error.
+    // One live ⚠️ per delegation (shared with the mute-bus check): while
+    // EITHER signal's alert sits posted and unanswered, stay quiet — the
+    // human's attention is already flagged, and the registry holds one row
+    // per delegation, so a second post would silently overwrite the first
+    // alert's reply anchor. One alert per stall state on top: same
+    // last-activity clock ⇒ already alerted — unless that alert never
+    // reached Slack AND nobody answered it through the turn context, in
+    // which case nobody has seen it and the next sweep retries the post
+    // rather than losing the stall to a transient error.
     const fingerprint = String(lastActivityAt);
     const existing = this.store.getStall(row.dispatchId);
-    if (
-      existing?.fingerprint === fingerprint &&
-      (existing.relayTs !== null || existing.status === 'answered')
-    ) {
-      return false;
+    if (existing !== undefined) {
+      if (existing.status === 'pending' && existing.relayTs !== null) return false;
+      if (existing.fingerprint === fingerprint && existing.status === 'answered') return false;
     }
 
     if (this.hasPendingRelayedGate(row)) return false;

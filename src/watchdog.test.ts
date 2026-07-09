@@ -530,6 +530,27 @@ describe('a live-but-mute worker → the in-flight ⚠️ alert (issue #48)', ()
     expect(surface.posts[1]?.text).toContain('needs attention');
   });
 
+  it('a fully dead worker never ping-pongs: one follow-up ⚠️ per answer, not an alternation', async () => {
+    // Worktree stale AND bus mute throughout; the silence alert is answered
+    // through the turn context, so no clock ever moves. The mute-bus ⚠️
+    // follows once — and the silence signal must NOT re-post its already-
+    // answered state just because the registry row now holds the other
+    // signal's fingerprint.
+    const { watchdog, store, surface } = makeWatchdog();
+    seedDispatch(store);
+
+    expect(await watchdog.sweep()).toBe(1);
+    expect(surface.posts[0]?.text).toContain('seems stalled');
+    store.answerStall('ctx_w1');
+
+    expect(await watchdog.sweep()).toBe(1);
+    expect(surface.posts[1]?.text).toContain('needs attention');
+
+    expect(await watchdog.sweep()).toBe(0);
+    expect(await watchdog.sweep()).toBe(0);
+    expect(surface.posts).toHaveLength(2);
+  });
+
   it('a just-nudged worker gets a fresh window before the mute-bus signal fires', async () => {
     const { watchdog, store, surface, setStoreNow } = makeWatchdog({
       ps: [psOut(worktreeEntry()), psOut(spinnerEntry())],
