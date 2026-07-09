@@ -3,9 +3,10 @@ import type { Logger } from './logger.ts';
 /**
  * The 🚦 confirm gate (spec §7/§8): a CONFIRM-tier command suspends inside
  * `canUseTool` while a one-line gate message sits in the thread; the
- * authorized user's next reply — and nobody else's — resolves it. "go"
- * releases exactly that call; anything else cancels it, with the verbatim
- * reply relayed back to the session so it can react.
+ * authorized user's next reply — and nobody else's — resolves it. "go" — bare
+ * or with a trailing comment ("go — <note>", issue #47) — releases exactly
+ * that call; anything else cancels it, with the verbatim reply relayed back
+ * to the session so it can react.
  *
  * Pending gates are pure runtime state (spec §9): a daemon restart kills the
  * suspended turn anyway, so there is nothing durable to persist.
@@ -53,9 +54,32 @@ const APPROVALS = new Set([
   '✅',
 ]);
 
+/**
+ * What may sit between an approval token and a trailing comment (issue #47):
+ * real punctuation or a newline. Deliberately NOT a bare space ("go later
+ * maybe" is not an approval), NOT "?" ("go?" is a question), and an ASCII
+ * hyphen only separates with whitespace before it — glued it reads as a
+ * compound word ("ok-ish"), which is a hedge, not an approval.
+ */
+const PREFIX_SEPARATOR = /^(\s*[,.;:!…—–]|\s+-|\s*\n)/;
+
 export function isApproval(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/[.!]+$/, '').trim();
-  return APPROVALS.has(normalized);
+  const normalized = text.trim().toLowerCase();
+  const bare = normalized.replace(/[.!]+$/, '').trim();
+  if (APPROVALS.has(bare)) return true;
+  // Approval-prefix (issue #47): "go — <comment>" / "yes, but <caveat>" /
+  // "ok. also <more>" approve. Only the leading token decides; the whole
+  // reply still travels back in the verdict, so the comment reaches the
+  // session verbatim instead of silently re-gating the same command.
+  for (const approval of APPROVALS) {
+    if (
+      normalized.startsWith(approval) &&
+      PREFIX_SEPARATOR.test(normalized.slice(approval.length))
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 interface PendingGate {
