@@ -171,11 +171,39 @@ describe('classifyEvent', () => {
     },
   );
 
-  it('a mention-less "close" reply stays an ordinary turn — the command needs the mention', () => {
+  it('a mention-less "close" reply in a thread is the close command too (#38 landed)', () => {
     expect(classifyEvent({ ...threadReply, text: 'close' }, guard)).toEqual({
+      action: 'close',
+      threadTs: '1751970000.000100',
+    });
+  });
+
+  it.each([['Close'], ['CLOSE'], ['close.'], ['close!'], ['  close  ']])(
+    'normalizes the mention-less "%s" reply to the close command',
+    (variant) => {
+      expect(classifyEvent({ ...threadReply, text: variant }, guard).action).toBe('close');
+    },
+  );
+
+  it('a mention-less "close" at the channel root still opens nothing (spec §3)', () => {
+    expect(classifyEvent({ ...threadReply, thread_ts: undefined, text: 'close' }, guard)).toEqual({
+      action: 'ignore',
+      reason: 'not_a_mention',
+    });
+  });
+
+  it('a third party cannot close the thread with a bare "close"', () => {
+    expect(classifyEvent({ ...threadReply, user: 'U0INTRUDER', text: 'close' }, guard)).toEqual({
+      action: 'ignore',
+      reason: 'third_party_in_thread',
+    });
+  });
+
+  it('a mention-less sentence containing "close" stays a reply', () => {
+    expect(classifyEvent({ ...threadReply, text: 'close the PR when CI is green' }, guard)).toEqual({
       action: 'reply',
       threadTs: '1751970000.000100',
-      text: 'close',
+      text: 'close the PR when CI is green',
     });
   });
 

@@ -10,8 +10,8 @@ all fixed and redeployed the same day).
 - Roots must @mention the bot; **replies do not** — plain thread replies resume the session, as
   designed. (Until #38 was fixed on 2026-07-09 they were silently dropped: the channel is private,
   so Slack emits `message.groups`, and only `message.channels` was subscribed.)
-- `close` is the exception: it is the **mention plus the bare word** (`@bot close`). A mention-less
-  `close` reply is an ordinary turn, and the bot answers by naming the real command (spec §3, #41).
+- `close` is the bare word as the whole reply, **mention optional**. Only a longer sentence
+  containing "close" is an ordinary turn (spec §3).
 - Messages sent through the claude.ai Slack MCP arrive with a `*Envoyé avec* @Claude` context
   footer; the daemon extracts command/turn text from `rich_text` blocks only (#41), so commands
   still match.
@@ -29,7 +29,7 @@ all fixed and redeployed the same day).
 | S3 | Nominal delegation (mock A) | Root: `@bot in the sandbox, write <tiny one-shot script> and run it once` | Direct dispatch, no routing gate ("sandbox" is a listed alias, #52); zero 🚦 for reads (#45); ⚙️ card at dispatch, ✅ flip + "Delivered" summary on `worker_done`; artifact exists on disk |
 | S4 | Worker gate relay (mock C) | Root: delegation whose brief forces the worker to `ask` with numbered options before writing | ❓ relay: worktree name, question **verbatim** in blockquote, numbered options, "Reply in this thread"; root 👀→❓; reply `N` routes to the **live** gate, forwards option N's verbatim text (#50); re-asks supersede (one live relay, no duplicates, #46) |
 | S5 | Mid-flight status (mock E) | Reply `where is <task> at?` (no mention) while a delegation runs | Snapshot answer from task-list/worktree ps, **zero 🚦** (#45); card stays the living surface |
-| S6 | Close + closed thread | Reply `@bot close`, then reply again after | 🔚 summary with **per-delegation outcomes** (✅ repo#n, #51), cost, turns; second reply gets the fixed "Session closed." line |
+| S6 | Close + closed thread | Reply `close` (no mention), then reply again after | 🔚 summary with **per-delegation outcomes** (✅ repo#n, #51), cost, turns; second reply gets the fixed "Session closed." line |
 | S9 | Mention-less resume (#38) | Reply in a registered thread with **no mention** | A turn starts (warm resume) and the bot answers; a *mentioned* reply still yields exactly **one** turn (the `message` copy is deduped, never a double turn) |
 | S7 | 🚦 gate replies | Trigger any CONFIRM command (e.g. ask it to `worktree rm` something) | `go — <comment>` **approves** (#47); a denial gets a visible "taking that as a no" ack, never a silent identical re-gate; denied read still answers best-effort |
 | S8 | Restart reconcile ("Daemon restart") | `systemctl --user restart orchestrator` with a delegation in flight | One ⚠️ line per affected thread, sessions not woken; next human message resumes supervision |

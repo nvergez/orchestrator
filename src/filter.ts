@@ -120,6 +120,9 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       // Attachment-only or whitespace replies never become empty Claude turns.
       return { action: 'ignore', reason: 'empty_text' };
     }
+    if (isCloseCommand(replyText)) {
+      return { action: 'close', threadTs: event.thread_ts };
+    }
     return { action: 'reply', threadTs: event.thread_ts, text: replyText };
   }
 
@@ -150,10 +153,13 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
 }
 
 /**
- * The close command is the mention plus the bare word (spec §3: explicit
- * `@orchestrator close`, thread-only — a root "close" mention just opens a
- * session). A mention-less "close" reply stays an ordinary turn, and any
- * longer sentence goes to the session to interpret.
+ * The close command is the bare word inside a thread, with or without the
+ * mention (spec §3). It was mention-only while mention-less replies never
+ * reached the daemon (#38); now that they do, requiring the mention was pure
+ * ceremony. Thread-only still: a root "close" mention opens a session, and a
+ * mention-less root message opens nothing. Any longer sentence containing the
+ * word goes to the session to interpret, and the authorized-user and
+ * third-party guards upstream decide who may say it.
  */
 function isCloseCommand(text: string): boolean {
   return text.toLowerCase().replace(/[.!]+$/, '').trim() === 'close';
