@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLogger } from './logger.ts';
 import { SessionStore } from './db.ts';
+import type { ClosingDelegation } from './messages.ts';
 import {
   SessionManager,
   type Notifier,
@@ -71,7 +72,7 @@ const makeHarness = (
     notify?: Notifier;
     cap?: number;
     autoCloseMs?: number;
-    countDelegations?: (threadTs: string) => number;
+    listDelegations?: (threadTs: string) => Promise<ClosingDelegation[]>;
     onTurnStart?: (threadTs: string) => Promise<void>;
     onTurnEnd?: (threadTs: string) => Promise<void>;
   } = {},
@@ -104,7 +105,7 @@ const makeHarness = (
     warmTtlMs: TTL,
     liveSessionCap: options.cap ?? 5,
     autoCloseAfterMs: options.autoCloseMs ?? 7 * DAY,
-    countDelegations: options.countDelegations ?? (() => 0),
+    listDelegations: options.listDelegations ?? (() => Promise.resolve([])),
     onTurnStart:
       options.onTurnStart ??
       ((threadTs) => {
@@ -241,7 +242,7 @@ describe('SessionManager', () => {
       warmTtlMs: TTL,
       liveSessionCap: 5,
       autoCloseAfterMs: 7 * DAY,
-      countDelegations: () => 0,
+      listDelegations: () => Promise.resolve([]),
       onTurnStart: () => Promise.resolve(),
       onTurnEnd: () => Promise.resolve(),
       logger: createLogger('silent'),
@@ -550,7 +551,7 @@ describe('SessionManager close (spec §3)', () => {
       threadTs: THREAD,
       text:
         '🔚 Session closed.\n' +
-        '• 0 delegations\n' +
+        '• no delegations\n' +
         '• thread cost: $2.50 · 2 turns\n' +
         'Mention me on a new root message to start again.',
     });
@@ -559,9 +560,30 @@ describe('SessionManager close (spec §3)', () => {
     expect(manager.liveProcessCount()).toBe(0);
   });
 
-  it('the 🔚 summary counts the thread delegations from the #19 ledger', async () => {
+  it('the 🔚 summary names each ledger delegation with its outcome (issue #51)', async () => {
     const { manager, notices } = makeHarness(costedScript, {
-      countDelegations: (threadTs) => (threadTs === THREAD ? 2 : 0),
+      listDelegations: (threadTs) =>
+        Promise.resolve(
+          threadTs === THREAD
+            ? ([
+                {
+                  repo: 'forwardly',
+                  issueNumber: 84,
+                  worktreeName: 'forwardly-84-csv-export',
+                  taskId: 'task_a1',
+                  status: 'completed',
+                  issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+                },
+                {
+                  repo: 'notes',
+                  issueNumber: 7,
+                  worktreeName: null,
+                  taskId: 'task_b2',
+                  status: 'dispatched',
+                },
+              ] satisfies ClosingDelegation[])
+            : [],
+        ),
     });
     manager.open(THREAD, CHANNEL, USER, 'first');
     await flush();
@@ -569,7 +591,23 @@ describe('SessionManager close (spec §3)', () => {
     manager.close(THREAD, CHANNEL);
     await flush();
 
-    expect(notices.at(-1)?.text).toContain('• 2 delegations');
+    expect(notices.at(-1)?.text).toContain(
+      '• ✅ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n',
+    );
+    expect(notices.at(-1)?.text).toContain('• ⚙️ notes#7 — still in flight\n');
+  });
+
+  it('a failing outcome read never blocks the close', async () => {
+    const { manager, store } = makeHarness(costedScript, {
+      listDelegations: () => Promise.reject(new Error('orca down')),
+    });
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+
+    manager.close(THREAD, CHANNEL);
+    await flush();
+
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
   });
 
   it('close during a turn waits for the turn to finish — never a mid-turn kill', async () => {

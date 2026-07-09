@@ -71,25 +71,100 @@ describe('CLOSED_THREAD_LINE', () => {
 });
 
 describe('closingSummary', () => {
-  it('follows the UX mock shape (docs/prototypes/slack-ux, explicit close)', () => {
-    expect(closingSummary({ delegations: 0, costUsd: 6.84, turnCount: 19 })).toBe(
+  const delegation = {
+    repo: 'forwardly',
+    issueNumber: 84,
+    worktreeName: 'forwardly-84-csv-export',
+    taskId: 'task_a1b2c3d4e5f6',
+    status: 'completed',
+  } as const;
+
+  it('names each delegation with its outcome and issue link (issue #51, explicit close mock)', () => {
+    const summary = closingSummary({
+      delegations: [
+        { ...delegation, issueUrl: 'https://github.com/lemlist/forwardly/issues/84' },
+        {
+          ...delegation,
+          issueNumber: 91,
+          issueUrl: 'https://github.com/lemlist/forwardly/issues/91',
+        },
+      ],
+      costUsd: 6.84,
+      turnCount: 19,
+    });
+
+    expect(summary).toBe(
       '🔚 Session closed.\n' +
-        '• 0 delegations\n' +
+        '• ✅ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+        '• ✅ <https://github.com/lemlist/forwardly/issues/91|forwardly#91>\n' +
         '• thread cost: $6.84 · 19 turns\n' +
         'Mention me on a new root message to start again.',
     );
   });
 
-  it('goes singular for one delegation and one turn', () => {
-    const summary = closingSummary({ delegations: 1, costUsd: 0.5, turnCount: 1 });
+  it('marks a failed delegation ❌ and an in-flight one ⚙️ — the card vocabulary', () => {
+    const summary = closingSummary({
+      delegations: [
+        {
+          ...delegation,
+          status: 'failed',
+          issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+        },
+        { ...delegation, issueNumber: 91, status: 'dispatched' },
+      ],
+      costUsd: 1.2,
+      turnCount: 3,
+    });
 
-    expect(summary).toContain('• 1 delegation\n');
+    expect(summary).toContain(
+      '• ❌ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n',
+    );
+    expect(summary).toContain('• ⚙️ forwardly#91 — still in flight\n');
+  });
+
+  it('degrades to plain repo#n for a folder repo without a remote, like the card', () => {
+    const summary = closingSummary({
+      delegations: [{ ...delegation }],
+      costUsd: 0.5,
+      turnCount: 2,
+    });
+
+    expect(summary).toContain('• ✅ forwardly#84\n');
+    expect(summary).not.toContain('<');
+  });
+
+  it('falls back to the worktree name, then the task id, when the row never resolved repo#n', () => {
+    const summary = closingSummary({
+      delegations: [
+        { ...delegation, repo: null },
+        { ...delegation, repo: null, worktreeName: null },
+      ],
+      costUsd: 0.5,
+      turnCount: 2,
+    });
+
+    expect(summary).toContain('• ✅ `forwardly-84-csv-export`\n');
+    expect(summary).toContain('• ✅ task_a1b2c3d4e5f6\n');
+  });
+
+  it('keeps the summary shape when the thread never delegated', () => {
+    expect(closingSummary({ delegations: [], costUsd: 6.84, turnCount: 19 })).toBe(
+      '🔚 Session closed.\n' +
+        '• no delegations\n' +
+        '• thread cost: $6.84 · 19 turns\n' +
+        'Mention me on a new root message to start again.',
+    );
+  });
+
+  it('goes singular for one turn', () => {
+    const summary = closingSummary({ delegations: [], costUsd: 0.5, turnCount: 1 });
+
     expect(summary).toContain('· 1 turn\n');
   });
 
   it('names the dormancy span when the auto-close sweep is the closer', () => {
     const summary = closingSummary({
-      delegations: 0,
+      delegations: [],
       costUsd: 2.1,
       turnCount: 4,
       dormantDays: 7,
@@ -99,7 +174,7 @@ describe('closingSummary', () => {
   });
 
   it('always shows the cost with two decimals', () => {
-    expect(closingSummary({ delegations: 0, costUsd: 5, turnCount: 2 })).toContain('$5.00');
+    expect(closingSummary({ delegations: [], costUsd: 5, turnCount: 2 })).toContain('$5.00');
   });
 });
 

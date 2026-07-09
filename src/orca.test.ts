@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createLogger } from './logger.ts';
 import {
   listOrchestrationTasks,
   listRegistryRepos,
@@ -6,6 +7,7 @@ import {
   listWorktreeProcesses,
   readTerminalTail,
   registryIssueUrl,
+  safeRegistryIssueUrls,
   type CommandRunner,
 } from './orca.ts';
 
@@ -141,6 +143,79 @@ describe('registryIssueUrl', () => {
   it('is undefined for a folder repo without a remote, or an unknown repo', async () => {
     await expect(registryIssueUrl(succeedWith(registry), 'scratch', 21)).resolves.toBeUndefined();
     await expect(registryIssueUrl(succeedWith(registry), 'ghost', 1)).resolves.toBeUndefined();
+  });
+});
+
+describe('safeRegistryIssueUrls (issue #51)', () => {
+  const logger = createLogger('silent');
+  const registry = registryJson([
+    {
+      id: 'u1',
+      displayName: 'forwardly',
+      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+    },
+    { id: 'u2', displayName: 'scratch' },
+  ]);
+
+  const countingRunner = (stdout: string): { run: CommandRunner; calls: () => number } => {
+    let calls = 0;
+    return {
+      run: () => {
+        calls += 1;
+        return Promise.resolve({ stdout });
+      },
+      calls: () => calls,
+    };
+  };
+
+  it('links every row off one registry read; folder repos stay plain', async () => {
+    const { run, calls } = countingRunner(registry);
+
+    const rows = await safeRegistryIssueUrls(run, logger, [
+      { repo: 'forwardly', issueNumber: 84 },
+      { repo: 'forwardly', issueNumber: 91 },
+      { repo: 'scratch', issueNumber: 21 },
+    ]);
+
+    expect(rows).toEqual([
+      {
+        repo: 'forwardly',
+        issueNumber: 84,
+        issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+      },
+      {
+        repo: 'forwardly',
+        issueNumber: 91,
+        issueUrl: 'https://github.com/lemlist/forwardly/issues/91',
+      },
+      { repo: 'scratch', issueNumber: 21 },
+    ]);
+    expect(calls()).toBe(1);
+  });
+
+  it('leaves rows without a linkable repo untouched — and skips the CLI entirely', async () => {
+    const { run, calls } = countingRunner(registry);
+
+    const rows = await safeRegistryIssueUrls(run, logger, [
+      { repo: null, issueNumber: 84 },
+      { repo: 'forwardly', issueNumber: null },
+    ]);
+
+    expect(rows).toEqual([
+      { repo: null, issueNumber: 84 },
+      { repo: 'forwardly', issueNumber: null },
+    ]);
+    expect(calls()).toBe(0);
+    await expect(safeRegistryIssueUrls(run, logger, [])).resolves.toEqual([]);
+    expect(calls()).toBe(0);
+  });
+
+  it('degrades every link at once when Orca is unreachable — never a throw', async () => {
+    const down: CommandRunner = () => Promise.reject(new Error('orca down'));
+
+    await expect(
+      safeRegistryIssueUrls(down, logger, [{ repo: 'forwardly', issueNumber: 84 }]),
+    ).resolves.toEqual([{ repo: 'forwardly', issueNumber: 84 }]);
   });
 });
 
