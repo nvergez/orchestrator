@@ -331,13 +331,52 @@ export const CLOSED_THREAD_LINE =
   'Session closed. Mention me on a new root message to start again.';
 
 /**
+ * One ledger delegation as the 🔚 summary names it (issue #51): the fields
+ * `DelegationRow` durably holds, plus the registry-derived issue link — absent
+ * for a folder repo without a remote, so the line degrades to the plain
+ * `repo#n` exactly like the card.
+ */
+export interface ClosingDelegation {
+  repo: string | null;
+  issueNumber: number | null;
+  /** The naming fallback for a row that never resolved a `repo#n`. */
+  worktreeName: string | null;
+  taskId: string;
+  status: 'dispatched' | 'completed' | 'failed';
+  /** `https://…/issues/<n>` when the repo has a GitHub remote. */
+  issueUrl?: string;
+}
+
+/** The card vocabulary (spec §8): ✅ done · ❌ failed · ⚙️ still in flight. */
+const CLOSING_STATUS_ICON = { completed: '✅', failed: '❌', dispatched: '⚙️' } as const;
+
+/** `• ✅ <url|repo#n>` — one delegation's line in the 🔚 summary (issue #51). */
+function closingDelegationLine(delegation: ClosingDelegation): string {
+  const plainRef =
+    delegation.repo !== null && delegation.issueNumber !== null
+      ? `${delegation.repo}#${delegation.issueNumber}`
+      : null;
+  const name =
+    plainRef !== null
+      ? delegation.issueUrl === undefined
+        ? plainRef
+        : `<${delegation.issueUrl}|${plainRef}>`
+      : delegation.worktreeName !== null
+        ? `\`${delegation.worktreeName}\``
+        : delegation.taskId;
+  const tail = delegation.status === 'dispatched' ? ' — still in flight' : '';
+  return `• ${CLOSING_STATUS_ICON[delegation.status]} ${name}${tail}`;
+}
+
+/**
  * "Brief moments" — the 🔚 closing summary, posted by an explicit
  * `@orchestrator close` or by the dormancy auto-close (which names its
- * reason). The count now comes from the delegations ledger (#19); listing
- * each delegation with its PR link like the mock waits for #20's results.
+ * reason). Each of the thread's delegations gets its own line with the final
+ * outcome and issue link (issue #51, from the #19 ledger) — the thread's
+ * durable at-a-glance record; the cost/turn line stays the mock's verbatim.
  */
 export function closingSummary(opts: {
-  delegations: number;
+  delegations: ClosingDelegation[];
   costUsd: number;
   turnCount: number;
   /** Set by the auto-close sweep — says why the session closed on its own. */
@@ -349,7 +388,9 @@ export function closingSummary(opts: {
       : `🔚 Session closed — dormant for ${formatDays(opts.dormantDays)}.`;
   return [
     header,
-    `• ${opts.delegations} delegation${opts.delegations === 1 ? '' : 's'}`,
+    ...(opts.delegations.length === 0
+      ? ['• no delegations']
+      : opts.delegations.map(closingDelegationLine)),
     `• thread cost: $${opts.costUsd.toFixed(2)} · ${opts.turnCount} turn${opts.turnCount === 1 ? '' : 's'}`,
     'Mention me on a new root message to start again.',
   ].join('\n');

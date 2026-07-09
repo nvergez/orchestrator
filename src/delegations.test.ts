@@ -175,19 +175,19 @@ describe('DelegationStore — delegations ledger', () => {
       }),
     );
 
-    expect(store.countForThread(THREAD)).toBe(1);
+    expect(store.listForThread(THREAD)).toHaveLength(1);
     expect(store.listForThread(THREAD)[0]?.issueNumber).toBeNull();
   });
 
-  it('scopes thread counts to the thread', () => {
+  it('scopes the thread ledger to the thread', () => {
     const store = openStore();
 
     store.recordDispatch(dispatchRow());
     store.recordDispatch(dispatchRow({ dispatchId: 'ctx_2', threadTs: '1751970099.000900' }));
 
-    expect(store.countForThread(THREAD)).toBe(1);
-    expect(store.countForThread('1751970099.000900')).toBe(1);
-    expect(store.countForThread('1751970098.000000')).toBe(0);
+    expect(store.listForThread(THREAD)).toHaveLength(1);
+    expect(store.listForThread('1751970099.000900')).toHaveLength(1);
+    expect(store.listForThread('1751970098.000000')).toHaveLength(0);
   });
 });
 

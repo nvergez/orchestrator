@@ -187,6 +187,38 @@ export async function safeRegistryIssueUrl(
   }
 }
 
+/**
+ * `safeRegistryIssueUrl` for a whole ledger slice on ONE registry read
+ * (issue #51): the 🔚 close summary links every delegation at once, where
+ * per-row lookups would cost one `orca repo list` each. Same degradation,
+ * batch-wide: a row without a linkable repo, a folder repo with no remote,
+ * or an unreachable Orca (warned) leaves `issueUrl` unset and the rendering
+ * falls back to the plain `repo#n`.
+ */
+export async function safeRegistryIssueUrls<
+  Row extends { repo: string | null; issueNumber: number | null },
+>(run: CommandRunner, logger: Logger, rows: Row[]): Promise<Array<Row & { issueUrl?: string }>> {
+  if (!rows.some((row) => row.repo !== null && row.issueNumber !== null)) return rows;
+  let registry: RegistryRepo[];
+  try {
+    registry = await listRegistryRepos(run);
+  } catch (error) {
+    logger.warn({ err: error }, 'registry lookup for the issue links failed — plain references');
+    return rows;
+  }
+  const keysByName = new Map(
+    registry.flatMap((repo) =>
+      repo.canonicalKey === undefined ? [] : [[repo.name, repo.canonicalKey] as const],
+    ),
+  );
+  return rows.map((row) => {
+    const key = row.repo === null ? undefined : keysByName.get(row.repo);
+    return key === undefined || row.issueNumber === null
+      ? row
+      : { ...row, issueUrl: `https://${key}/issues/${row.issueNumber}` };
+  });
+}
+
 /** The liveness signals `orca worktree ps` reports for one worktree —
  * everything the watchdog's staleness clock reads (issue #22). */
 export interface WorktreeActivity {

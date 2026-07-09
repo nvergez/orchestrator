@@ -7,6 +7,7 @@ import {
   closingSummary,
   costWarningLine,
   queuedLine,
+  type ClosingDelegation,
 } from './messages.ts';
 
 /**
@@ -84,8 +85,9 @@ export interface SessionManagerOptions {
   liveSessionCap: number;
   /** Dormancy span after which `sweepDormant` closes a session (spec §3, 7 days). */
   autoCloseAfterMs: number;
-  /** The thread's delegation count from the #19 ledger — the 🔚 summary's number. */
-  countDelegations: (threadTs: string) => number;
+  /** The thread's delegations from the #19 ledger, outcomes and issue links
+   * resolved — the 🔚 summary's per-delegation lines (issue #51). */
+  listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
   /** Turn-start ack (issue #49): 👀 on the root before the turn produces
    * anything — awaited ahead of the slot wait so even a queued message acks
    * within seconds. */
@@ -105,7 +107,7 @@ export class SessionManager {
   private readonly warmTtlMs: number;
   private readonly liveSessionCap: number;
   private readonly autoCloseAfterMs: number;
-  private readonly countDelegations: (threadTs: string) => number;
+  private readonly listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
   private readonly onTurnStart: (threadTs: string) => Promise<void>;
   private readonly onTurnEnd: (threadTs: string) => Promise<void>;
   private readonly logger: Logger;
@@ -129,7 +131,7 @@ export class SessionManager {
     this.warmTtlMs = options.warmTtlMs;
     this.liveSessionCap = options.liveSessionCap;
     this.autoCloseAfterMs = options.autoCloseAfterMs;
-    this.countDelegations = options.countDelegations;
+    this.listDelegations = options.listDelegations;
     this.onTurnStart = options.onTurnStart;
     this.onTurnEnd = options.onTurnEnd;
     this.logger = options.logger;
@@ -252,13 +254,14 @@ export class SessionManager {
     });
   }
 
-  /** Posts the 🔚 summary from the ledger row; a failed post never blocks the close. */
+  /** Posts the 🔚 summary from the ledger row; a failed outcome read or post
+   * never blocks the close. */
   private async postClosingSummary(row: SessionRow, dormantDays?: number): Promise<void> {
     try {
       await this.notify(
         row.threadTs,
         closingSummary({
-          delegations: this.countDelegations(row.threadTs),
+          delegations: await this.listDelegations(row.threadTs),
           costUsd: row.costUsdTotal,
           turnCount: row.turnCount,
           dormantDays,

@@ -424,13 +424,6 @@ export class DelegationStore {
     return rows.map(toDelegationRow);
   }
 
-  countForThread(threadTs: string): number {
-    const row = this.db
-      .prepare('SELECT COUNT(*) AS n FROM delegations WHERE thread_ts = ?')
-      .get(threadTs) as { n: number };
-    return Number(row.n);
-  }
-
   /** The thread's mailbox terminal handle, if one was ever created (issue #9). */
   getMailbox(threadTs: string): string | undefined {
     const row = this.db
