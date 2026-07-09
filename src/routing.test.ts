@@ -216,4 +216,10 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('never repeat the card');
     expect(prompt).toContain('end your turn');
   });
+
+  it('pins option fidelity on the reply AND the terminal-send fallback (issue #50)', () => {
+    expect(prompt).toContain("the daemon substitutes that option's exact text itself");
+    expect(prompt).toContain('on the fallback send too');
+    expect(prompt).toContain('the same option substitution applies to its --text');
+  });
 });
