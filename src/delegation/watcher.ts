@@ -4,7 +4,7 @@ import {
   gateRelayMessage,
   workerDoneFallbackLine,
   worktreeKeptLine,
-} from './messages.ts';
+} from '../kernel/messages.ts';
 import {
   execFileRunner,
   makeExecFileRunner,
@@ -12,10 +12,10 @@ import {
   removeWorktree,
   safeRegistryIssueUrl,
   type CommandRunner,
-} from './orca.ts';
+} from '../kernel/orca.ts';
 import type { DelegationRow, DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
 import type { DelegationSurface } from './dispatch.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * The per-thread gate watcher (spec §6, issue #20): "the daemon listens, the

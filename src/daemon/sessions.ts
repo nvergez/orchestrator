@@ -1,6 +1,6 @@
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 import type { SessionRow, SessionStore } from './db.ts';
-import { DAY_MS } from './config.ts';
+import { DAY_MS } from '../kernel/config.ts';
 import { crossedThresholds } from './cost.ts';
 import {
   CLOSED_THREAD_LINE,
@@ -8,7 +8,7 @@ import {
   costWarningLine,
   queuedLine,
   type ClosingDelegation,
-} from './messages.ts';
+} from '../kernel/messages.ts';
 
 /**
  * The session manager — one Claude Code session per Slack thread (spec §3).

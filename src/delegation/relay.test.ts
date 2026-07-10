@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
 import { GateRelay } from './relay.ts';
 import type { ReactionSurface } from './watcher.ts';

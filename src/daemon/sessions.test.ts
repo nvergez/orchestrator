@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { SessionStore } from './db.ts';
-import type { ClosingDelegation } from './messages.ts';
+import type { ClosingDelegation } from '../kernel/messages.ts';
 import {
   SessionManager,
   type Notifier,

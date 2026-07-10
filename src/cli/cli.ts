@@ -48,7 +48,7 @@ export function realCliDeps(): CliDeps {
     err,
     version: () => readPackageMeta().version,
     daemon: async () => {
-      const { runDaemon } = await import('./daemon.ts');
+      const { runDaemon } = await import('../daemon/daemon.ts');
       await runDaemon();
     },
     init: () => runInit(process.env, { out }),

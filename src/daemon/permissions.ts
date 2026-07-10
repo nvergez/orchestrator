@@ -5,13 +5,13 @@ import type {
   HookInput,
   HookJSONOutput,
 } from '@anthropic-ai/claude-agent-sdk';
-import { classifyCommand, describeGate, extractDelegationRepoRefs } from './guardrails.ts';
-import { gateLine } from './messages.ts';
+import { classifyCommand, describeGate, extractDelegationRepoRefs } from '../kernel/guardrails.ts';
+import { gateLine } from '../kernel/messages.ts';
 import type { GateRequester } from './gate.ts';
-import type { DelegationVerdict } from './routing.ts';
-import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
-import type { RelayObserver, RelayPolicy } from './relay.ts';
-import type { Logger } from './logger.ts';
+import type { DelegationVerdict } from '../kernel/routing.ts';
+import type { DispatchObserver, DispatchPreparer } from '../delegation/dispatch.ts';
+import type { RelayObserver, RelayPolicy } from '../delegation/relay.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /** The slice of RepoAllowList this hook consults for every delegation. */
 export interface DelegationPolicy {

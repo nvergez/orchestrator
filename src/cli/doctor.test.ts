@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseEnvFile, runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
-import { RoutingHintsError, type RepoHint } from './routing.ts';
+import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
 

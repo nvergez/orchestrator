@@ -3,13 +3,13 @@ import {
   type Query,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
-import type { DispatchObserver, DispatchPreparer } from './dispatch.ts';
+import type { DispatchObserver, DispatchPreparer } from '../delegation/dispatch.ts';
 import type { SessionGates } from './gate.ts';
-import type { SessionRelay } from './relay.ts';
+import type { SessionRelay } from '../delegation/relay.ts';
 
 /** The coordinator slice a session process holds (issue #19). */
 export type SessionDelegations = DispatchPreparer & DispatchObserver;

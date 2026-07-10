@@ -1,23 +1,23 @@
 import { App } from '@slack/bolt';
 import { pino } from 'pino';
-import { ConfigError, loadConfig, type Config } from './config.ts';
-import { createLogger, toBoltLogger } from './logger.ts';
+import { ConfigError, loadConfig, type Config } from '../kernel/config.ts';
+import { createLogger, toBoltLogger } from '../kernel/logger.ts';
 import { registerHandlers } from './app.ts';
-import { reportOrcaHealth } from './orca-health.ts';
+import { reportOrcaHealth } from '../kernel/orca-health.ts';
 import { SessionStore } from './db.ts';
-import { DelegationStore } from './delegations.ts';
-import { DelegationCoordinator } from './dispatch.ts';
+import { DelegationStore } from '../delegation/delegations.ts';
+import { DelegationCoordinator } from '../delegation/dispatch.ts';
 import { SessionManager } from './sessions.ts';
-import { ackTurnStart, GateWatcher, settleTurnEnd } from './watcher.ts';
-import { BootReconciler } from './reconcile.ts';
-import { Watchdog } from './watchdog.ts';
-import { GateRelay } from './relay.ts';
+import { ackTurnStart, GateWatcher, settleTurnEnd } from '../delegation/watcher.ts';
+import { BootReconciler } from '../delegation/reconcile.ts';
+import { Watchdog } from '../delegation/watchdog.ts';
+import { GateRelay } from '../delegation/relay.ts';
 import { createProcessFactory } from './claude.ts';
-import { execFileRunner, safeRegistryIssueUrls } from './orca.ts';
+import { execFileRunner, safeRegistryIssueUrls } from '../kernel/orca.ts';
 import { GateKeeper } from './gate.ts';
 import { Voice } from './voice.ts';
-import { loadRoutingHints, RepoAllowList, routingInstructions } from './routing.ts';
-import { resolveRoutingHintsPath } from './xdg.ts';
+import { loadRoutingHints, RepoAllowList, routingInstructions } from '../kernel/routing.ts';
+import { resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
 /** The daemon boot — what bare `orc` runs (the CLI dispatch lives in cli.ts). */
 export async function runDaemon(): Promise<void> {

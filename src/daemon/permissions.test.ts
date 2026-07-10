@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { GateVerdict } from './gate.ts';
-import type { DispatchObserver, DispatchPreparer, PrepareVerdict } from './dispatch.ts';
-import type { DelegationVerdict } from './routing.ts';
-import type { SessionRelay } from './relay.ts';
+import type { DispatchObserver, DispatchPreparer, PrepareVerdict } from '../delegation/dispatch.ts';
+import type { DelegationVerdict } from '../kernel/routing.ts';
+import type { SessionRelay } from '../delegation/relay.ts';
 
 const THREAD = '1751970000.000100';
 

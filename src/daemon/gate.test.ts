@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { GateKeeper, isApproval } from './gate.ts';
 
 const THREAD = '1751970000.000100';

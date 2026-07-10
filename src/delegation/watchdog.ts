@@ -1,4 +1,4 @@
-import { inflightWorkerAlert, stalledWorkerAlert } from './messages.ts';
+import { inflightWorkerAlert, stalledWorkerAlert } from '../kernel/messages.ts';
 import {
   execFileRunner,
   listWorktreeActivity,
@@ -6,10 +6,10 @@ import {
   safeRegistryIssueUrl,
   type CommandRunner,
   type WorktreeActivity,
-} from './orca.ts';
+} from '../kernel/orca.ts';
 import { settleRootReaction, type WatcherSurface } from './watcher.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * The second detection layer of spec §5 (issue #22): the authority layer

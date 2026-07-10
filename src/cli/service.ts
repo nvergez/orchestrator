@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, mkdirSync, realpathSync, rmSync, sta
 import { homedir, userInfo } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileRunner, type CommandRunner } from './orca.ts';
+import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { readPackageMeta } from './pkg.ts';
 
 /**
@@ -111,7 +111,7 @@ export function realServiceDeps(): ServiceDeps {
     run: execFileRunner,
     execPath: process.execPath,
     which: (name) => whichBinary(name, process.env.PATH),
-    resolveEntry: () => realpathSync(fileURLToPath(new URL('../dist/index.js', import.meta.url))),
+    resolveEntry: () => realpathSync(fileURLToPath(new URL('../../dist/index.js', import.meta.url))),
     writeUnit: (unitPath, content) => {
       mkdirSync(dirname(unitPath), { recursive: true });
       writeFileSync(unitPath, content);

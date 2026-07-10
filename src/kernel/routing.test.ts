@@ -92,7 +92,7 @@ describe('parseRoutingHints', () => {
 describe('loadRoutingHints', () => {
   it('loads the shipped routing-hints.example.json — the example must stay valid', () => {
     const hints = loadRoutingHints(
-      fileURLToPath(new URL('../routing-hints.example.json', import.meta.url)),
+      fileURLToPath(new URL('../../routing-hints.example.json', import.meta.url)),
     );
     expect(hints.map((h) => h.name)).toEqual(['webapp', 'sandbox']);
     // Issue #10: all-claude at the start — no per-repo default set.

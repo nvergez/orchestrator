@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { makeExecFileRunner, type CommandRunner } from './orca.ts';
+import { makeExecFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { readPackageMeta } from './pkg.ts';
 import { systemdUnitPath } from './service.ts';
 
@@ -57,7 +57,7 @@ export function realUpdateDeps(): UpdateDeps {
         child.once('error', reject);
         child.once('close', (code) => resolve(code ?? 1));
       }),
-    packageRoot: () => realpathSync(fileURLToPath(new URL('..', import.meta.url))),
+    packageRoot: () => realpathSync(fileURLToPath(new URL('../..', import.meta.url))),
     realpath: (path) => {
       try {
         return realpathSync(path);

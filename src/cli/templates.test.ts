@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parseRoutingHints } from './routing.ts';
+import { parseRoutingHints } from '../kernel/routing.ts';
 import { ENV_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
 
 describe('ROUTING_HINTS_TEMPLATE', () => {
@@ -16,7 +16,7 @@ describe('ROUTING_HINTS_TEMPLATE', () => {
 
   it('is byte-identical to the shipped routing-hints.example.json browsing aid', () => {
     const example = readFileSync(
-      fileURLToPath(new URL('../routing-hints.example.json', import.meta.url)),
+      fileURLToPath(new URL('../../routing-hints.example.json', import.meta.url)),
       'utf8',
     );
     expect(example).toBe(ROUTING_HINTS_TEMPLATE);

@@ -1,5 +1,5 @@
-import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from './guardrails.ts';
-import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from './messages.ts';
+import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
+import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from '../kernel/messages.ts';
 import {
   createTerminal,
   execFileRunner,
@@ -7,9 +7,9 @@ import {
   listRegistryRepos,
   parseOrcaEnvelope,
   type CommandRunner,
-} from './orca.ts';
+} from '../kernel/orca.ts';
 import type { DelegationStore } from './delegations.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * The daemon half of the delegation happy path (spec §5, issue #19). The

@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ENV_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
-import { resolveConfigDir } from './xdg.ts';
+import { resolveConfigDir } from '../kernel/xdg.ts';
 
 /**
  * `orc init` (issue #70): scaffold the XDG config dir with both instance

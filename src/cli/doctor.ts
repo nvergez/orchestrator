@@ -1,13 +1,13 @@
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
-import { ConfigError, loadConfig } from './config.ts';
-import { execFileRunner, type CommandRunner } from './orca.ts';
-import { probeOrca } from './orca-health.ts';
+import { ConfigError, loadConfig } from '../kernel/config.ts';
+import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
+import { probeOrca } from '../kernel/orca-health.ts';
 import { readPackageMeta } from './pkg.ts';
-import { loadRoutingHints, RoutingHintsError, type RepoHint } from './routing.ts';
+import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 import { systemdUnitPath } from './service.ts';
-import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from './xdg.ts';
+import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
 /**
  * `orc doctor` (issue #70 + #74 addendum): read-only diagnosis of the

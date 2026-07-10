@@ -1,8 +1,8 @@
 import type { App } from '@slack/bolt';
 import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
-import { refusalLine } from './messages.ts';
+import { refusalLine } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 import type { CloseResult, ReplyResult } from './sessions.ts';
 
 /** The slice of SessionManager the event handlers drive. */

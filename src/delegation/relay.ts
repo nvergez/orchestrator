@@ -1,9 +1,9 @@
-import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from './guardrails.ts';
-import { parseOrcaEnvelope } from './orca.ts';
+import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
+import { parseOrcaEnvelope } from '../kernel/orca.ts';
 import { settleRootReaction, type ReactionSurface } from './watcher.ts';
 import { worktreeIssueRef, type PrepareVerdict } from './dispatch.ts';
 import type { DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * The route-back-down half of the gate relay (spec §6, issue #21). The

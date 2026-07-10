@@ -1,4 +1,4 @@
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * The 🚦 confirm gate (spec §7/§8): a CONFIRM-tier command suspends inside

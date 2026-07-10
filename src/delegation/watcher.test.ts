@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
 import {
   ackTurnStart,
@@ -8,7 +8,7 @@ import {
   type WakeResult,
   type WatcherSurface,
 } from './watcher.ts';
-import type { CommandRunner } from './orca.ts';
+import type { CommandRunner } from '../kernel/orca.ts';
 
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';

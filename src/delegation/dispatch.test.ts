@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { createLogger } from './logger.ts';
+import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
 import { DelegationCoordinator, type DelegationSurface } from './dispatch.ts';
-import type { CommandRunner } from './orca.ts';
+import type { CommandRunner } from '../kernel/orca.ts';
 
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';

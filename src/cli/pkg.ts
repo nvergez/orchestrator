@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 
 /**
- * The package's own metadata, read from the package.json one level above
- * this module — the same relative hop from `src/` (dev runs) and from the
- * compiled `dist/` (installed runs), so `orc --version` needs no config,
- * no env, and no loose files in the tarball (issues #69/#70).
+ * The package's own metadata, read from the package.json two levels above
+ * this module — the same relative hop from `src/cli/` (dev runs) and from
+ * the compiled `dist/cli/` (installed runs), so `orc --version` needs no
+ * config, no env, and no loose files in the tarball (issues #69/#70).
  */
 
 export interface PackageMeta {
@@ -25,7 +25,7 @@ function releasesUrlFrom(repositoryUrl: unknown): string | undefined {
 }
 
 export function readPackageMeta(): PackageMeta {
-  const raw = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
+  const raw = readFileSync(new URL('../../package.json', import.meta.url), 'utf8');
   const pkg = JSON.parse(raw) as {
     name?: unknown;
     version?: unknown;

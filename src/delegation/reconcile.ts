@@ -1,4 +1,4 @@
-import { formatDuration, restartNotice } from './messages.ts';
+import { formatDuration, restartNotice } from '../kernel/messages.ts';
 import {
   execFileRunner,
   listOrchestrationTasks,
@@ -6,7 +6,7 @@ import {
   listWorktreeProcesses,
   type CommandRunner,
   type WorktreeProcess,
-} from './orca.ts';
+} from '../kernel/orca.ts';
 import {
   applyRootReaction,
   cleanupDeliveredWorktree,
@@ -17,7 +17,7 @@ import {
   type WatcherSurface,
 } from './watcher.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
-import type { Logger } from './logger.ts';
+import type { Logger } from '../kernel/logger.ts';
 
 /**
  * Boot reconciliation (spec §7, issue #25): workers are independent
