@@ -7,9 +7,10 @@ import type { Logger } from './logger.ts';
  * envelope decoder, and the daemon-side calls — `repo list` for the boot
  * healthcheck (orca-health.ts) and the routing allow-list (routing.ts),
  * terminal list/create for the delegation coordinator's mailboxes
- * (dispatch.ts), worktree rm for the success cleanup (watcher.ts, issue
- * #43). Spec §10: every orca call is wrapped — callers turn a throw into a
- * log line or a fail-closed denial, never a crash.
+ * (dispatch.ts), worktree rm for the success cleanup (thread-surface.ts,
+ * issue #43), and the orchestration bus reading shared by the gate watcher
+ * and boot reconciliation. Spec §10: every orca call is wrapped — callers
+ * turn a throw into a log line or a fail-closed denial, never a crash.
  */
 
 /** Command-runner seam: resolves with stdout, rejects like execFile does. */
@@ -354,6 +355,86 @@ export async function listLiveTerminalHandles(run: CommandRunner): Promise<Set<s
       return typeof handle === 'string' ? [handle] : [];
     }),
   );
+}
+
+/** One readable message off the orchestration bus, as `orchestration check
+ * --json` reports it. */
+export interface OrchestrationMessage {
+  id: string;
+  type: string;
+  subject: string;
+  body: string;
+  /** The sending terminal — the asking worker, for a gate's route-back. */
+  fromHandle?: string;
+  payload: { taskId?: string; dispatchId?: string; question?: string; options?: string[] };
+}
+
+/**
+ * `orchestration check --json` stdout → the readable bus messages, with the
+ * raw array riding along for the caller's dropped-entries log line. Throws
+ * on a shapeless envelope. Shared by the gate watcher's `check --wait`
+ * windows and boot reconciliation's read-only `check --all` peek (issue
+ * #25) — the same message shape either way.
+ */
+export function readCheckMessages(stdout: string): {
+  messages: OrchestrationMessage[];
+  raw: unknown[];
+} {
+  const raw = parseOrcaEnvelope(stdout)?.messages;
+  if (!Array.isArray(raw)) {
+    throw new Error('unexpected `orca orchestration check` response shape');
+  }
+  return { messages: raw.flatMap(readMessage), raw };
+}
+
+/** One raw bus message → the readable shape; unreadable entries drop, logged upstream. */
+function readMessage(raw: unknown): OrchestrationMessage[] {
+  const record = raw as {
+    id?: unknown;
+    type?: unknown;
+    subject?: unknown;
+    body?: unknown;
+    from_handle?: unknown;
+    payload?: unknown;
+  };
+  if (typeof record.id !== 'string' || typeof record.type !== 'string') return [];
+  return [
+    {
+      id: record.id,
+      type: record.type,
+      subject: typeof record.subject === 'string' ? record.subject : '',
+      body: typeof record.body === 'string' ? record.body : '',
+      ...(typeof record.from_handle === 'string' && { fromHandle: record.from_handle }),
+      payload: readPayload(record.payload),
+    },
+  ];
+}
+
+/**
+ * The bus serializes `payload` as a JSON string — `{taskId, dispatchId}` on
+ * worker events, plus `{question, options}` on an `ask` (issue #21).
+ */
+function readPayload(raw: unknown): OrchestrationMessage['payload'] {
+  if (typeof raw !== 'string') return {};
+  try {
+    const parsed = JSON.parse(raw) as {
+      taskId?: unknown;
+      dispatchId?: unknown;
+      question?: unknown;
+      options?: unknown;
+    };
+    const options = Array.isArray(parsed.options)
+      ? parsed.options.filter((option): option is string => typeof option === 'string')
+      : undefined;
+    return {
+      ...(typeof parsed.taskId === 'string' && { taskId: parsed.taskId }),
+      ...(typeof parsed.dispatchId === 'string' && { dispatchId: parsed.dispatchId }),
+      ...(typeof parsed.question === 'string' && { question: parsed.question }),
+      ...(options !== undefined && options.length > 0 && { options }),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /** Creates a titled terminal in a worktree; resolves with its runtime handle. */

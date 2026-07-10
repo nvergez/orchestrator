@@ -1,20 +1,14 @@
-import {
-  completedCard,
-  extractPullRequestLinks,
-  gateRelayMessage,
-  workerDoneFallbackLine,
-  worktreeKeptLine,
-} from '../kernel/messages.ts';
+import { gateRelayMessage, workerDoneFallbackLine } from '../kernel/messages.ts';
 import {
   execFileRunner,
   makeExecFileRunner,
-  parseOrcaEnvelope,
-  removeWorktree,
+  readCheckMessages,
   safeRegistryIssueUrl,
   type CommandRunner,
+  type OrchestrationMessage,
 } from '../kernel/orca.ts';
-import type { DelegationRow, DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
-import type { DelegationSurface } from './dispatch.ts';
+import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
+import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
 /**
@@ -26,19 +20,18 @@ import type { Logger } from '../kernel/logger.ts';
  * the window simply respawns; the loop stops on its own once the thread has
  * no in-flight work left.
  *
- * A `worker_done` closes the ledger row, flips the delegation card to its
- * final ✅/❌ state (the durable home for links), swaps the root reaction,
- * and wakes the session through the SAME input pipe as a human message —
- * the session's voice writes the short summary; the daemon only posts one
- * itself when no session can take the wake. A delivered delegation's
- * worktree is then removed (issue #43); a failed one keeps its worktree
- * for debugging.
+ * A `worker_done` closes the ledger row, hands the card flip / root reaction
+ * / worktree cleanup to the thread surface, and wakes the session through
+ * the SAME input pipe as a human message — the session's voice writes the
+ * short summary; the daemon only posts one itself when no session can take
+ * the wake. A delivered delegation's worktree is then removed (issue #43); a
+ * failed one keeps its worktree for debugging.
  *
  * A `decision_gate`/`escalation` is relayed up in full (issue #21): the
  * daemon itself posts the fixed-contract gate message — the worker's
  * question VERBATIM, numbered options, the reply instruction — registers it
- * in the `pending_gates` table and sets the ❓/🚨 root reaction. Posting it
- * daemon-side is what makes the contract a guarantee: no paraphrase can
+ * in the `pending_gates` table and settles the ❓/🚨 root reaction. Posting
+ * it daemon-side is what makes the contract a guarantee: no paraphrase can
  * drift in, the registry captures the relay ts (spec §9), and a gate landing
  * on a closed or dead session is still never lost. No session turn runs at
  * relay time — the mock shows none — the session thinks at ANSWER time,
@@ -51,23 +44,12 @@ import type { Logger } from '../kernel/logger.ts';
  * unread when the re-armed check asks for it.
  */
 
-/** The reaction half of the Slack surface — add one, take a stale one off. */
-export interface ReactionSurface {
-  /** reactions.add on a message (the root: ts === threadTs). */
-  react(ts: string, name: string): Promise<void>;
-  /** reactions.remove on a message (the root: ts === threadTs). */
-  unreact(ts: string, name: string): Promise<void>;
-}
-
-/** The coordinator's Slack surface plus removal — how a stale root
- * reaction comes off when the state swaps (spec §8). */
-export interface WatcherSurface extends DelegationSurface, ReactionSurface {}
-
 export type WakeResult = 'turn' | 'skipped';
 
 export interface GateWatcherOptions {
   store: DelegationStore;
-  surface: WatcherSurface;
+  /** The thread surface — every card, reaction and cleanup decision. */
+  surface: ThreadSurface;
   /** Wakes the thread's session through the human-message pipe (spec §6). */
   wake: (threadTs: string, channelId: string, text: string) => WakeResult;
   /** A delegation left the in-flight set — frees a worker-cap slot (#19). */
@@ -96,253 +78,9 @@ const CHECK_GRACE_MS = 30_000;
  * it stamps the delegation's bus clock, the watchdog's in-flight-age source. */
 const WATCHED_TYPES = 'worker_done,escalation,decision_gate,heartbeat,status';
 
-/** The root reactions the daemon manages (spec §8) — one on, the rest off. */
-const ROOT_REACTIONS = ['eyes', 'white_check_mark', 'x', 'question', 'rotating_light'] as const;
-
-export type RootReaction = (typeof ROOT_REACTIONS)[number];
-
-/**
- * Adds the new root reaction, then clears the other managed ones — the
- * shared move behind every coarse-state swap (here and in the gate relay's
- * answer path). Both halves are best-effort: reactions are ambient state,
- * never worth failing an event over.
- */
-export async function applyRootReaction(
-  surface: ReactionSurface,
-  logger: Logger,
-  threadTs: string,
-  name: RootReaction,
-): Promise<void> {
-  try {
-    await surface.react(threadTs, name);
-  } catch (error) {
-    logger.debug({ err: error, threadTs, name }, 'root reaction add failed');
-  }
-  for (const stale of ROOT_REACTIONS) {
-    if (stale === name) continue;
-    try {
-      await surface.unreact(threadTs, stale);
-    } catch (error) {
-      // Usually Slack's no_reaction — the stale one simply wasn't set.
-      logger.debug({ err: error, threadTs, stale }, 'stale reaction removal skipped');
-    }
-  }
-}
-
-/** The registry slice the coarse-state computation reads. */
-export interface PendingStateStore {
-  listPendingGates(threadTs: string): PendingGateRow[];
-  listPendingStalls(threadTs: string): StallAlertRow[];
-}
-
-/**
- * The thread's honest coarse state while work is in flight, re-derived from
- * the registries and applied to the root (spec §8): 🚨 while an escalation
- * or a watchdog stall alert waits, ❓ while only questions do, 👀 otherwise.
- * Shared by every path that settles the root after a pending set changed —
- * a gate relayed or answered, a stall alerted or nudged, a sibling done.
- */
-export async function settleRootReaction(
-  store: PendingStateStore,
-  surface: ReactionSurface,
-  logger: Logger,
-  threadTs: string,
-): Promise<void> {
-  const gates = store.listPendingGates(threadTs);
-  const alarmed =
-    gates.some((gate) => gate.kind === 'escalation') ||
-    store.listPendingStalls(threadTs).length > 0;
-  const name: RootReaction = alarmed ? 'rotating_light' : gates.length > 0 ? 'question' : 'eyes';
-  await applyRootReaction(surface, logger, threadTs, name);
-}
-
-/** The registry slice the turn-end settle reads — in-flight work plus the
- * pending registries behind the coarse state. */
-export interface TurnAckStore extends PendingStateStore {
-  listInFlightForThread(threadTs: string): DelegationRow[];
-}
-
-/**
- * The turn-start ack (issue #49): 👀 on the root the moment ANY turn begins
- * — session open included — the channel-level "I'm on it" before any reply
- * text. Add-only, deliberately not `applyRootReaction`: the milestone/gate/
- * done flips own every coarse-state transition, so a pending ❓/🚨 or an
- * earlier ✅/❌ stays put next to the 👀. Best-effort like every reaction —
- * the usual failure is Slack's already_reacted, when the 👀 is simply on.
- */
-export async function ackTurnStart(
-  surface: Pick<ReactionSurface, 'react'>,
-  logger: Logger,
-  threadTs: string,
-): Promise<void> {
-  try {
-    await surface.react(threadTs, 'eyes');
-  } catch (error) {
-    logger.debug({ err: error, threadTs }, 'turn-start 👀 add failed (may already be set)');
-  }
-}
-
-/**
- * The turn-end counterpart (issue #49): a turn that ends with no delegation
- * in flight and nothing pending leaves no state worth signalling, so its 👀
- * comes off — a pure Q&A thread reads clean from the channel. Anything still
- * open leaves the root alone: the flips that manage in-flight state already
- * put the honest reaction there. Only the 👀 is touched — a ✅/❌ from an
- * earlier delegation survives as the thread's durable outcome.
- */
-export async function settleTurnEnd(
-  store: TurnAckStore,
-  surface: Pick<ReactionSurface, 'unreact'>,
-  logger: Logger,
-  threadTs: string,
-  /** Work the registries cannot see: a created-but-not-yet-dispatched
-   * worktree (the coordinator's create→dispatch window) has a 👀-backed
-   * card but no ledger row, and must keep its milestone 👀 on. */
-  hasUndispatchedWork = false,
-): Promise<void> {
-  if (
-    hasUndispatchedWork ||
-    store.listInFlightForThread(threadTs).length > 0 ||
-    store.listPendingGates(threadTs).length > 0 ||
-    store.listPendingStalls(threadTs).length > 0
-  ) {
-    return;
-  }
-  try {
-    await surface.unreact(threadTs, 'eyes');
-  } catch (error) {
-    // Usually Slack's no_reaction — a flip already took the 👀 off.
-    logger.debug({ err: error, threadTs }, 'turn-end 👀 removal skipped');
-  }
-}
-
-export interface OrchestrationMessage {
-  id: string;
-  type: string;
-  subject: string;
-  body: string;
-  /** The sending terminal — the asking worker, for a gate's route-back. */
-  fromHandle?: string;
-  payload: { taskId?: string; dispatchId?: string; question?: string; options?: string[] };
-}
-
-/**
- * The dispatch preamble's failure contract (issue #20): failure is still a
- * worker_done — a subject shaped "Failed: <reason>" is the only signal
- * there is. One predicate so the watcher and boot reconciliation (issue
- * #25) can never drift on what counts as a failure.
- */
-export function isFailureSubject(subject: string): boolean {
-  return /^fail/i.test(subject.trim());
-}
-
-/**
- * The delegation card's final ✅/❌ state — or a fresh post when no card
- * ever landed. Shared by the watcher's worker_done flip and boot
- * reconciliation's outage closures (issue #25); failure is signalled by
- * passing a `failureReason`.
- */
-export async function flipCardFinal(
-  surface: Pick<WatcherSurface, 'post' | 'update'>,
-  logger: Logger,
-  row: DelegationRow,
-  opts: {
-    durationMs: number;
-    issueUrl: string | undefined;
-    /** Where the PR links come from — the worker's report, or empty. */
-    reportText: string;
-    failureReason?: string;
-  },
-): Promise<void> {
-  const text = completedCard({
-    repo: row.repo ?? 'work',
-    issueNumber: row.issueNumber ?? 0,
-    title: row.title ?? row.taskId,
-    worktreePath: row.worktreePath,
-    durationMs: opts.durationMs,
-    issueUrl: opts.issueUrl,
-    prLinks: extractPullRequestLinks(opts.reportText),
-    ...(opts.failureReason !== undefined && { failureReason: opts.failureReason }),
-  });
-  try {
-    if (row.cardTs === null) {
-      await surface.post(row.threadTs, text);
-    } else {
-      await surface.update(row.cardTs, text);
-    }
-  } catch (error) {
-    logger.warn({ err: error, threadTs: row.threadTs, cardTs: row.cardTs }, 'final card edit failed');
-  }
-}
-
-/**
- * The success cleanup (issue #43): a delivered delegation's worktree goes
- * away — the work lives on in the pushed branch/PR and the card keeps the
- * links. `worktree rm` runs deliberately WITHOUT `--force`, so a dirty tree
- * makes the runtime refuse and the worktree stays inspectable; the refusal
- * surfaces as one thread line. Failed delegations never reach here — their
- * worktree is the debugging evidence. Best-effort like every janitorial
- * move: an error is a warn line, never a crash. Shared by the watcher's
- * worker_done path and boot reconciliation's outage closures (issue #25).
- */
-export async function cleanupDeliveredWorktree(
-  run: CommandRunner,
-  surface: Pick<WatcherSurface, 'post'>,
-  logger: Logger,
-  row: DelegationRow,
-): Promise<void> {
-  if (row.worktreeId === null) {
-    logger.warn(
-      { threadTs: row.threadTs, dispatchId: row.dispatchId },
-      'closed delegation carries no worktree id — cleanup skipped',
-    );
-    return;
-  }
-  try {
-    await removeWorktree(run, row.worktreeId);
-    logger.info(
-      { threadTs: row.threadTs, dispatchId: row.dispatchId, worktreeId: row.worktreeId },
-      'delivered worktree removed',
-    );
-  } catch (error) {
-    logger.warn(
-      { err: error, threadTs: row.threadTs, worktreeId: row.worktreeId },
-      'worktree cleanup refused — kept for inspection',
-    );
-    try {
-      await surface.post(
-        row.threadTs,
-        worktreeKeptLine(
-          row.worktreeName ?? row.worktreeId,
-          error instanceof Error ? error.message : String(error),
-        ),
-      );
-    } catch (postError) {
-      logger.warn({ err: postError, threadTs: row.threadTs }, 'worktree-kept line post failed');
-    }
-  }
-}
-
-/**
- * `orchestration check --json` stdout → the readable bus messages, with the
- * raw array riding along for the caller's dropped-entries log line. Throws
- * on a shapeless envelope. Shared with boot reconciliation (issue #25),
- * whose read-only `check --all` peek sees the same message shape.
- */
-export function readCheckMessages(stdout: string): {
-  messages: OrchestrationMessage[];
-  raw: unknown[];
-} {
-  const raw = parseOrcaEnvelope(stdout)?.messages;
-  if (!Array.isArray(raw)) {
-    throw new Error('unexpected `orca orchestration check` response shape');
-  }
-  return { messages: raw.flatMap(readMessage), raw };
-}
-
 export class GateWatcher {
   private readonly store: DelegationStore;
-  private readonly surface: WatcherSurface;
+  private readonly surface: ThreadSurface;
   private readonly wake: GateWatcherOptions['wake'];
   private readonly onDelegationClosed: () => void;
   private readonly logger: Logger;
@@ -509,13 +247,13 @@ export class GateWatcher {
         { threadTs: row.threadTs, dispatchId: row.dispatchId },
         'pending watchdog alert settled — the worker spoke on the bus',
       );
-      await settleRootReaction(this.store, this.surface, this.logger, row.threadTs);
+      await this.surface.settleRoot(row.threadTs);
     }
   }
 
   /**
    * `worker_done` (issue #20): ledger row closed, card flipped to ✅/❌ with
-   * the durable links, root reaction swapped, session woken for the summary,
+   * the durable links, root reaction settled, session woken for the summary,
    * and on success the worktree cleaned up (issue #43). Failure is still a
    * worker_done — the preamble fixes the subject shape ("Failed: <reason>"),
    * which is all the signal there is.
@@ -551,7 +289,7 @@ export class GateWatcher {
     // Card first (the summary's "details in the card ⤴" must already be
     // true), then the root reaction, then the wake.
     await this.finishCard(row, message, failed);
-    await this.swapRootReaction(row.threadTs, failed);
+    await this.surface.settleWorkerDone(row.threadTs, failed);
     const outcome = this.wake(
       row.threadTs,
       row.channelId,
@@ -569,7 +307,7 @@ export class GateWatcher {
     // Janitorial last — the human-facing card, reaction and wake never wait
     // on it. A failure keeps its worktree as the debugging evidence.
     if (!failed) {
-      await cleanupDeliveredWorktree(this.run, this.surface, this.logger, row);
+      await this.surface.cleanupDeliveredWorktree(row);
     }
   }
 
@@ -689,7 +427,7 @@ export class GateWatcher {
     // A pending escalation or stall alert outranks a plain question on the
     // root (spec §8): a ❓ arriving while a 🚨 waits must not soften the
     // coarse state. The just-recorded gate is part of the settled set.
-    await settleRootReaction(this.store, this.surface, this.logger, gateThread);
+    await this.surface.settleRoot(gateThread);
   }
 
   /**
@@ -733,49 +471,18 @@ export class GateWatcher {
     return this.store.inFlightByWorkerHandle(threadTs, message.fromHandle);
   }
 
-  // ── the ✅/❌ card ──────────────────────────────────────────────────────────
-
-  /** The card's final state — or a fresh post when no card ever landed. */
+  /** The card's final state — duration and issue link resolved daemon-side. */
   private async finishCard(
     row: DelegationRow,
     message: OrchestrationMessage,
     failed: boolean,
   ): Promise<void> {
-    await flipCardFinal(this.surface, this.logger, row, {
+    await this.surface.finishCard(row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
       issueUrl: await safeRegistryIssueUrl(this.run, this.logger, row.repo, row.issueNumber),
       reportText: `${message.subject}\n${message.body}`,
       ...(failed && { failureReason: message.subject }),
     });
-  }
-
-  // ── root reactions ─────────────────────────────────────────────────────────
-
-  /**
-   * Spec §8 coarse state: a failure surfaces as ❌ immediately; a success
-   * flips the root to ✅ only once the thread has no other in-flight work —
-   * with siblings still running, the registries decide the honest state
-   * (👀, or ❓/🚨 while other gates or stall alerts wait — this is also
-   * what clears a 🚨 whose stall alert the ledger close just settled). The
-   * reaction is the CURRENT state, latest terminal event wins: a sibling
-   * success after a failure does replace the ❌ — the failure keeps its ❌
-   * card and its summary message in the thread, which are the log; the root
-   * is not.
-   */
-  private async swapRootReaction(threadTs: string, failed: boolean): Promise<void> {
-    if (failed) {
-      await this.setRootReaction(threadTs, 'x');
-      return;
-    }
-    if (this.store.listInFlightForThread(threadTs).length > 0) {
-      await settleRootReaction(this.store, this.surface, this.logger, threadTs);
-      return;
-    }
-    await this.setRootReaction(threadTs, 'white_check_mark');
-  }
-
-  private async setRootReaction(threadTs: string, name: RootReaction): Promise<void> {
-    await applyRootReaction(this.surface, this.logger, threadTs, name);
   }
 
   private async postSafe(threadTs: string, text: string): Promise<boolean> {
@@ -791,10 +498,6 @@ export class GateWatcher {
 
 // ── wake texts — what the daemon feeds the session's input pipe ─────────────
 
-/**
- * The worker_done wake: the worker's report plus what is left for the LLM to
- * do — only the summary; the daemon already did the mechanical part.
- */
 /** `repo#n (worktree)`, degrading to the task id — the wake texts' name for a row. */
 function delegationRef(row: DelegationRow): string {
   const ref =
@@ -802,7 +505,11 @@ function delegationRef(row: DelegationRow): string {
   return row.worktreeName === null ? ref : `${ref} (\`${row.worktreeName}\`)`;
 }
 
-export function workerDoneWakeText(
+/**
+ * The worker_done wake: the worker's report plus what is left for the LLM to
+ * do — only the summary; the daemon already did the mechanical part.
+ */
+function workerDoneWakeText(
   row: DelegationRow,
   message: { subject: string; body: string },
   failed: boolean,
@@ -822,58 +529,6 @@ export function workerDoneWakeText(
         : 'say what shipped and include the PR link if the report names one, ') +
       'and end with "Details in the card ⤴". Do not run any commands for this event.',
   ].join('\n');
-}
-
-// ── message reading ──────────────────────────────────────────────────────────
-
-/** One raw bus message → the watcher's shape; unreadable entries drop, logged upstream. */
-function readMessage(raw: unknown): OrchestrationMessage[] {
-  const record = raw as {
-    id?: unknown;
-    type?: unknown;
-    subject?: unknown;
-    body?: unknown;
-    from_handle?: unknown;
-    payload?: unknown;
-  };
-  if (typeof record.id !== 'string' || typeof record.type !== 'string') return [];
-  return [
-    {
-      id: record.id,
-      type: record.type,
-      subject: typeof record.subject === 'string' ? record.subject : '',
-      body: typeof record.body === 'string' ? record.body : '',
-      ...(typeof record.from_handle === 'string' && { fromHandle: record.from_handle }),
-      payload: readPayload(record.payload),
-    },
-  ];
-}
-
-/**
- * The bus serializes `payload` as a JSON string — `{taskId, dispatchId}` on
- * worker events, plus `{question, options}` on an `ask` (issue #21).
- */
-function readPayload(raw: unknown): OrchestrationMessage['payload'] {
-  if (typeof raw !== 'string') return {};
-  try {
-    const parsed = JSON.parse(raw) as {
-      taskId?: unknown;
-      dispatchId?: unknown;
-      question?: unknown;
-      options?: unknown;
-    };
-    const options = Array.isArray(parsed.options)
-      ? parsed.options.filter((option): option is string => typeof option === 'string')
-      : undefined;
-    return {
-      ...(typeof parsed.taskId === 'string' && { taskId: parsed.taskId }),
-      ...(typeof parsed.dispatchId === 'string' && { dispatchId: parsed.dispatchId }),
-      ...(typeof parsed.question === 'string' && { question: parsed.question }),
-      ...(options !== undefined && options.length > 0 && { options }),
-    };
-  } catch {
-    return {};
-  }
 }
 
 /** The first candidate with content — how the relay picks the question text. */

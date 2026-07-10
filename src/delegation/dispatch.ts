@@ -8,6 +8,8 @@ import {
   parseOrcaEnvelope,
   type CommandRunner,
 } from '../kernel/orca.ts';
+import { issueFromName, repoFromName, titleFromName } from './worktree-name.ts';
+import type { ThreadSurface } from './thread-surface.ts';
 import type { DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
@@ -48,19 +50,10 @@ export interface DispatchObserver {
   abandonThread(threadTs: string): void;
 }
 
-/** What the coordinator needs from Slack — thread posts, card edits, 👀. */
-export interface DelegationSurface {
-  /** chat.postMessage into the thread; resolves with the message ts. */
-  post(threadTs: string, text: string): Promise<string>;
-  /** chat.update on an earlier card. */
-  update(ts: string, text: string): Promise<void>;
-  /** reactions.add on a message (the root: ts === threadTs). */
-  react(ts: string, name: string): Promise<void>;
-}
-
 export interface DelegationCoordinatorOptions {
   store: DelegationStore;
-  surface: DelegationSurface;
+  /** The thread surface — cards, milestone edits, the working 👀. */
+  surface: ThreadSurface;
   channelId: string;
   /** Global cap on concurrent workers (spec §5) — env `WORKER_CAP`. */
   workerCap: number;
@@ -105,7 +98,7 @@ interface ThreadTracker {
 
 export class DelegationCoordinator implements DispatchPreparer, DispatchObserver {
   private readonly store: DelegationStore;
-  private readonly surface: DelegationSurface;
+  private readonly surface: ThreadSurface;
   private readonly channelId: string;
   private readonly mailboxWorktreePath: string;
   private readonly onDispatched: (threadTs: string) => void;
@@ -352,11 +345,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       // The dispatch milestone retries the post — the card may still catch up.
       this.logger.warn({ err: error, threadTs }, 'delegation card post failed');
     }
-    try {
-      await this.surface.react(threadTs, 'eyes');
-    } catch (error) {
-      this.logger.debug({ err: error, threadTs }, '👀 root reaction failed (may already be set)');
-    }
+    await this.surface.ackWorking(threadTs);
   }
 
   /** A successful tui-idle wait clears that handle for injection (spec §5). */
@@ -655,34 +644,7 @@ class WorkerSlots {
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });
 
-/** `<repo>-<issue#>-<slug>` → the repo prefix; the whole name when unconventional. */
-function repoFromName(worktreeName: string): string {
-  return /^(.*?)-\d+-/.exec(worktreeName)?.[1] ?? worktreeName;
-}
-
-function issueFromName(worktreeName: string): number | null {
-  const match = /^.*?-(\d+)-/.exec(worktreeName);
-  return match === null ? null : Number(match[1]);
-}
-
-/**
- * `<repo>-<issue#>-<slug>` → the `repo#n` display ref; null when the name
- * does not follow the convention. The one parser of the worktree naming
- * convention shared beyond this module (the gate relay's ack refs).
- */
-export function worktreeIssueRef(worktreeName: string): string | null {
-  const issue = issueFromName(worktreeName);
-  return issue === null ? null : `${repoFromName(worktreeName)}#${issue}`;
-}
-
 function numberOrNull(value: string | undefined): number | null {
   const parsed = Number(value);
   return value !== undefined && Number.isInteger(parsed) ? parsed : null;
-}
-
-/** De-slugged worktree suffix — the card title until task-create names it. */
-function titleFromName(worktreeName: string): string {
-  const match = /^.*?-\d+-/.exec(worktreeName);
-  const slug = match === null ? worktreeName : worktreeName.slice(match[0].length);
-  return slug.replaceAll('-', ' ');
 }

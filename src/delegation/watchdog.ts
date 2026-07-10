@@ -7,7 +7,7 @@ import {
   type CommandRunner,
   type WorktreeActivity,
 } from '../kernel/orca.ts';
-import { settleRootReaction, type WatcherSurface } from './watcher.ts';
+import type { ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
@@ -53,7 +53,7 @@ import type { Logger } from '../kernel/logger.ts';
 
 export interface WatchdogOptions {
   store: DelegationStore;
-  surface: WatcherSurface;
+  surface: ThreadSurface;
   /** Silence across every worktree signal before a worker counts as stalled. */
   stallAfterMs: number;
   /** In-flight age with a mute bus before the needs-attention ⚠️ (issue #48). */
@@ -71,7 +71,7 @@ const TAIL_KEEP_CHARS = 600;
 
 export class Watchdog {
   private readonly store: DelegationStore;
-  private readonly surface: WatcherSurface;
+  private readonly surface: ThreadSurface;
   private readonly stallAfterMs: number;
   private readonly maxInflightMs: number;
   private readonly logger: Logger;
@@ -310,7 +310,7 @@ export class Watchdog {
       },
       opts.log,
     );
-    await settleRootReaction(this.store, this.surface, this.logger, row.threadTs);
+    await this.surface.settleRoot(row.threadTs);
   }
 
   /** The worker terminal's tail, truncated for the alert; '' when unreadable. */

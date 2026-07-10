@@ -1,7 +1,8 @@
 import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
 import { parseOrcaEnvelope } from '../kernel/orca.ts';
-import { settleRootReaction, type ReactionSurface } from './watcher.ts';
-import { worktreeIssueRef, type PrepareVerdict } from './dispatch.ts';
+import { worktreeIssueRef } from './worktree-name.ts';
+import type { ThreadSurface } from './thread-surface.ts';
+import type { PrepareVerdict } from './dispatch.ts';
 import type { DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
@@ -40,7 +41,7 @@ import type { Logger } from '../kernel/logger.ts';
 
 export interface GateRelayOptions {
   store: DelegationStore;
-  surface: ReactionSurface;
+  surface: ThreadSurface;
   logger: Logger;
 }
 
@@ -60,7 +61,7 @@ export type SessionRelay = RelayPolicy & RelayObserver;
 
 export class GateRelay implements SessionRelay {
   private readonly store: DelegationStore;
-  private readonly surface: ReactionSurface;
+  private readonly surface: ThreadSurface;
   private readonly logger: Logger;
   /**
    * The last reply attempt per thread — how the follow-up `terminal send`
@@ -352,7 +353,7 @@ export class GateRelay implements SessionRelay {
       { threadTs: gate.threadTs, msgId, workerHandle: gate.workerHandle },
       'gate answered — human reply relayed down',
     );
-    await this.settleRootReaction(gate.threadTs);
+    await this.surface.settleRoot(gate.threadTs);
   }
 
   /**
@@ -381,7 +382,7 @@ export class GateRelay implements SessionRelay {
           'stall alert answered — the nudge reached the worker terminal',
         );
       }
-      if (nudged) await this.settleRootReaction(threadTs);
+      if (nudged) await this.surface.settleRoot(threadTs);
     }
     const last = this.lastReply.get(threadTs);
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
@@ -417,13 +418,7 @@ export class GateRelay implements SessionRelay {
       { threadTs, msgId, workerHandle: handle },
       'gate answered via the terminal send fallback',
     );
-    await this.settleRootReaction(threadTs);
-  }
-
-  /** ❓/🚨 while gates or stalls remain, 👀 when the last one was answered
-   * (spec §8) — the shared coarse-state settle. */
-  private async settleRootReaction(threadTs: string): Promise<void> {
-    await settleRootReaction(this.store, this.surface, this.logger, threadTs);
+    await this.surface.settleRoot(threadTs);
   }
 }
 

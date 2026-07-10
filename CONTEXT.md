@@ -6,6 +6,15 @@ Slack thread, delegating work to Orca worktree agents. Published to npm as
 
 ## Language
 
+### Architecture
+
+**Thread surface**:
+The module that owns what a Slack thread's root message shows — the
+coarse-state root reactions and the delegation cards — for the thread's whole
+lifecycle (`src/delegation/thread-surface.ts`). Every emoji and final-card
+decision goes through it; nothing else touches root reactions.
+_Avoid_: reaction helpers, watcher utils
+
 ### Releasing
 
 **Release**:

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
 import { GateRelay } from './relay.ts';
-import type { ReactionSurface } from './watcher.ts';
+import { ThreadSurface, type Surface } from './thread-surface.ts';
 
 const THREAD = '1751970000.000100';
 const OTHER_THREAD = '1751970001.000200';
@@ -12,9 +12,17 @@ const WORKER = 'term_300035ab';
 const REPLY_OK = JSON.stringify({ id: 'x', ok: true, result: { message: { id: 'msg_re1' } } });
 const SEND_OK = JSON.stringify({ id: 'x', ok: true, result: { send: { accepted: true } } });
 
-class FakeReactions implements ReactionSurface {
+class FakeReactions implements Surface {
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
+
+  post(threadTs: string): Promise<string> {
+    return Promise.resolve(`msg-ts-${threadTs}`);
+  }
+
+  update(): Promise<void> {
+    return Promise.resolve();
+  }
 
   react(ts: string, name: string): Promise<void> {
     this.reactions.push({ ts, name });
@@ -30,7 +38,12 @@ class FakeReactions implements ReactionSurface {
 const makeRelay = () => {
   const store = new DelegationStore(':memory:');
   const surface = new FakeReactions();
-  const relay = new GateRelay({ store, surface, logger: createLogger('silent') });
+  const logger = createLogger('silent');
+  const relay = new GateRelay({
+    store,
+    surface: new ThreadSurface({ surface, store, logger }),
+    logger,
+  });
   return { relay, store, surface };
 };
 

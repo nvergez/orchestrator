@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
-import { DelegationCoordinator, type DelegationSurface } from './dispatch.ts';
+import { DelegationCoordinator } from './dispatch.ts';
+import { ThreadSurface, type Surface } from './thread-surface.ts';
 import type { CommandRunner } from '../kernel/orca.ts';
 
 const THREAD = '1751970000.000100';
@@ -47,10 +48,11 @@ const REPO_LIST_OUT = envelope({
   ],
 });
 
-class FakeSurface implements DelegationSurface {
+class FakeSurface implements Surface {
   posts: Array<{ threadTs: string; text: string }> = [];
   updates: Array<{ ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
+  removed: Array<{ ts: string; name: string }> = [];
   failPosts = false;
   failReactions = false;
   private counter = 0;
@@ -70,6 +72,11 @@ class FakeSurface implements DelegationSurface {
   react(ts: string, name: string): Promise<void> {
     if (this.failReactions) return Promise.reject(new Error('already_reacted'));
     this.reactions.push({ ts, name });
+    return Promise.resolve();
+  }
+
+  unreact(ts: string, name: string): Promise<void> {
+    this.removed.push({ ts, name });
     return Promise.resolve();
   }
 }
@@ -110,7 +117,7 @@ const makeCoordinator = (
   const runner = makeRunner(options.script);
   const coordinator = new DelegationCoordinator({
     store,
-    surface,
+    surface: new ThreadSurface({ surface, store, logger: createLogger('silent'), run: runner.run }),
     channelId: CHANNEL,
     workerCap: options.workerCap ?? 3,
     mailboxWorktreePath: DAEMON_WT,

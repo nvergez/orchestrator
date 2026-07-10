@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
 import { Watchdog, truncateTail } from './watchdog.ts';
-import type { WatcherSurface } from './watcher.ts';
+import { ThreadSurface, type Surface } from './thread-surface.ts';
 import type { CommandRunner } from '../kernel/orca.ts';
 
 const THREAD = '1751970000.000100';
@@ -47,7 +47,7 @@ const REPO_LIST_OUT = envelope({
   ],
 });
 
-class FakeSurface implements WatcherSurface {
+class FakeSurface implements Surface {
   posts: Array<{ threadTs: string; text: string }> = [];
   updates: Array<{ ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
@@ -114,7 +114,7 @@ const makeWatchdog = (options: HarnessOptions = {}) => {
   };
   const watchdog = new Watchdog({
     store,
-    surface,
+    surface: new ThreadSurface({ surface, store, logger: createLogger('silent'), run }),
     stallAfterMs: options.stallAfterMs ?? STALL_AFTER_MS,
     maxInflightMs: options.maxInflightMs ?? MAX_INFLIGHT_MS,
     logger: createLogger('silent'),

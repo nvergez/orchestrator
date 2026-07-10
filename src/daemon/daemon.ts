@@ -8,7 +8,8 @@ import { SessionStore } from './db.ts';
 import { DelegationStore } from '../delegation/delegations.ts';
 import { DelegationCoordinator } from '../delegation/dispatch.ts';
 import { SessionManager } from './sessions.ts';
-import { ackTurnStart, GateWatcher, settleTurnEnd } from '../delegation/watcher.ts';
+import { GateWatcher } from '../delegation/watcher.ts';
+import { ThreadSurface } from '../delegation/thread-surface.ts';
 import { BootReconciler } from '../delegation/reconcile.ts';
 import { Watchdog } from '../delegation/watchdog.ts';
 import { GateRelay } from '../delegation/relay.ts';
@@ -103,20 +104,25 @@ export async function runDaemon(): Promise<void> {
 
     const allowList = new RepoAllowList({ hints, logger });
 
-    // One Slack surface for the delegation coordinator and the gate watcher —
-    // thread posts, card edits, root reactions on and off.
-    const surface = {
-      post: postToThread,
-      update: async (ts: string, text: string): Promise<void> => {
-        await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+    // ONE thread surface for every delegation coordinator — it owns what a
+    // thread's root message shows (root reactions, delegation cards) over
+    // the raw Slack adapter below.
+    const surface = new ThreadSurface({
+      surface: {
+        post: postToThread,
+        update: async (ts: string, text: string): Promise<void> => {
+          await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+        },
+        react: async (ts: string, name: string): Promise<void> => {
+          await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
+        },
+        unreact: async (ts: string, name: string): Promise<void> => {
+          await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
+        },
       },
-      react: async (ts: string, name: string): Promise<void> => {
-        await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
-      },
-      unreact: async (ts: string, name: string): Promise<void> => {
-        await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
-      },
-    };
+      store: delegationStore,
+      logger,
+    });
 
     // Boot reconciliation (spec §7, issue #25): crash recovery without waking
     // sessions — dispatched rows reconciled against task-list + worktree ps,
@@ -185,9 +191,9 @@ export async function runDaemon(): Promise<void> {
       // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
       // — session open included — and off again when the turn ends with no
       // delegation in flight and nothing pending.
-      onTurnStart: (threadTs) => ackTurnStart(surface, logger, threadTs),
+      onTurnStart: (threadTs) => surface.ackWorking(threadTs),
       onTurnEnd: (threadTs) =>
-        settleTurnEnd(delegationStore, surface, logger, threadTs, delegations.hasUndispatched(threadTs)),
+        surface.settleTurnEnd(threadTs, delegations.hasUndispatched(threadTs)),
       logger,
     });
 

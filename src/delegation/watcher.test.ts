@@ -1,13 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../kernel/logger.ts';
 import { DelegationStore } from './delegations.ts';
-import {
-  ackTurnStart,
-  GateWatcher,
-  settleTurnEnd,
-  type WakeResult,
-  type WatcherSurface,
-} from './watcher.ts';
+import { GateWatcher, type WakeResult } from './watcher.ts';
+import { ThreadSurface, type Surface } from './thread-surface.ts';
 import type { CommandRunner } from '../kernel/orca.ts';
 
 const THREAD = '1751970000.000100';
@@ -47,7 +42,7 @@ const REPO_LIST_OUT = envelope({
   ],
 });
 
-class FakeSurface implements WatcherSurface {
+class FakeSurface implements Surface {
   posts: Array<{ threadTs: string; text: string }> = [];
   updates: Array<{ ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
@@ -153,7 +148,7 @@ const makeWatcher = (options: HarnessOptions = {}) => {
   };
   const watcher = new GateWatcher({
     store,
-    surface,
+    surface: new ThreadSurface({ surface, store, logger: createLogger('silent'), run }),
     wake: (threadTs, channelId, text) => {
       wakes.push({ threadTs, channelId, text });
       return options.wakeResult ?? 'turn';
@@ -908,7 +903,11 @@ describe('arming and stopping', () => {
     const checkRunner = makeCheckRunner([]);
     const watcher = new GateWatcher({
       store,
-      surface: new FakeSurface(),
+      surface: new ThreadSurface({
+        surface: new FakeSurface(),
+        store,
+        logger: createLogger('silent'),
+      }),
       wake: () => 'turn',
       onDelegationClosed: () => undefined,
       logger: createLogger('silent'),
@@ -997,141 +996,6 @@ describe('worker_done after boot reconciliation (issue #25)', () => {
     expect(wakes[0]?.text).toContain('sibling shipped');
     expect(slotsFreed()).toBe(1);
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
-  });
-});
-
-describe('turn-lifecycle root ack (issue #49)', () => {
-  /** Add/remove recorder — reactions only, no coarse-state sweeps expected. */
-  class AckSurface {
-    added: Array<{ ts: string; name: string }> = [];
-    removed: Array<{ ts: string; name: string }> = [];
-    failAdd = false;
-    failRemove = false;
-
-    react(ts: string, name: string): Promise<void> {
-      if (this.failAdd) return Promise.reject(new Error('already_reacted'));
-      this.added.push({ ts, name });
-      return Promise.resolve();
-    }
-
-    unreact(ts: string, name: string): Promise<void> {
-      if (this.failRemove) return Promise.reject(new Error('no_reaction'));
-      this.removed.push({ ts, name });
-      return Promise.resolve();
-    }
-  }
-
-  const logger = createLogger('silent');
-
-  describe('ackTurnStart', () => {
-    it('adds 👀 on the root and nothing else — no stale-reaction sweep', async () => {
-      const surface = new AckSurface();
-
-      await ackTurnStart(surface, logger, THREAD);
-
-      expect(surface.added).toEqual([{ ts: THREAD, name: 'eyes' }]);
-      // Add-only: a pending ❓/🚨 or an earlier ✅/❌ must survive the ack —
-      // the milestone/gate/done flips own every coarse-state transition.
-      expect(surface.removed).toEqual([]);
-    });
-
-    it('swallows a failed add (already_reacted) — the ack never fails a turn', async () => {
-      const surface = new AckSurface();
-      surface.failAdd = true;
-
-      await expect(ackTurnStart(surface, logger, THREAD)).resolves.toBeUndefined();
-    });
-  });
-
-  describe('settleTurnEnd', () => {
-    const makeStore = () => new DelegationStore(':memory:');
-
-    it('removes the 👀 when nothing is in flight and nothing is pending', async () => {
-      const surface = new AckSurface();
-
-      await settleTurnEnd(makeStore(), surface, logger, THREAD);
-
-      expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
-      expect(surface.added).toEqual([]);
-    });
-
-    it('leaves the root untouched while a delegation is in flight', async () => {
-      const store = makeStore();
-      seedDispatch(store);
-      const surface = new AckSurface();
-
-      await settleTurnEnd(store, surface, logger, THREAD);
-
-      expect(surface.removed).toEqual([]);
-      expect(surface.added).toEqual([]);
-    });
-
-    it('leaves the root untouched while a gate is pending', async () => {
-      const store = makeStore();
-      store.recordGate({
-        msgId: 'msg_g1',
-        threadTs: THREAD,
-        taskId: 'task_3f81',
-        dispatchId: 'ctx_d1',
-        workerHandle: 'term_w1',
-        worktreeName: 'webapp-84-csv-export',
-        kind: 'decision_gate',
-        question: 'push the branch?',
-        options: [],
-        relayTs: 'msg-ts-1',
-      });
-      const surface = new AckSurface();
-
-      await settleTurnEnd(store, surface, logger, THREAD);
-
-      expect(surface.removed).toEqual([]);
-    });
-
-    it('leaves the root untouched while a stall alert is pending', async () => {
-      const store = makeStore();
-      store.recordStall({
-        dispatchId: 'ctx_d1',
-        threadTs: THREAD,
-        workerHandle: 'term_w1',
-        worktreeName: 'webapp-84-csv-export',
-        lastOutput: 'npm test (hanging)',
-        fingerprint: '2026-07-08T14:20:00.000Z',
-        relayTs: 'msg-ts-1',
-      });
-      const surface = new AckSurface();
-
-      await settleTurnEnd(store, surface, logger, THREAD);
-
-      expect(surface.removed).toEqual([]);
-    });
-
-    it('leaves the root untouched while a created-but-undispatched worktree waits', async () => {
-      // The create→dispatch window has no ledger row yet — only the
-      // coordinator knows, and its signal must keep the milestone 👀 on.
-      const surface = new AckSurface();
-
-      await settleTurnEnd(makeStore(), surface, logger, THREAD, true);
-
-      expect(surface.removed).toEqual([]);
-    });
-
-    it('a closed delegation no longer pins the 👀 — only in-flight work counts', async () => {
-      const store = makeStore();
-      seedDispatch(store);
-      store.closeDelegation('ctx_d1', 'completed');
-      const surface = new AckSurface();
-
-      await settleTurnEnd(store, surface, logger, THREAD);
-
-      expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
-    });
-
-    it('swallows a failed removal (no_reaction) — the settle never fails a turn', async () => {
-      const surface = new AckSurface();
-      surface.failRemove = true;
-
-      await expect(settleTurnEnd(makeStore(), surface, logger, THREAD)).resolves.toBeUndefined();
-    });
   });
 });
 

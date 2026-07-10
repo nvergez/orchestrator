@@ -4,18 +4,12 @@ import {
   listOrchestrationTasks,
   listRegistryRepos,
   listWorktreeProcesses,
+  readCheckMessages,
   type CommandRunner,
+  type OrchestrationMessage,
   type WorktreeProcess,
 } from '../kernel/orca.ts';
-import {
-  applyRootReaction,
-  cleanupDeliveredWorktree,
-  flipCardFinal,
-  isFailureSubject,
-  readCheckMessages,
-  type OrchestrationMessage,
-  type WatcherSurface,
-} from './watcher.ts';
+import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
@@ -85,7 +79,7 @@ const DEFAULT_STALL_AFTER_MS = 15 * 60_000;
 
 export interface BootReconcilerOptions {
   store: DelegationStore;
-  surface: WatcherSurface;
+  surface: ThreadSurface;
   logger: Logger;
   /** Injectable for tests; defaults to the real orca CLI. */
   run?: CommandRunner;
@@ -96,7 +90,7 @@ export interface BootReconcilerOptions {
 
 export class BootReconciler {
   private readonly store: DelegationStore;
-  private readonly surface: WatcherSurface;
+  private readonly surface: ThreadSurface;
   private readonly logger: Logger;
   private readonly run: CommandRunner;
   private readonly now: () => Date;
@@ -161,7 +155,7 @@ export class BootReconciler {
 
     // Close what actually ended — ledger first (the truth), card second (the
     // cosmetics). Closed rows never arm a watcher, so no wake follows.
-    const closed: Reconciled[] = [];
+    const closed: Array<Reconciled & { kind: 'completed' | 'failed' }> = [];
     for (const item of items) {
       if (!isTerminal(item)) continue;
       if (!this.store.closeDelegation(item.row.dispatchId, item.kind)) continue;
@@ -172,10 +166,10 @@ export class BootReconciler {
       );
       await this.finishCard(item);
       if (item.kind === 'completed') {
-        await cleanupDeliveredWorktree(this.run, this.surface, this.logger, item.row);
+        await this.surface.cleanupDeliveredWorktree(item.row);
       }
     }
-    await this.updateRootReaction(threadTs, items, closed);
+    await this.surface.settleReconciled(threadTs, closed.map((item) => item.kind));
 
     // Idempotence: the fingerprint captures what stays open and how it
     // looked. A closure always posts (it is new truth, and the closed row
@@ -336,32 +330,12 @@ export class BootReconciler {
   /** The card's final ✅/❌ state, the same flip the watcher gives a live worker_done. */
   private async finishCard(item: Reconciled): Promise<void> {
     const { row } = item;
-    await flipCardFinal(this.surface, this.logger, row, {
+    await this.surface.finishCard(row, {
       durationMs: this.now().getTime() - Date.parse(row.dispatchedAt),
       issueUrl: await this.issueUrl(row),
       reportText: item.report === undefined ? '' : `${item.report.subject}\n${item.report.body}`,
       ...(item.kind === 'failed' && { failureReason: item.reason ?? 'lost during the outage' }),
     });
-  }
-
-  /**
-   * Spec §8 coarse state, batch flavor of the watcher's rule: any failure
-   * surfaces as ❌; all-clear flips to ✅ only when the thread has nothing
-   * left in flight; otherwise 👀 stays the honest state and nothing is
-   * touched.
-   */
-  private async updateRootReaction(
-    threadTs: string,
-    items: Reconciled[],
-    closed: Reconciled[],
-  ): Promise<void> {
-    const anyFailed = closed.some((item) => item.kind === 'failed');
-    const anyOpen = items.some((item) => !isTerminal(item));
-    if (anyFailed) {
-      await applyRootReaction(this.surface, this.logger, threadTs, 'x');
-    } else if (closed.length > 0 && !anyOpen) {
-      await applyRootReaction(this.surface, this.logger, threadTs, 'white_check_mark');
-    }
   }
 
   /** Issue link via the registry, lazily fetched once; degrades to plain refs. */
