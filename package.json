@@ -1,15 +1,41 @@
 {
-  "name": "orchestrator",
+  "name": "@nvergez/orchestrator",
   "version": "0.1.0",
-  "private": true,
   "description": "Slack-driven orchestrator-dispatcher daemon: one Claude Code session per Slack thread, delegating work to Orca worktree agents.",
+  "license": "MIT",
   "type": "module",
+  "bin": {
+    "orc": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=22.18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nvergez/orchestrator.git"
+  },
+  "homepage": "https://github.com/nvergez/orchestrator#readme",
+  "bugs": "https://github.com/nvergez/orchestrator/issues",
+  "keywords": [
+    "slack",
+    "claude",
+    "claude-code",
+    "agent",
+    "orchestrator",
+    "orca",
+    "daemon"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "node src/index.ts",
     "dev": "node --env-file=.env src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run"

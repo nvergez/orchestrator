@@ -4,3 +4,6 @@
 !.env.example
 
 node_modules/
+
+# Build output — emitted by `npm run build` (tsconfig.build.json), shipped in the npm tarball only.
+dist/
