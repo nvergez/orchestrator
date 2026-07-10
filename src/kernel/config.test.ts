@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, resolveDashboardAddress } from './config.ts';
 
 const validEnv = {
   SLACK_BOT_TOKEN: 'xoxb-1111-2222-abc',
@@ -246,6 +246,30 @@ describe('loadConfig', () => {
 
       expect(() => loadConfig(env)).toThrowError(ConfigError);
       expect(() => loadConfig(env)).toThrowError(/SESSION_SWEEP_INTERVAL_MINUTES/);
+    },
+  );
+});
+
+describe('resolveDashboardAddress', () => {
+  it('defaults to 127.0.0.1:8787 — installing the dashboard exposes nothing beyond the machine', () => {
+    expect(resolveDashboardAddress({})).toEqual({ bind: '127.0.0.1', port: 8787 });
+  });
+
+  it('honors DASHBOARD_PORT and DASHBOARD_BIND from the canonical env', () => {
+    expect(
+      resolveDashboardAddress({ DASHBOARD_PORT: '9000', DASHBOARD_BIND: '100.64.0.7' }),
+    ).toEqual({ bind: '100.64.0.7', port: 9000 });
+  });
+
+  it.each([['0'], ['-1'], ['70000'], ['http']])(
+    'rejects a DASHBOARD_PORT of %s',
+    (badValue) => {
+      expect(() => resolveDashboardAddress({ DASHBOARD_PORT: badValue })).toThrowError(
+        ConfigError,
+      );
+      expect(() => resolveDashboardAddress({ DASHBOARD_PORT: badValue })).toThrowError(
+        /DASHBOARD_PORT/,
+      );
     },
   );
 });

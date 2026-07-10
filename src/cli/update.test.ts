@@ -57,10 +57,12 @@ describe('runUpdate', () => {
       // ADR-0001: the freshly installed entry point regenerates the unit, not
       // the old in-memory code.
       ['/usr/bin/node', `${INSTALL_DIR}/dist/index.js`, 'service', 'install'],
-      ['systemctl', '--user', 'restart', 'orchestrator'],
+      // Both units restart in the same indivisible ritual (issue #87) —
+      // daemon and dashboard versions never skew.
+      ['systemctl', '--user', 'restart', 'orchestrator', 'orchestrator-dashboard'],
     ]);
     expect(out).toContain('updating 0.1.0 → 0.1.1');
-    expect(out).toContain('✔ updated 0.1.0 → 0.1.1 — unit regenerated, service restarted');
+    expect(out).toContain('✔ updated 0.1.0 → 0.1.1 — units regenerated, services restarted');
     expect(out.at(-1)).toContain('orc doctor');
   });
 
@@ -89,7 +91,7 @@ describe('runUpdate', () => {
   it('applies a major jump with --yes', async () => {
     const { deps, out } = makeDeps('1.0.0');
     await expect(runUpdate(deps, { yes: true })).resolves.toBe(0);
-    expect(out).toContain('✔ updated 0.1.0 → 1.0.0 — unit regenerated, service restarted');
+    expect(out).toContain('✔ updated 0.1.0 → 1.0.0 — units regenerated, services restarted');
   });
 
   it('refuses when this orc is not the global npm install (dev checkout)', async () => {

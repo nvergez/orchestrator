@@ -24,6 +24,14 @@ belongs to, which gate owns a re-asked question now — so callers ask
 questions instead of re-deriving answers from raw rows.
 _Avoid_: store, DB layer
 
+**Dashboard**:
+The read-only web view of live orchestrator state — open sessions, in-flight
+delegations, pending gates, stall alerts. Served by a sidecar process, never
+by the daemon; it renders what the session store and delegation ledger
+already know and writes nothing. How an operator exposes it beyond the
+machine (Tailscale, SSH tunnel) is their business, not the project's.
+_Avoid_: visualizer, viz, status page, UI
+
 ### Releasing
 
 **Release**:

@@ -14,6 +14,7 @@ const makeDeps = (): { deps: CliDeps; out: string[]; err: string[] } => {
     update: vi.fn(() => Promise.resolve(0)),
     serviceInstall: vi.fn(() => Promise.resolve(0)),
     serviceUninstall: vi.fn(() => Promise.resolve(0)),
+    dashboard: vi.fn(() => Promise.resolve()),
   };
   return { deps, out, err };
 };
@@ -74,6 +75,13 @@ describe('runCli', () => {
     expect(deps.serviceUninstall).toHaveBeenCalledOnce();
   });
 
+  it('runs the dashboard sidecar on `orc dashboard` — never as part of the daemon (ADR 0002)', async () => {
+    const { deps } = makeDeps();
+    await expect(runCli(['dashboard'], deps)).resolves.toBe(0);
+    expect(deps.dashboard).toHaveBeenCalledOnce();
+    expect(deps.daemon).not.toHaveBeenCalled();
+  });
+
   it('prints usage on --help without touching any handler', async () => {
     const { deps, out } = makeDeps();
     await expect(runCli(['--help'], deps)).resolves.toBe(0);
@@ -91,6 +99,7 @@ describe('runCli', () => {
     [['service', 'install', '--force']],
     [['update', 'now']],
     [['update', '--yes', 'extra']],
+    [['dashboard', 'extra']],
   ])('rejects %j with exit 1 and usage on stderr', async (argv) => {
     const { deps, err } = makeDeps();
     await expect(runCli(argv, deps)).resolves.toBe(1);

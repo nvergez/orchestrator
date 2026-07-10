@@ -1,0 +1,51 @@
+@import 'tailwindcss';
+
+/*
+ * Theme tokens, shadcn-style: neutral surfaces in light and dark (dark
+ * follows the OS — this is an ops page, not a product with a toggle).
+ * Status colors are reserved for state (good / warning / serious /
+ * critical), identical in both modes, and always paired with a glyph and
+ * a word — never color alone.
+ */
+:root {
+  --background: oklch(0.99 0.002 100);
+  --foreground: oklch(0.22 0.005 100);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.005 100);
+  --muted: oklch(0.96 0.003 100);
+  --muted-foreground: oklch(0.52 0.008 100);
+  --border: oklch(0.9 0.004 100);
+  --accent: oklch(0.55 0.13 255);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.21 0.004 100);
+    --foreground: oklch(0.93 0.004 100);
+    --card: oklch(0.25 0.005 100);
+    --card-foreground: oklch(0.93 0.004 100);
+    --muted: oklch(0.29 0.005 100);
+    --muted-foreground: oklch(0.7 0.008 100);
+    --border: oklch(0.34 0.006 100);
+    --accent: oklch(0.72 0.11 255);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-status-good: #0ca30c;
+  --color-status-warning: #fab219;
+  --color-status-serious: #ec835a;
+  --color-status-critical: #d03b3b;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+}

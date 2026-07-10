@@ -2,7 +2,9 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['node_modules/**', 'dist/**'] },
+  // web/ is the frontend workspace — its own toolchain (Vite + tsc) gates
+  // it; the root lint covers the daemon package only.
+  { ignores: ['node_modules/**', 'dist/**', 'web/**'] },
   js.configs.recommended,
   {
     files: ['src/**/*.ts'],
@@ -35,9 +37,32 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['../daemon/*', '../delegation/*'],
-              message: 'cli/ statically imports only kernel/ — daemon loads via the lazy dynamic import in cli.ts.',
+              group: ['../daemon/*', '../delegation/*', '../dashboard/*'],
+              message: 'cli/ statically imports only kernel/ — daemon and dashboard load via the lazy dynamic imports in cli.ts.',
             },
+          ],
+        },
+      ],
+    },
+  },
+  // The dashboard sidecar reads the SQLite file the stores maintain, never
+  // the store clusters themselves (ADR 0002: read-only, its own process).
+  // Its HTTP-seam suite alone constructs the real stores, to populate the
+  // temp database the way the daemon would.
+  {
+    files: ['src/dashboard/**/*.ts'],
+    ignores: ['src/dashboard/server.test.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../daemon/*', '../delegation/*'],
+              allowTypeImports: true,
+              message: 'dashboard/ reads the database file directly — only its HTTP-seam tests construct the real stores.',
+            },
+            { group: ['../cli/*'], message: 'dashboard/ must not import cli/.' },
           ],
         },
       ],
@@ -63,6 +88,7 @@ export default tseslint.config(
               message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'daemon/ must not import cli/.' },
+            { group: ['../dashboard/*'], message: 'the dashboard is a sidecar, never a daemon endpoint (ADR 0002).' },
           ],
         },
       ],
@@ -81,6 +107,7 @@ export default tseslint.config(
               message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'delegation/ must not import cli/.' },
+            { group: ['../dashboard/*'], message: 'the dashboard is a sidecar, never a daemon endpoint (ADR 0002).' },
           ],
         },
       ],

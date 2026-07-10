@@ -23,11 +23,13 @@ export interface CliDeps {
   update: (yes: boolean) => Promise<number>;
   serviceInstall: () => Promise<number>;
   serviceUninstall: () => Promise<number>;
+  dashboard: () => Promise<void>;
 }
 
 const USAGE = `Usage: orc [command]
 
   (no command)        run the daemon (reads env config + routing hints)
+  dashboard           run the dashboard sidecar (read-only web view, ADR 0002)
   init                scaffold the config dir (routing-hints.json + env template)
   doctor              read-only install diagnosis — non-zero exit on any failure
   update [--yes]      update to the latest release: install + unit regen + restart
@@ -51,6 +53,10 @@ export function realCliDeps(): CliDeps {
       const { runDaemon } = await import('../daemon/daemon.ts');
       await runDaemon();
     },
+    dashboard: async () => {
+      const { runDashboard } = await import('../dashboard/main.ts');
+      await runDashboard();
+    },
     init: () => runInit(process.env, { out }),
     doctor: () => runDoctor(realDoctorDeps(), { out, err }),
     update: (yes) => runUpdate(realUpdateDeps(), { yes }),
@@ -71,6 +77,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
   if (command === '--help' || command === '-h' || command === 'help') {
     deps.out(USAGE);
+    return 0;
+  }
+  if (command === 'dashboard' && sub === undefined) {
+    await deps.dashboard();
     return 0;
   }
   if (command === 'init' && sub === undefined) {

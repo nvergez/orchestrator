@@ -1,12 +1,13 @@
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
-import { ConfigError, loadConfig } from '../kernel/config.ts';
+import { ConfigError, loadConfig, resolveDashboardAddress } from '../kernel/config.ts';
 import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { probeOrca } from '../kernel/orca-health.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
-import { systemdUnitPath } from './service.ts';
+import { unitActiveState, userBusUnreachable } from '../kernel/systemd.ts';
+import { dashboardUnitPath, systemdUnitPath } from './service.ts';
 import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
 /**
@@ -40,6 +41,9 @@ export interface DoctorDeps {
   username: string;
   uid: number;
   unitPath: string;
+  dashboardUnitPath: string;
+  /** GET a local URL — the dashboard port probe. Rejects like fetch does. */
+  httpGet(url: string): Promise<{ status: number }>;
 }
 
 export function realDoctorDeps(): DoctorDeps {
@@ -56,6 +60,11 @@ export function realDoctorDeps(): DoctorDeps {
     username: userInfo().username,
     uid: userInfo().uid,
     unitPath: systemdUnitPath(),
+    dashboardUnitPath: dashboardUnitPath(),
+    httpGet: async (url) => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(3_000) });
+      return { status: response.status };
+    },
   };
 }
 
@@ -149,14 +158,12 @@ function checkEnv(deps: DoctorDeps): DoctorCheck {
   }
 }
 
-/**
- * `systemctl --user` needs the session's user bus; shells without
- * XDG_RUNTIME_DIR (SSH, Orca) get "Failed to connect to … bus" — which says
- * nothing about the unit's state, so it must not read as "disabled".
- */
-function userBusUnreachable(error: unknown): boolean {
-  const stderr = (error as { stderr?: unknown }).stderr;
-  return typeof stderr === 'string' && /failed to connect to .*bus/i.test(stderr);
+/** What both unit checks say when systemd itself could not be asked. */
+function busUnreachableDetail(deps: DoctorDeps, unitPath: string): string {
+  return (
+    `unit file present (${unitPath}) but cannot reach the user service manager — ` +
+    `export XDG_RUNTIME_DIR=/run/user/${deps.uid} (or run from a login shell)`
+  );
 }
 
 /** The `>=X.Y(.Z)` minimum out of an engines range, null if unparseable. */
@@ -262,41 +269,41 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
       : { label: 'orca', ok: false, detail: report.reason },
   );
 
-  // #74 addendum: unit + linger are failures ONLY when the unit is installed.
+  // #74 addendum: unit, dashboard + linger are failures ONLY once installed.
   if (!deps.fileExists(deps.unitPath)) {
     checks.push({
       label: 'service',
       ok: true,
       detail: 'unit not installed — run `orc service install` when ready',
     });
+  } else {
+    try {
+      const { stdout } = await deps.runSystem('systemctl', ['--user', 'is-enabled', 'orchestrator']);
+      const state = stdout.trim();
+      checks.push(
+        state === 'enabled'
+          ? { label: 'service', ok: true, detail: `unit installed and enabled (${deps.unitPath})` }
+          : { label: 'service', ok: false, detail: `unit installed but "${state}" — re-run \`orc service install\`` },
+      );
+    } catch (error) {
+      checks.push(
+        userBusUnreachable(error)
+          ? { label: 'service', ok: false, detail: busUnreachableDetail(deps, deps.unitPath) }
+          : {
+              label: 'service',
+              ok: false,
+              detail: 'unit installed but not enabled — re-run `orc service install`',
+            },
+      );
+    }
+    checks.push(checkUnitPaths(deps));
+  }
+
+  checks.push(...(await checkDashboard(deps)));
+
+  if (!deps.fileExists(deps.unitPath) && !deps.fileExists(deps.dashboardUnitPath)) {
     return checks;
   }
-  try {
-    const { stdout } = await deps.runSystem('systemctl', ['--user', 'is-enabled', 'orchestrator']);
-    const state = stdout.trim();
-    checks.push(
-      state === 'enabled'
-        ? { label: 'service', ok: true, detail: `unit installed and enabled (${deps.unitPath})` }
-        : { label: 'service', ok: false, detail: `unit installed but "${state}" — re-run \`orc service install\`` },
-    );
-  } catch (error) {
-    checks.push(
-      userBusUnreachable(error)
-        ? {
-            label: 'service',
-            ok: false,
-            detail:
-              `unit file present (${deps.unitPath}) but cannot reach the user service manager — ` +
-              `export XDG_RUNTIME_DIR=/run/user/${deps.uid} (or run from a login shell)`,
-          }
-        : {
-            label: 'service',
-            ok: false,
-            detail: 'unit installed but not enabled — re-run `orc service install`',
-          },
-    );
-  }
-  checks.push(checkUnitPaths(deps));
   try {
     const { stdout } = await deps.runSystem('loginctl', ['show-user', deps.username, '--property=Linger']);
     checks.push(
@@ -316,6 +323,79 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
     });
   }
   return checks;
+}
+
+/**
+ * The dashboard sidecar's health (issue #87), gated like the daemon's unit
+ * check: not installed is a fact, not a failure. Once installed, two
+ * questions — is the unit active, and does the port actually answer? The
+ * probe address mirrors EnvironmentFile: env-file values win over the
+ * shell's, and a non-local DASHBOARD_BIND is probed where it points.
+ */
+async function checkDashboard(deps: DoctorDeps): Promise<DoctorCheck[]> {
+  if (!deps.fileExists(deps.dashboardUnitPath)) {
+    return [
+      {
+        label: 'dashboard',
+        ok: true,
+        detail: 'unit not installed — `orc service install` installs it alongside the daemon',
+      },
+    ];
+  }
+
+  const checks: DoctorCheck[] = [];
+  const { state, busUnreachable } = await unitActiveState(deps.runSystem, 'orchestrator-dashboard');
+  if (state === 'active') {
+    checks.push({ label: 'dashboard', ok: true, detail: `unit active (${deps.dashboardUnitPath})` });
+  } else if (busUnreachable) {
+    checks.push({
+      label: 'dashboard',
+      ok: false,
+      detail: busUnreachableDetail(deps, deps.dashboardUnitPath),
+    });
+  } else {
+    checks.push({
+      label: 'dashboard',
+      ok: false,
+      detail: `unit installed but "${state}" — check: journalctl --user -u orchestrator-dashboard -e`,
+    });
+  }
+
+  let url: string;
+  try {
+    const fileVars = readEnvFileVars(deps);
+    const { bind, port } = resolveDashboardAddress({ ...deps.env, ...fileVars });
+    const host = bind === '0.0.0.0' || bind === '::' ? '127.0.0.1' : bind;
+    url = `http://${host}:${port}/api/state`;
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    checks.push({ label: 'dashboard http', ok: false, detail: error.message });
+    return checks;
+  }
+  try {
+    const { status } = await deps.httpGet(url);
+    checks.push(
+      status === 200
+        ? { label: 'dashboard http', ok: true, detail: `answering at ${url}` }
+        : { label: 'dashboard http', ok: false, detail: `${url} answered HTTP ${status}` },
+    );
+  } catch {
+    checks.push({
+      label: 'dashboard http',
+      ok: false,
+      detail: `nothing answering at ${url} — check: journalctl --user -u orchestrator-dashboard -e`,
+    });
+  }
+  return checks;
+}
+
+/** The canonical env file's variables; a missing file simply adds nothing. */
+function readEnvFileVars(deps: DoctorDeps): Record<string, string> {
+  try {
+    return parseEnvFile(deps.readFile(resolveEnvFilePath(deps.env)));
+  } catch {
+    return {};
+  }
 }
 
 export interface DoctorIo {

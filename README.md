@@ -71,12 +71,13 @@ sudo loginctl enable-linger $USER      # 6 — once
 | Command | What it does |
 |---|---|
 | `orc` | Run the daemon in the foreground (reads config from the environment) |
+| `orc dashboard` | Run the dashboard sidecar in the foreground — the read-only web view of live state |
 | `orc --version` | Print the version and exit |
 | `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json}` |
 | `orc doctor` | Read-only diagnosis of the whole setup; non-zero exit on any failure |
 | `orc update` | Update to the latest release — install, unit regeneration and restart, as one step |
-| `orc service install` | Generate, enable and start the systemd user unit (re-run after node upgrades) |
-| `orc service uninstall` | Stop, disable and remove the systemd user unit |
+| `orc service install` | Generate, enable and start both systemd user units (re-run after node upgrades) |
+| `orc service uninstall` | Stop, disable and remove both systemd user units |
 
 ## Updating
 
@@ -105,8 +106,15 @@ systemctl --user status orchestrator     # running?
 journalctl --user -u orchestrator -f     # follow the logs
 ```
 
-Runbook — service management, `orc doctor` triage, non-systemd operation,
-config/state reference, uninstall: [`docs/operations.md`](docs/operations.md).
+The **Dashboard** — a read-only web page answering "what is the orchestrator
+doing right now?" (open sessions, in-flight delegations, pending gates, stall
+alerts) — is served by a sidecar unit on `127.0.0.1:8787`. It installs with
+`orc service install` and exposes nothing beyond the machine; reach it over
+Tailscale or an SSH tunnel your own way.
+
+Runbook — service management, the dashboard, `orc doctor` triage, non-systemd
+operation, config/state reference, uninstall:
+[`docs/operations.md`](docs/operations.md).
 
 ## Development
 
@@ -115,6 +123,12 @@ git clone https://github.com/nvergez/orchestrator && cd orchestrator
 npm ci
 npm test && npm run typecheck && npm run lint
 ```
+
+The dashboard frontend lives in the `web/` npm workspace (React + Vite),
+built into `dist/web` by `npm run build:web` and shipped pre-built in the
+npm tarball — the published package carries zero frontend dependencies. For
+frontend work, run `orc dashboard` (the API) and `npm run dev:web` (Vite
+dev server, hot reload, proxying `/api` to `127.0.0.1:8787`).
 
 PRs are squash-merged and the PR title must follow
 [Conventional Commits](https://www.conventionalcommits.org/) — merged titles
