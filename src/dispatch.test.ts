@@ -6,11 +6,11 @@ import type { CommandRunner } from './orca.ts';
 
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';
-const CHANNEL = 'C0ASJR3LAE6';
-const DAEMON_WT = '/home/dev/projects/orchestrator';
+const CHANNEL = 'C0EXAMPLE123';
+const DAEMON_WT = '/home/op/projects/orchestrator';
 
 const CREATE_CMD =
-  'orca worktree create --repo id:repo-fwd --name forwardly-84-csv-export ' +
+  'orca worktree create --repo id:repo-fwd --name webapp-84-csv-export ' +
   '--agent claude --issue 84 --no-parent --json';
 const DISPATCH_CMD = 'orca orchestration dispatch --task task_3f81 --to term_w1 --inject --json';
 
@@ -21,8 +21,8 @@ const WT_CREATE_OUT = envelope({
   worktree: {
     id: 'wt-1',
     repoId: 'repo-fwd',
-    path: '/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export',
-    displayName: 'forwardly-84-csv-export',
+    path: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
+    displayName: 'webapp-84-csv-export',
     linkedIssue: 84,
   },
 });
@@ -30,7 +30,7 @@ const TERMINAL_LIST_OUT = envelope({
   terminals: [{ handle: 'term_w1', worktreeId: 'wt-1', title: '✳ worker' }],
 });
 const TASK_CREATE_OUT = envelope({
-  task: { id: 'task_3f81', task_title: 'CSV export of send metrics', display_name: 'forwardly#84' },
+  task: { id: 'task_3f81', task_title: 'CSV export of send metrics', display_name: 'webapp#84' },
 });
 const DISPATCH_OUT = envelope({
   dispatch: { id: 'ctx_d1', task_id: 'task_3f81', assignee_handle: 'term_w1' },
@@ -40,10 +40,10 @@ const REPO_LIST_OUT = envelope({
   repos: [
     {
       id: 'repo-fwd',
-      displayName: 'forwardly',
-      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+      displayName: 'webapp',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/webapp' },
     },
-    { id: 'repo-scratch', displayName: 'scratch' },
+    { id: 'repo-sandbox', displayName: 'sandbox' },
   ],
 });
 
@@ -173,7 +173,7 @@ describe('prepare — pass-through and the #4 invariants', () => {
     const { coordinator } = makeCoordinator();
     const verdict = await coordinator.prepare(
       THREAD,
-      CREATE_CMD.replace('forwardly-84-csv-export', 'csv-export'),
+      CREATE_CMD.replace('webapp-84-csv-export', 'csv-export'),
     );
     expect(verdict).toMatchObject({ action: 'deny' });
     expect((verdict as { message: string }).message).toContain('<repo>-<issue#>-<slug>');
@@ -453,7 +453,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
     await coordinator.observe(THREAD, WAIT_CMD, envelope({ satisfied: true }));
     await coordinator.observe(
       THREAD,
-      'orca orchestration task-create --spec "brief" --task-title "CSV export of send metrics" --display-name "forwardly#84" --json',
+      'orca orchestration task-create --spec "brief" --task-title "CSV export of send metrics" --display-name "webapp#84" --json',
       TASK_CREATE_OUT,
     );
     const prepared = await coordinator.prepare(THREAD, DISPATCH_CMD);
@@ -471,9 +471,9 @@ describe('observe — the card, the 👀 and the ledger', () => {
       {
         threadTs: THREAD,
         text:
-          '⚙️ *forwardly#84 — csv export*\n' +
-          '`forwardly-84-csv-export` · claude · issue ' +
-          '<https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+          '⚙️ *webapp#84 — csv export*\n' +
+          '`webapp-84-csv-export` · claude · issue ' +
+          '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
           '• 14:04 — issue linked, worktree ready',
       },
     ]);
@@ -489,9 +489,9 @@ describe('observe — the card, the 👀 and the ledger', () => {
       {
         ts: 'card-ts-1',
         text:
-          '⚙️ *forwardly#84 — CSV export of send metrics*\n' +
-          '`forwardly-84-csv-export` · claude · issue ' +
-          '<https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+          '⚙️ *webapp#84 — CSV export of send metrics*\n' +
+          '`webapp-84-csv-export` · claude · issue ' +
+          '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
           '• 14:04 — issue linked, worktree ready\n' +
           '• 14:04 — brief handed off (task `task_3f81`)',
       },
@@ -501,9 +501,9 @@ describe('observe — the card, the 👀 and the ledger', () => {
         taskId: 'task_3f81',
         dispatchId: 'ctx_d1',
         worktreeId: 'wt-1',
-        worktreeName: 'forwardly-84-csv-export',
-        worktreePath: '/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export',
-        repo: 'forwardly',
+        worktreeName: 'webapp-84-csv-export',
+        worktreePath: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
+        repo: 'webapp',
         issueNumber: 84,
         agent: 'claude',
         workerHandle: 'term_w1',
@@ -534,26 +534,26 @@ describe('observe — the card, the 👀 and the ledger', () => {
 
   it('degrades to plain repo#n when the repo has no GitHub remote', async () => {
     const { coordinator, surface } = makeCoordinator();
-    const scratchCreate =
-      'orca worktree create --repo id:repo-scratch --name scratch-21-bench ' +
+    const sandboxCreate =
+      'orca worktree create --repo id:repo-sandbox --name sandbox-21-bench ' +
       '--agent claude --issue 21 --no-parent --json';
 
-    await coordinator.prepare(THREAD, scratchCreate);
+    await coordinator.prepare(THREAD, sandboxCreate);
     await coordinator.observe(
       THREAD,
-      scratchCreate,
+      sandboxCreate,
       envelope({
         worktree: {
           id: 'wt-2',
-          repoId: 'repo-scratch',
-          path: '/home/dev/scratch',
-          displayName: 'scratch-21-bench',
+          repoId: 'repo-sandbox',
+          path: '/home/op/sandbox',
+          displayName: 'sandbox-21-bench',
           linkedIssue: 21,
         },
       }),
     );
 
-    expect(surface.posts[0]?.text).toContain('issue scratch#21');
+    expect(surface.posts[0]?.text).toContain('issue sandbox#21');
     expect(surface.posts[0]?.text).not.toContain('<https://');
   });
 
@@ -565,7 +565,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
     await coordinator.prepare(THREAD, CREATE_CMD);
     await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
 
-    expect(surface.posts[0]?.text).toContain('⚙️ *forwardly#84 — csv export*');
+    expect(surface.posts[0]?.text).toContain('⚙️ *webapp#84 — csv export*');
     expect(surface.posts[0]?.text).not.toContain('<https://');
   });
 

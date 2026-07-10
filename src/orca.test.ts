@@ -23,9 +23,9 @@ const succeedWith =
 describe('listRegistryRepos', () => {
   it('maps the envelope to id/name pairs', async () => {
     const repos = await listRegistryRepos(
-      succeedWith(registryJson([{ id: 'u1', displayName: 'forwardly', path: '/p' }])),
+      succeedWith(registryJson([{ id: 'u1', displayName: 'webapp', path: '/p' }])),
     );
-    expect(repos).toEqual([{ id: 'u1', name: 'forwardly' }]);
+    expect(repos).toEqual([{ id: 'u1', name: 'webapp' }]);
   });
 
   it('throws on an ok:false or shapeless envelope', async () => {
@@ -82,8 +82,8 @@ describe('listWorktreeProcesses', () => {
       succeedWith(
         psJson([
           {
-            worktreeId: 'repo-1::/home/dev/w/scratch-21-bench',
-            path: '/home/dev/w/scratch-21-bench',
+            worktreeId: 'repo-1::/home/op/w/sandbox-21-bench',
+            path: '/home/op/w/sandbox-21-bench',
             isArchived: false,
             liveTerminalCount: 2,
             lastOutputAt: 1783531809953,
@@ -93,8 +93,8 @@ describe('listWorktreeProcesses', () => {
     );
     expect(worktrees).toEqual([
       {
-        worktreeId: 'repo-1::/home/dev/w/scratch-21-bench',
-        path: '/home/dev/w/scratch-21-bench',
+        worktreeId: 'repo-1::/home/op/w/sandbox-21-bench',
+        path: '/home/op/w/sandbox-21-bench',
         isArchived: false,
         liveTerminalCount: 2,
         lastOutputAt: 1783531809953,
@@ -128,20 +128,20 @@ describe('registryIssueUrl', () => {
   const registry = registryJson([
     {
       id: 'u1',
-      displayName: 'forwardly',
-      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+      displayName: 'webapp',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/webapp' },
     },
-    { id: 'u2', displayName: 'scratch' },
+    { id: 'u2', displayName: 'sandbox' },
   ]);
 
   it('builds the issue link off the canonical key', async () => {
-    await expect(registryIssueUrl(succeedWith(registry), 'forwardly', 84)).resolves.toBe(
-      'https://github.com/lemlist/forwardly/issues/84',
+    await expect(registryIssueUrl(succeedWith(registry), 'webapp', 84)).resolves.toBe(
+      'https://github.com/acme/webapp/issues/84',
     );
   });
 
   it('is undefined for a folder repo without a remote, or an unknown repo', async () => {
-    await expect(registryIssueUrl(succeedWith(registry), 'scratch', 21)).resolves.toBeUndefined();
+    await expect(registryIssueUrl(succeedWith(registry), 'sandbox', 21)).resolves.toBeUndefined();
     await expect(registryIssueUrl(succeedWith(registry), 'ghost', 1)).resolves.toBeUndefined();
   });
 });
@@ -151,10 +151,10 @@ describe('safeRegistryIssueUrls (issue #51)', () => {
   const registry = registryJson([
     {
       id: 'u1',
-      displayName: 'forwardly',
-      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+      displayName: 'webapp',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/webapp' },
     },
-    { id: 'u2', displayName: 'scratch' },
+    { id: 'u2', displayName: 'sandbox' },
   ]);
 
   const countingRunner = (stdout: string): { run: CommandRunner; calls: () => number } => {
@@ -172,23 +172,23 @@ describe('safeRegistryIssueUrls (issue #51)', () => {
     const { run, calls } = countingRunner(registry);
 
     const rows = await safeRegistryIssueUrls(run, logger, [
-      { repo: 'forwardly', issueNumber: 84 },
-      { repo: 'forwardly', issueNumber: 91 },
-      { repo: 'scratch', issueNumber: 21 },
+      { repo: 'webapp', issueNumber: 84 },
+      { repo: 'webapp', issueNumber: 91 },
+      { repo: 'sandbox', issueNumber: 21 },
     ]);
 
     expect(rows).toEqual([
       {
-        repo: 'forwardly',
+        repo: 'webapp',
         issueNumber: 84,
-        issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+        issueUrl: 'https://github.com/acme/webapp/issues/84',
       },
       {
-        repo: 'forwardly',
+        repo: 'webapp',
         issueNumber: 91,
-        issueUrl: 'https://github.com/lemlist/forwardly/issues/91',
+        issueUrl: 'https://github.com/acme/webapp/issues/91',
       },
-      { repo: 'scratch', issueNumber: 21 },
+      { repo: 'sandbox', issueNumber: 21 },
     ]);
     expect(calls()).toBe(1);
   });
@@ -198,12 +198,12 @@ describe('safeRegistryIssueUrls (issue #51)', () => {
 
     const rows = await safeRegistryIssueUrls(run, logger, [
       { repo: null, issueNumber: 84 },
-      { repo: 'forwardly', issueNumber: null },
+      { repo: 'webapp', issueNumber: null },
     ]);
 
     expect(rows).toEqual([
       { repo: null, issueNumber: 84 },
-      { repo: 'forwardly', issueNumber: null },
+      { repo: 'webapp', issueNumber: null },
     ]);
     expect(calls()).toBe(0);
     await expect(safeRegistryIssueUrls(run, logger, [])).resolves.toEqual([]);
@@ -214,8 +214,8 @@ describe('safeRegistryIssueUrls (issue #51)', () => {
     const down: CommandRunner = () => Promise.reject(new Error('orca down'));
 
     await expect(
-      safeRegistryIssueUrls(down, logger, [{ repo: 'forwardly', issueNumber: 84 }]),
-    ).resolves.toEqual([{ repo: 'forwardly', issueNumber: 84 }]);
+      safeRegistryIssueUrls(down, logger, [{ repo: 'webapp', issueNumber: 84 }]),
+    ).resolves.toEqual([{ repo: 'webapp', issueNumber: 84 }]);
   });
 });
 

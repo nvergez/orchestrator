@@ -44,7 +44,7 @@ const seedGate = (
     taskId: 'task_13c7',
     dispatchId: 'ctx_13c7',
     workerHandle: WORKER,
-    worktreeName: 'scratch-21-bench',
+    worktreeName: 'sandbox-21-bench',
     kind: 'decision_gate',
     question: 'Which lint config is authoritative for CI?',
     options: ['root', 'app/', 'merge both into flat config'],
@@ -64,7 +64,7 @@ const seedStall = (
     dispatchId: 'ctx_stalled',
     threadTs: THREAD,
     workerHandle: WORKER,
-    worktreeName: 'scratch-21-bench',
+    worktreeName: 'sandbox-21-bench',
     lastOutput: '? Overwrite existing bench.json? (y/N)',
     fingerprint: '1783528800000',
     relayTs: '1751970003.000400',
@@ -86,8 +86,8 @@ describe('decorateReply — the registry as turn context', () => {
 
     const decorated = relay.decorateReply(THREAD, 'the human words');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
-    expect(decorated).toContain(`[PENDING] ❓ question ${GATE} from \`scratch-21-bench\``);
-    expect(decorated).toContain('ack ref: scratch#21');
+    expect(decorated).toContain(`[PENDING] ❓ question ${GATE} from \`sandbox-21-bench\``);
+    expect(decorated).toContain('ack ref: sandbox#21');
     expect(decorated).toContain(`worker terminal ${WORKER}`);
     expect(decorated).toContain('asked: "Which lint config is authoritative for CI?"');
     expect(decorated).toContain('options: 1) root · 2) app/ · 3) merge both into flat config');
@@ -109,8 +109,8 @@ describe('decorateReply — the registry as turn context', () => {
 
     const decorated = relay.decorateReply(THREAD, 'y');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
-    expect(decorated).toContain('[PENDING] ⚠️ stall from `scratch-21-bench`');
-    expect(decorated).toContain('ack ref: scratch#21');
+    expect(decorated).toContain('[PENDING] ⚠️ stall from `sandbox-21-bench`');
+    expect(decorated).toContain('ack ref: sandbox#21');
     expect(decorated).toContain(`worker terminal ${WORKER}`);
     expect(decorated).toContain('last output: "? Overwrite existing bench.json? (y/N)"');
     expect(decorated).toContain(
@@ -401,9 +401,9 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
       taskId: 'task_13c7',
       dispatchId: 'ctx_13c7',
       worktreeId: null,
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       worktreePath: null,
-      repo: 'scratch',
+      repo: 'sandbox',
       issueNumber: 21,
       agent: 'claude',
       workerHandle: WORKER,

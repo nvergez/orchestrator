@@ -13,8 +13,8 @@ import {
 const THREAD = '1751970000.000100';
 const THREAD_2 = '1751970001.000200';
 const THREAD_3 = '1751970002.000300';
-const CHANNEL = 'C0ASJR3LAE6';
-const USER = 'U09CC6M3W1W';
+const CHANNEL = 'C0EXAMPLE123';
+const USER = 'U0EXAMPLE456';
 const TTL = 30 * 60_000;
 const DAY = 24 * 60 * 60_000;
 
@@ -567,12 +567,12 @@ describe('SessionManager close (spec §3)', () => {
           threadTs === THREAD
             ? ([
                 {
-                  repo: 'forwardly',
+                  repo: 'webapp',
                   issueNumber: 84,
-                  worktreeName: 'forwardly-84-csv-export',
+                  worktreeName: 'webapp-84-csv-export',
                   taskId: 'task_a1',
                   status: 'completed',
-                  issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+                  issueUrl: 'https://github.com/acme/webapp/issues/84',
                 },
                 {
                   repo: 'notes',
@@ -592,7 +592,7 @@ describe('SessionManager close (spec §3)', () => {
     await flush();
 
     expect(notices.at(-1)?.text).toContain(
-      '• ✅ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n',
+      '• ✅ <https://github.com/acme/webapp/issues/84|webapp#84>\n',
     );
     expect(notices.at(-1)?.text).toContain('• ⚙️ notes#7 — still in flight\n');
   });

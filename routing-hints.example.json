@@ -1,0 +1,17 @@
+{
+  "$comment": "Routing hints (spec §4) — and the delegation allow-list (spec §7): a repo absent from this file is not delegable even if registered in Orca. `name` must match the Orca registry displayName; `defaultAgent` (claude|codex) is optional — omitted means the global default `claude`. Replace these fictional examples with your own repos.",
+  "repos": [
+    {
+      "name": "webapp",
+      "description": "The product web app — features, endpoints and dashboards wired to real data.",
+      "aliases": ["the app", "the product"],
+      "keywords": ["feature", "endpoint", "dashboard", "export"]
+    },
+    {
+      "name": "sandbox",
+      "description": "Scratch space for one-shot scripts, experiments and benchmarks — nothing here ships.",
+      "aliases": ["playground"],
+      "keywords": ["one-shot", "script", "experiment", "prototype", "throwaway"]
+    }
+  ]
+}

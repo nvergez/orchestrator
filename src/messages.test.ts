@@ -25,8 +25,8 @@ import {
 
 describe('refusalLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
-    expect(refusalLine('U09CC6M3W1W')).toBe(
-      'v1: only <@U09CC6M3W1W> can drive me.',
+    expect(refusalLine('U0EXAMPLE456')).toBe(
+      'v1: only <@U0EXAMPLE456> can drive me.',
     );
   });
 });
@@ -72,9 +72,9 @@ describe('CLOSED_THREAD_LINE', () => {
 
 describe('closingSummary', () => {
   const delegation = {
-    repo: 'forwardly',
+    repo: 'webapp',
     issueNumber: 84,
-    worktreeName: 'forwardly-84-csv-export',
+    worktreeName: 'webapp-84-csv-export',
     taskId: 'task_a1b2c3d4e5f6',
     status: 'completed',
   } as const;
@@ -82,11 +82,11 @@ describe('closingSummary', () => {
   it('names each delegation with its outcome and issue link (issue #51, explicit close mock)', () => {
     const summary = closingSummary({
       delegations: [
-        { ...delegation, issueUrl: 'https://github.com/lemlist/forwardly/issues/84' },
+        { ...delegation, issueUrl: 'https://github.com/acme/webapp/issues/84' },
         {
           ...delegation,
           issueNumber: 91,
-          issueUrl: 'https://github.com/lemlist/forwardly/issues/91',
+          issueUrl: 'https://github.com/acme/webapp/issues/91',
         },
       ],
       costUsd: 6.84,
@@ -95,8 +95,8 @@ describe('closingSummary', () => {
 
     expect(summary).toBe(
       '🔚 Session closed.\n' +
-        '• ✅ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
-        '• ✅ <https://github.com/lemlist/forwardly/issues/91|forwardly#91>\n' +
+        '• ✅ <https://github.com/acme/webapp/issues/84|webapp#84>\n' +
+        '• ✅ <https://github.com/acme/webapp/issues/91|webapp#91>\n' +
         '• thread cost: $6.84 · 19 turns\n' +
         'Mention me on a new root message to start again.',
     );
@@ -108,7 +108,7 @@ describe('closingSummary', () => {
         {
           ...delegation,
           status: 'failed',
-          issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+          issueUrl: 'https://github.com/acme/webapp/issues/84',
         },
         { ...delegation, issueNumber: 91, status: 'dispatched' },
       ],
@@ -117,9 +117,9 @@ describe('closingSummary', () => {
     });
 
     expect(summary).toContain(
-      '• ❌ <https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n',
+      '• ❌ <https://github.com/acme/webapp/issues/84|webapp#84>\n',
     );
-    expect(summary).toContain('• ⚙️ forwardly#91 — still in flight\n');
+    expect(summary).toContain('• ⚙️ webapp#91 — still in flight\n');
   });
 
   it('degrades to plain repo#n for a folder repo without a remote, like the card', () => {
@@ -129,7 +129,7 @@ describe('closingSummary', () => {
       turnCount: 2,
     });
 
-    expect(summary).toContain('• ✅ forwardly#84\n');
+    expect(summary).toContain('• ✅ webapp#84\n');
     expect(summary).not.toContain('<');
   });
 
@@ -143,7 +143,7 @@ describe('closingSummary', () => {
       turnCount: 2,
     });
 
-    expect(summary).toContain('• ✅ `forwardly-84-csv-export`\n');
+    expect(summary).toContain('• ✅ `webapp-84-csv-export`\n');
     expect(summary).toContain('• ✅ task_a1b2c3d4e5f6\n');
   });
 
@@ -180,30 +180,30 @@ describe('closingSummary', () => {
 
 describe('gateLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario B)', () => {
-    expect(gateLine('git push --force-with-lease', 'forwardly/csv-export-metrics')).toBe(
-      '🚦 `git push --force-with-lease` on `forwardly/csv-export-metrics` — go?',
+    expect(gateLine('git push --force-with-lease', 'webapp/csv-export-metrics')).toBe(
+      '🚦 `git push --force-with-lease` on `webapp/csv-export-metrics` — go?',
     );
   });
 
   it('matches the mock verbatim when no worktree is identifiable', () => {
-    expect(gateLine('orca worktree delete forwardly-84-csv-export')).toBe(
-      '🚦 `orca worktree delete forwardly-84-csv-export` — go?',
+    expect(gateLine('orca worktree delete webapp-84-csv-export')).toBe(
+      '🚦 `orca worktree delete webapp-84-csv-export` — go?',
     );
   });
 });
 
 describe('delegationGateLine', () => {
   it('matches the issue #10 verbatim, in Slack mrkdwn', () => {
-    expect(delegationGateLine('forwardly', 'claude')).toBe(
-      "→ I'm delegating on *forwardly* with *claude*. Go? (or name another repo/agent)",
+    expect(delegationGateLine('webapp', 'claude')).toBe(
+      "→ I'm delegating on *webapp* with *claude*. Go? (or name another repo/agent)",
     );
   });
 });
 
 describe('zeroMatchLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, "Zero match")', () => {
-    expect(zeroMatchLine(['forwardly', 'orca', 'scratch', 'orchestrator'])).toBe(
-      'No repo I drive matches. I know: `forwardly`, `orca`, `scratch`, ' +
+    expect(zeroMatchLine(['webapp', 'orca', 'sandbox', 'orchestrator'])).toBe(
+      'No repo I drive matches. I know: `webapp`, `orca`, `sandbox`, ' +
         '`orchestrator`. Rephrase targeting one of them.',
     );
   });
@@ -213,21 +213,21 @@ describe('delegationCard — scenario A (issue #19)', () => {
   it('renders the ⚙️ card with a rich GitHub issue link and code-formatted worktree', () => {
     expect(
       delegationCard({
-        repo: 'forwardly',
+        repo: 'webapp',
         issueNumber: 84,
         title: 'CSV export of send metrics',
-        worktreeName: 'forwardly-84-csv-export',
+        worktreeName: 'webapp-84-csv-export',
         agent: 'claude',
-        issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+        issueUrl: 'https://github.com/acme/webapp/issues/84',
         milestones: [
           '• 14:04 — issue linked, worktree ready',
           '• 14:05 — brief handed off (task `t-3f81`)',
         ],
       }),
     ).toBe(
-      '⚙️ *forwardly#84 — CSV export of send metrics*\n' +
-        '`forwardly-84-csv-export` · claude · issue ' +
-        '<https://github.com/lemlist/forwardly/issues/84|forwardly#84>\n' +
+      '⚙️ *webapp#84 — CSV export of send metrics*\n' +
+        '`webapp-84-csv-export` · claude · issue ' +
+        '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
         '• 14:04 — issue linked, worktree ready\n' +
         '• 14:05 — brief handed off (task `t-3f81`)',
     );
@@ -235,15 +235,15 @@ describe('delegationCard — scenario A (issue #19)', () => {
 
   it('degrades to plain repo#n when the repo has no GitHub issue URL', () => {
     const card = delegationCard({
-      repo: 'scratch',
+      repo: 'sandbox',
       issueNumber: 21,
       title: 'bench',
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       agent: 'claude',
       milestones: ['• 16:20 — issue linked, worktree ready'],
     });
 
-    expect(card).toContain('issue scratch#21');
+    expect(card).toContain('issue sandbox#21');
     expect(card).not.toContain('<');
   });
 });
@@ -276,29 +276,29 @@ describe('orcaUnavailableLine', () => {
 
 describe('completedCard — the ✅/❌ final state (issue #20)', () => {
   const base = {
-    repo: 'forwardly',
+    repo: 'webapp',
     issueNumber: 84,
     title: 'CSV export of send metrics',
-    worktreePath: '/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export',
+    worktreePath: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
     durationMs: 27 * 60_000,
-    issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
-    prLinks: [{ url: 'https://github.com/lemlist/forwardly/pull/87', label: 'forwardly#87' }],
+    issueUrl: 'https://github.com/acme/webapp/issues/84',
+    prLinks: [{ url: 'https://github.com/acme/webapp/pull/87', label: 'webapp#87' }],
   };
 
   it('renders the mock’s delivered card: header, PR, issue, worktree', () => {
     expect(completedCard(base)).toBe(
       [
-        '✅ *forwardly#84 — CSV export of send metrics — delivered in 27 min*',
-        '• PR: <https://github.com/lemlist/forwardly/pull/87|forwardly#87>',
-        '• issue: <https://github.com/lemlist/forwardly/issues/84|forwardly#84>',
-        '• worktree: `/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export`',
+        '✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*',
+        '• PR: <https://github.com/acme/webapp/pull/87|webapp#87>',
+        '• issue: <https://github.com/acme/webapp/issues/84|webapp#84>',
+        '• worktree: `/home/op/orca/workspaces/webapp/webapp-84-csv-export`',
       ].join('\n'),
     );
   });
 
   it('renders a failure with the reason first, verbatim', () => {
     const card = completedCard({ ...base, failureReason: 'Failed: e2e tests break on main' });
-    expect(card).toContain('❌ *forwardly#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card).toContain('❌ *webapp#84 — CSV export of send metrics — failed after 27 min*');
     expect(card.split('\n')[1]).toBe('• reason: Failed: e2e tests break on main');
   });
 
@@ -311,8 +311,8 @@ describe('completedCard — the ✅/❌ final state (issue #20)', () => {
     });
     expect(card).toBe(
       [
-        '✅ *forwardly#84 — CSV export of send metrics — delivered in 27 min*',
-        '• issue: forwardly#84',
+        '✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*',
+        '• issue: webapp#84',
       ].join('\n'),
     );
   });
@@ -336,7 +336,7 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
       worktreeName: 'orca-53-lint-ci',
       repo: 'orca',
       issueNumber: 53,
-      issueUrl: 'https://github.com/nvergez/orca/issues/53',
+      issueUrl: 'https://github.com/acme/tooling/issues/53',
       question:
         'Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in\n' +
         '`app/`). Which one is authoritative for CI?',
@@ -344,7 +344,7 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
     });
     expect(message).toBe(
       [
-        '❓ *`orca-53-lint-ci`* (<https://github.com/nvergez/orca/issues/53|orca#53>) asks:',
+        '❓ *`orca-53-lint-ci`* (<https://github.com/acme/tooling/issues/53|orca#53>) asks:',
         '',
         '> Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in',
         '> `app/`). Which one is authoritative for CI?',
@@ -360,17 +360,17 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
   it('marks an escalation 🚨, drops the number tail without options', () => {
     const message = gateRelayMessage({
       kind: 'escalation',
-      worktreeName: 'forwardly-84-csv-export',
-      repo: 'forwardly',
+      worktreeName: 'webapp-84-csv-export',
+      repo: 'webapp',
       issueNumber: 84,
-      issueUrl: 'https://github.com/lemlist/forwardly/issues/84',
+      issueUrl: 'https://github.com/acme/webapp/issues/84',
       question:
         'The e2e tests break on `main` even without my changes — I’m pausing until further notice.',
       options: [],
     });
     expect(message).toBe(
       [
-        '🚨 *`forwardly-84-csv-export`* (<https://github.com/lemlist/forwardly/issues/84|forwardly#84>) escalates:',
+        '🚨 *`webapp-84-csv-export`* (<https://github.com/acme/webapp/issues/84|webapp#84>) escalates:',
         '',
         '> The e2e tests break on `main` even without my changes — I’m pausing until further notice.',
         '',
@@ -382,13 +382,13 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
   it('degrades to a plain ref without a GitHub remote, to "A worker" without a row', () => {
     const linked = gateRelayMessage({
       kind: 'decision_gate',
-      worktreeName: 'scratch-21-bench',
-      repo: 'scratch',
+      worktreeName: 'sandbox-21-bench',
+      repo: 'sandbox',
       issueNumber: 21,
       question: 'Overwrite bench.json?',
       options: [],
     });
-    expect(linked).toContain('❓ *`scratch-21-bench`* (scratch#21) asks:');
+    expect(linked).toContain('❓ *`sandbox-21-bench`* (sandbox#21) asks:');
 
     const unmatched = gateRelayMessage({
       kind: 'decision_gate',
@@ -406,16 +406,16 @@ describe('gateRelayMessage — scenario C, the relayed worker gate', () => {
 describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
   it('renders the mock exactly: who, silence span, quoted last output, reply instruction', () => {
     const message = stalledWorkerAlert({
-      worktreeName: 'scratch-21-bench',
-      repo: 'scratch',
+      worktreeName: 'sandbox-21-bench',
+      repo: 'sandbox',
       issueNumber: 21,
-      issueUrl: 'https://github.com/nvergez/scratch/issues/21',
+      issueUrl: 'https://github.com/acme/sandbox/issues/21',
       stalledForMs: 25 * 60_000,
       lastOutput: '? Overwrite existing bench.json? (y/N)',
     });
     expect(message).toBe(
       [
-        '⚠️ *`scratch-21-bench`* (<https://github.com/nvergez/scratch/issues/21|scratch#21>) seems stalled —',
+        '⚠️ *`sandbox-21-bench`* (<https://github.com/acme/sandbox/issues/21|sandbox#21>) seems stalled —',
         'no sign for 25 min, without having asked a question. Last output:',
         '',
         '> `? Overwrite existing bench.json? (y/N)`',
@@ -427,8 +427,8 @@ describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
 
   it('quotes a multi-line tail line by line, keeping blank lines quoted', () => {
     const message = stalledWorkerAlert({
-      worktreeName: 'scratch-21-bench',
-      repo: 'scratch',
+      worktreeName: 'sandbox-21-bench',
+      repo: 'sandbox',
       issueNumber: 21,
       stalledForMs: 12 * 60_000,
       lastOutput: 'running bench…\n\n? Overwrite existing bench.json? (y/N)',
@@ -438,8 +438,8 @@ describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
 
   it('keeps the code quoting stable when the output itself carries backticks', () => {
     const message = stalledWorkerAlert({
-      worktreeName: 'scratch-21-bench',
-      repo: 'scratch',
+      worktreeName: 'sandbox-21-bench',
+      repo: 'sandbox',
       issueNumber: 21,
       stalledForMs: 12 * 60_000,
       lastOutput: 'delete `bench.json`? (y/N)',
@@ -464,17 +464,17 @@ describe('stalledWorkerAlert — the watchdog ⚠️ (issue #22)', () => {
 describe('inflightWorkerAlert — the watchdog’s second signal ⚠️ (issue #48)', () => {
   it('renders who, the mute-bus span, agent state, quoted last assistant message, reply instruction', () => {
     const message = inflightWorkerAlert({
-      worktreeName: 'scratch-2-report',
-      repo: 'scratch',
+      worktreeName: 'sandbox-2-report',
+      repo: 'sandbox',
       issueNumber: 2,
-      issueUrl: 'https://github.com/nvergez/scratch/issues/2',
+      issueUrl: 'https://github.com/acme/sandbox/issues/2',
       inFlightForMs: 32 * 60_000,
       agentState: 'working',
       lastAssistantMessage: 'Exit code 1 / Orca is not running.',
     });
     expect(message).toBe(
       [
-        '⚠️ *`scratch-2-report`* (<https://github.com/nvergez/scratch/issues/2|scratch#2>) needs attention —',
+        '⚠️ *`sandbox-2-report`* (<https://github.com/acme/sandbox/issues/2|sandbox#2>) needs attention —',
         'in flight for 32 min without a word on the bus (agent state: `working`). Last assistant message:',
         '',
         '> `Exit code 1 / Orca is not running.`',
@@ -486,8 +486,8 @@ describe('inflightWorkerAlert — the watchdog’s second signal ⚠️ (issue #
 
   it('quotes a multi-line message line by line, stabilizing backticks', () => {
     const message = inflightWorkerAlert({
-      worktreeName: 'scratch-2-report',
-      repo: 'scratch',
+      worktreeName: 'sandbox-2-report',
+      repo: 'sandbox',
       issueNumber: 2,
       inFlightForMs: 45 * 60_000,
       agentState: 'working',
@@ -533,12 +533,12 @@ describe('formatDuration', () => {
 describe('extractPullRequestLinks', () => {
   it('finds GitHub PR urls, labels them repo#n, deduplicates in order', () => {
     const text =
-      'Opened https://github.com/lemlist/forwardly/pull/87 (see ' +
-      'https://github.com/lemlist/forwardly/pull/87) and ' +
-      'https://github.com/nvergez/scratch/pull/3.';
+      'Opened https://github.com/acme/webapp/pull/87 (see ' +
+      'https://github.com/acme/webapp/pull/87) and ' +
+      'https://github.com/acme/sandbox/pull/3.';
     expect(extractPullRequestLinks(text)).toEqual([
-      { url: 'https://github.com/lemlist/forwardly/pull/87', label: 'forwardly#87' },
-      { url: 'https://github.com/nvergez/scratch/pull/3', label: 'scratch#3' },
+      { url: 'https://github.com/acme/webapp/pull/87', label: 'webapp#87' },
+      { url: 'https://github.com/acme/sandbox/pull/3', label: 'sandbox#3' },
     ]);
   });
 
@@ -550,9 +550,9 @@ describe('extractPullRequestLinks', () => {
 describe('restartNotice (issue #25)', () => {
   it('renders the mock reboot verbatim for a single in-flight delegation', () => {
     expect(
-      restartNotice([{ ref: 'forwardly#84', state: 'still in progress (last sign 4 min ago)' }]),
+      restartNotice([{ ref: 'webapp#84', state: 'still in progress (last sign 4 min ago)' }]),
     ).toBe(
-      '⚠️ Restarted — `forwardly#84` was in flight: still in progress (last sign 4 min ago). ' +
+      '⚠️ Restarted — `webapp#84` was in flight: still in progress (last sign 4 min ago). ' +
         'Reply to resume supervision.',
     );
   });
@@ -560,14 +560,14 @@ describe('restartNotice (issue #25)', () => {
   it('groups several delegations into one bulleted ⚠️ message', () => {
     expect(
       restartNotice([
-        { ref: 'forwardly#84', state: 'still in progress (last sign 4 min ago)' },
-        { ref: 'scratch#21', state: '✅ completed during the outage (details in the card ⤴)' },
+        { ref: 'webapp#84', state: 'still in progress (last sign 4 min ago)' },
+        { ref: 'sandbox#21', state: '✅ completed during the outage (details in the card ⤴)' },
       ]),
     ).toBe(
       [
         '⚠️ Restarted — 2 delegations were in flight:',
-        '• `forwardly#84` — still in progress (last sign 4 min ago)',
-        '• `scratch#21` — ✅ completed during the outage (details in the card ⤴)',
+        '• `webapp#84` — still in progress (last sign 4 min ago)',
+        '• `sandbox#21` — ✅ completed during the outage (details in the card ⤴)',
         'Reply to resume supervision.',
       ].join('\n'),
     );

@@ -6,9 +6,9 @@ import type { WatcherSurface } from './watcher.ts';
 import type { CommandRunner } from './orca.ts';
 
 const THREAD = '1751970000.000100';
-const CHANNEL = 'C0ASJR3LAE6';
+const CHANNEL = 'C0EXAMPLE123';
 const WORKER = 'term_w1';
-const WORKTREE_ID = 'repo-scratch::/home/dev/orca/workspaces/scratch/scratch-21-bench';
+const WORKTREE_ID = 'repo-sandbox::/home/op/orca/workspaces/sandbox/sandbox-21-bench';
 
 /** The sweep runs at 16:20; the mock's stall has been silent since 15:55. */
 const NOW = new Date('2026-07-08T16:20:00.000Z');
@@ -40,9 +40,9 @@ const READ_OUT = envelope({
 const REPO_LIST_OUT = envelope({
   repos: [
     {
-      id: 'repo-scratch',
-      displayName: 'scratch',
-      gitRemoteIdentity: { canonicalKey: 'github.com/nvergez/scratch' },
+      id: 'repo-sandbox',
+      displayName: 'sandbox',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/sandbox' },
     },
   ],
 });
@@ -143,9 +143,9 @@ const seedDispatch = (
     taskId: 'task_bench',
     dispatchId: 'ctx_w1',
     worktreeId: WORKTREE_ID,
-    worktreeName: 'scratch-21-bench',
-    worktreePath: '/home/dev/orca/workspaces/scratch/scratch-21-bench',
-    repo: 'scratch',
+    worktreeName: 'sandbox-21-bench',
+    worktreePath: '/home/op/orca/workspaces/sandbox/sandbox-21-bench',
+    repo: 'sandbox',
     issueNumber: 21,
     agent: 'claude',
     workerHandle: WORKER,
@@ -235,7 +235,7 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
       {
         threadTs: THREAD,
         text:
-          '⚠️ *`scratch-21-bench`* (<https://github.com/nvergez/scratch/issues/21|scratch#21>) seems stalled —\n' +
+          '⚠️ *`sandbox-21-bench`* (<https://github.com/acme/sandbox/issues/21|sandbox#21>) seems stalled —\n' +
           'no sign for 25 min, without having asked a question. Last output:\n' +
           '\n' +
           '> `? Overwrite existing bench.json? (y/N)`\n' +
@@ -260,7 +260,7 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
     expect(stall).toMatchObject({
       threadTs: THREAD,
       workerHandle: WORKER,
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       lastOutput: '? Overwrite existing bench.json? (y/N)',
       fingerprint: String(STALE_25_MIN),
       relayTs: 'msg-ts-1',
@@ -306,7 +306,7 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
       taskId: 'task_bench',
       dispatchId: 'ctx_w1',
       workerHandle: WORKER,
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       kind: 'decision_gate',
       question: 'Overwrite bench.json?',
       options: [],
@@ -393,16 +393,16 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
 
   it('degrades the issue link to plain repo#n on a folder repo, and survives a down registry', async () => {
     const folderRepo = makeWatchdog({
-      repoList: envelope({ repos: [{ id: 'repo-scratch', displayName: 'scratch' }] }),
+      repoList: envelope({ repos: [{ id: 'repo-sandbox', displayName: 'sandbox' }] }),
     });
     seedDispatch(folderRepo.store);
     await folderRepo.watchdog.sweep();
-    expect(folderRepo.surface.posts[0]?.text).toContain('*`scratch-21-bench`* (scratch#21) seems stalled');
+    expect(folderRepo.surface.posts[0]?.text).toContain('*`sandbox-21-bench`* (sandbox#21) seems stalled');
 
     const registryDown = makeWatchdog({ repoList: new Error('orca down') });
     seedDispatch(registryDown.store);
     await registryDown.watchdog.sweep();
-    expect(registryDown.surface.posts[0]?.text).toContain('(scratch#21) seems stalled');
+    expect(registryDown.surface.posts[0]?.text).toContain('(sandbox#21) seems stalled');
   });
 });
 
@@ -436,7 +436,7 @@ describe('a live-but-mute worker → the in-flight ⚠️ alert (issue #48)', ()
       {
         threadTs: THREAD,
         text:
-          '⚠️ *`scratch-21-bench`* (<https://github.com/nvergez/scratch/issues/21|scratch#21>) needs attention —\n' +
+          '⚠️ *`sandbox-21-bench`* (<https://github.com/acme/sandbox/issues/21|sandbox#21>) needs attention —\n' +
           'in flight for 2 h 20 min without a word on the bus (agent state: `working`). Last assistant message:\n' +
           '\n' +
           `> \`${ROOT_CAUSE}\`\n` +
@@ -448,7 +448,7 @@ describe('a live-but-mute worker → the in-flight ⚠️ alert (issue #48)', ()
     expect(store.getStall('ctx_w1')).toMatchObject({
       threadTs: THREAD,
       workerHandle: WORKER,
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       lastOutput: ROOT_CAUSE,
       fingerprint: `inflight:${DISPATCH_MS}`,
       relayTs: 'msg-ts-1',
@@ -574,7 +574,7 @@ describe('a live-but-mute worker → the in-flight ⚠️ alert (issue #48)', ()
       taskId: 'task_bench',
       dispatchId: 'ctx_w1',
       workerHandle: WORKER,
-      worktreeName: 'scratch-21-bench',
+      worktreeName: 'sandbox-21-bench',
       kind: 'decision_gate',
       question: 'Overwrite bench.json?',
       options: [],

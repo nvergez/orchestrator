@@ -40,9 +40,9 @@ describe('parseRoutingHints', () => {
   it('parses a valid document, preserving entry order', () => {
     const hints = parseRoutingHints(
       hintsJson([
-        { name: 'forwardly', description: 'The product.', aliases: ['fwd'], keywords: ['export'] },
+        { name: 'webapp', description: 'The product.', aliases: ['fwd'], keywords: ['export'] },
         {
-          name: 'scratch',
+          name: 'sandbox',
           description: 'Sandbox.',
           aliases: [],
           keywords: ['one-shot'],
@@ -50,7 +50,7 @@ describe('parseRoutingHints', () => {
         },
       ]),
     );
-    expect(hints.map((h) => h.name)).toEqual(['forwardly', 'scratch']);
+    expect(hints.map((h) => h.name)).toEqual(['webapp', 'sandbox']);
     expect(hints[0]?.defaultAgent).toBeUndefined();
     expect(hints[1]?.defaultAgent).toBe('codex');
   });
@@ -90,33 +90,42 @@ describe('parseRoutingHints', () => {
 });
 
 describe('loadRoutingHints', () => {
-  it('loads the versioned routing-hints.json with the four initial repos (issue #18)', () => {
+  it('loads the shipped routing-hints.example.json — the example must stay valid', () => {
     const hints = loadRoutingHints(
-      fileURLToPath(new URL('../routing-hints.json', import.meta.url)),
+      fileURLToPath(new URL('../routing-hints.example.json', import.meta.url)),
     );
-    expect(hints.map((h) => h.name)).toEqual(['forwardly', 'orca', 'scratch', 'orchestrator']);
+    expect(hints.map((h) => h.name)).toEqual(['webapp', 'sandbox']);
     // Issue #10: all-claude at the start — no per-repo default set.
     expect(hints.every((h) => h.defaultAgent === undefined)).toBe(true);
   });
 
-  it('wraps an unreadable file in a RoutingHintsError', () => {
+  it('points a missing file at `orc init`, with the resolved path (issue #70)', () => {
     expect(() => loadRoutingHints('/nonexistent/routing-hints.json')).toThrow(RoutingHintsError);
+    expect(() => loadRoutingHints('/nonexistent/routing-hints.json')).toThrow(
+      /not found at \/nonexistent\/routing-hints\.json — run `orc init`/,
+    );
+  });
+
+  it('prefixes a malformed file with its path — boot-fatal stays diagnosable', () => {
+    const notJson = fileURLToPath(new URL('./routing.test.ts', import.meta.url));
+    expect(() => loadRoutingHints(notJson)).toThrow(RoutingHintsError);
+    expect(() => loadRoutingHints(notJson)).toThrow(/routing\.test\.ts: routing hints are not valid JSON/);
   });
 });
 
 describe('RepoAllowList', () => {
   const registry = registryJson([
-    { id: 'uuid-forwardly', displayName: 'forwardly' },
+    { id: 'uuid-webapp', displayName: 'webapp' },
     { id: 'uuid-legacy', displayName: 'legacy-app' },
   ]);
   const makeAllowList = (run: CommandRunner) =>
-    new RepoAllowList({ hints: [hint('forwardly')], logger: createLogger('silent'), run });
+    new RepoAllowList({ hints: [hint('webapp')], logger: createLogger('silent'), run });
 
   it('allows a hinted, registered repo — by id, id: ref, or name', async () => {
     const allowList = makeAllowList(succeedWith(registry));
-    await expect(allowList.check('uuid-forwardly')).resolves.toEqual({ allowed: true });
-    await expect(allowList.check('id:uuid-forwardly')).resolves.toEqual({ allowed: true });
-    await expect(allowList.check('forwardly')).resolves.toEqual({ allowed: true });
+    await expect(allowList.check('uuid-webapp')).resolves.toEqual({ allowed: true });
+    await expect(allowList.check('id:uuid-webapp')).resolves.toEqual({ allowed: true });
+    await expect(allowList.check('webapp')).resolves.toEqual({ allowed: true });
   });
 
   it('denies a registered repo that has no hints entry (spec §7: hints = allow-list)', async () => {
@@ -133,15 +142,15 @@ describe('RepoAllowList', () => {
 
   it('never lets a typed ref match the other field — id:<name> is not a repo', async () => {
     const allowList = makeAllowList(succeedWith(registry));
-    await expect(allowList.check('id:forwardly')).resolves.toMatchObject({ allowed: false });
-    await expect(allowList.check('name:uuid-forwardly')).resolves.toMatchObject({
+    await expect(allowList.check('id:webapp')).resolves.toMatchObject({ allowed: false });
+    await expect(allowList.check('name:uuid-webapp')).resolves.toMatchObject({
       allowed: false,
     });
   });
 
   it('denies a hinted repo that is not registered — hints alone do not delegate', async () => {
     const emptyRegistry = registryJson([]);
-    const verdict = await makeAllowList(succeedWith(emptyRegistry)).check('forwardly');
+    const verdict = await makeAllowList(succeedWith(emptyRegistry)).check('webapp');
     expect(verdict).toMatchObject({ allowed: false });
   });
 
@@ -153,7 +162,7 @@ describe('RepoAllowList', () => {
 
   it('denies, fail closed, when Orca is unreachable', async () => {
     const verdict = await makeAllowList(failWith(new Error('spawn orca ENOENT'))).check(
-      'id:uuid-forwardly',
+      'id:uuid-webapp',
     );
     expect(verdict).toMatchObject({ allowed: false });
     expect((verdict as { reason: string }).reason).toContain('Orca runtime unavailable');
@@ -162,16 +171,16 @@ describe('RepoAllowList', () => {
 
 describe('routingInstructions', () => {
   const hints = [
-    hint('forwardly', { aliases: ['fwd', 'the product'], keywords: ['export', 'metrics'] }),
-    hint('scratch', { defaultAgent: 'codex' }),
+    hint('webapp', { aliases: ['fwd', 'the product'], keywords: ['export', 'metrics'] }),
+    hint('sandbox', { defaultAgent: 'codex' }),
   ];
   const prompt = routingInstructions(hints);
 
   it('enumerates every hinted repo with description, aliases and keywords', () => {
-    expect(prompt).toContain('*forwardly* — forwardly description.');
+    expect(prompt).toContain('*webapp* — webapp description.');
     expect(prompt).toContain('Aliases: fwd, the product.');
     expect(prompt).toContain('Keywords: export, metrics.');
-    expect(prompt).toContain('*scratch* — scratch description.');
+    expect(prompt).toContain('*sandbox* — sandbox description.');
   });
 
   it('anchors on the living registry and the closed candidate set', () => {
@@ -187,7 +196,7 @@ describe('routingInstructions', () => {
 
   it('fixes the zero-match verbatim over the hinted names', () => {
     expect(prompt).toContain(
-      'No repo I drive matches. I know: `forwardly`, `scratch`. Rephrase targeting one of them.',
+      'No repo I drive matches. I know: `webapp`, `sandbox`. Rephrase targeting one of them.',
     );
   });
 

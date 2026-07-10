@@ -1,7 +1,12 @@
-# Secrets — never committed. Real file lives outside the repo: /home/dev/projects/orchestrator/.env
+# Secrets — never committed. The real env file lives outside the repo
+# (~/.config/orchestrator/env, chmod 600 — scaffold with `orc init`).
 .env
 .env.*
 !.env.example
+
+# Instance config — a real routing-hints.json at the checkout root is a dev-run
+# convenience (ORCHESTRATOR_ROUTING_HINTS_PATH); the repo ships only the example.
+routing-hints.json
 
 node_modules/
 

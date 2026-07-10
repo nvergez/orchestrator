@@ -1,5 +1,4 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { resolveDefaultDbPath } from './xdg.ts';
 
 /**
  * Boot configuration, read from process.env only (spec §10: no dotenv —
@@ -159,9 +158,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     slackAllowedUserId: required('SLACK_ALLOWED_USER_ID', 'U'),
     claudeCodeOauthToken: required('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-'),
     logLevel: env.LOG_LEVEL ?? 'info',
-    dbPath:
-      env.ORCHESTRATOR_DB_PATH ??
-      join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
+    dbPath: env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(env),
     warmTtlMs: warmTtlMinutes * 60_000,
     costWarnThresholdsUsd,
     liveSessionCap,
