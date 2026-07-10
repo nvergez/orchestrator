@@ -1,0 +1,17 @@
+{
+  // Emit config for the published package (#67): compile src/ → dist/.
+  // tsconfig.json stays the no-emit config for dev runs and `npm run typecheck`.
+  // rewriteRelativeImportExtensions turns the repo's `./x.ts` import
+  // specifiers into `./x.js` in the emitted output, so the source keeps
+  // running directly under Node type stripping.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "sourceMap": true,
+    "inlineSources": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "exclude": ["src/**/*.test.ts"]
+}

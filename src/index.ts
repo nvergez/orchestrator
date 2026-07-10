@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { join } from 'node:path';
 import { App } from '@slack/bolt';
 import { pino } from 'pino';
