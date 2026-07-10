@@ -1,7 +1,7 @@
 # Live e2e scenarios — driving the deployed bot
 
 How to exercise the orchestrator end-to-end against the **deployed daemon** (no mocks): post to
-`#orchestrator` (`C0ASJR3LAE6`) as the allowed user, watch `journalctl --user -u orchestrator -f`,
+the pinned channel (your `SLACK_CHANNEL_ID`) as the allowed user, watch `journalctl --user -u orchestrator -f`,
 and verify worker side-effects on disk. First run: 2026-07-09 (findings became issues #45–#52,
 all fixed and redeployed the same day).
 
@@ -15,9 +15,9 @@ all fixed and redeployed the same day).
 - Messages sent through the claude.ai Slack MCP arrive with a `*Envoyé avec* @Claude` context
   footer; the daemon extracts command/turn text from `rich_text` blocks only (#41), so commands
   still match.
-- Use `scratch` (folder repo, no remote) as the delegation target: side-effects land in
-  `/home/dev/scratch`, nothing ships, and it exercises the degraded no-GitHub rendering.
-- Ops note: `export XDG_RUNTIME_DIR=/run/user/1000` before `systemctl --user` / `journalctl --user`
+- Use a sandbox folder repo (no remote, e.g. `~/sandbox`) as the delegation target: side-effects
+  land in its folder, nothing ships, and it exercises the degraded no-GitHub rendering.
+- Ops note: `export XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user` / `journalctl --user`
   in Orca shells.
 
 ## Scenario suite
@@ -47,4 +47,4 @@ Not drivable single-user: third-party filter (G1/G2), the ⏳ session-cap queue,
 - Worker `ask` timeout retries arrive as **new** `decision_gate` msg_ids — the relay must supersede,
   not stack (#46). Replies to expired asks return `ok:true` and vanish worker-side: route to the
   newest gate.
-- Leftover worker workspaces in `scratch` accumulate until #43 (auto-clean on `worker_done`) lands.
+- Leftover worker workspaces in the sandbox repo accumulate until #43 (auto-clean on `worker_done`) lands.
