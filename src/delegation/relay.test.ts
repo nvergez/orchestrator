@@ -108,12 +108,6 @@ describe('decorateReply — the registry as turn context', () => {
     expect(decorated.endsWith('---\nthe human words')).toBe(true);
   });
 
-  it('never leaks another thread’s gates — scoping is hard', () => {
-    const { relay, store } = makeRelay();
-    seedGate(store, { threadTs: OTHER_THREAD });
-    expect(relay.decorateReply(THREAD, 'hello')).toBe('hello');
-  });
-
   it('lists watchdog stall alerts with their terminal, ack ref and last output (issue #22)', () => {
     const { relay, store } = makeRelay();
     seedStall(store);
@@ -130,12 +124,6 @@ describe('decorateReply — the registry as turn context', () => {
       '[ANSWERED] ⚠️ stall from an unmatched worker (ack ref: ctx_nudged, worker terminal unknown',
     );
     expect(decorated.endsWith('---\ny')).toBe(true);
-  });
-
-  it('never leaks another thread’s stalls either', () => {
-    const { relay, store } = makeRelay();
-    seedStall(store, { threadTs: OTHER_THREAD });
-    expect(relay.decorateReply(THREAD, 'y')).toBe('y');
   });
 });
 
@@ -428,17 +416,6 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     });
   };
 
-  it('decorateReply lists the live re-ask once — superseded rows stay out of the context', () => {
-    const { relay, store } = makeRelay();
-    seedGate(store);
-    seedGate(store, { msgId: 'msg_reask' });
-    store.supersedeGate(GATE, 'msg_reask');
-
-    const decorated = relay.decorateReply(THREAD, 'root');
-    expect(decorated).toContain('[PENDING] ❓ question msg_reask');
-    expect(decorated).not.toContain(GATE);
-  });
-
   it('decorateReply marks a closed gate CLOSED — the moot question stays recognizable', () => {
     const { relay, store } = makeRelay();
     seedDispatch(store);
@@ -457,20 +434,6 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     expect(relay.prepare(THREAD, replyCommand('2'))).toEqual({
       action: 'proceed',
       command: 'orca orchestration reply --id msg_reask --body app/ --json',
-    });
-  });
-
-  it('follows a chain of re-asks to the newest live gate', () => {
-    const { relay, store } = makeRelay();
-    seedGate(store);
-    seedGate(store, { msgId: 'msg_r1' });
-    seedGate(store, { msgId: 'msg_r2' });
-    store.supersedeGate(GATE, 'msg_r1');
-    store.supersedeGate('msg_r1', 'msg_r2');
-
-    expect(relay.prepare(THREAD, replyCommand('use the flat config'))).toEqual({
-      action: 'proceed',
-      command: "orca orchestration reply --id msg_r2 --body 'use the flat config' --json",
     });
   });
 

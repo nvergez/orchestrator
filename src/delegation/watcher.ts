@@ -431,44 +431,24 @@ export class GateWatcher {
   }
 
   /**
-   * The ledger row behind an event: the payload's dispatch id (authoritative
-   * — the preamble makes workers echo it on worker_done) with the task id as
-   * a fallback, then the sending terminal — a worker's `ask` carries neither
-   * id, so the asking handle is a decision_gate's usual identity (issue
-   * #21). Fallbacks are scoped to the thread. A row living in another thread
-   * is trusted over the arrival mailbox — the card to edit lives where the
-   * row says.
+   * The ledger row behind an event — the ledger owns the identity rules
+   * (dispatch id authoritative, task id and asking-terminal fallbacks,
+   * issue #20/#21/#25); this only adds the arrival log: a row living in
+   * another thread is handled in the ROW's thread, not the mailbox's.
    */
   private findRow(threadTs: string, message: OrchestrationMessage): DelegationRow | undefined {
-    const byDispatch =
-      message.payload.dispatchId === undefined
-        ? undefined
-        : this.store.getByDispatchId(message.payload.dispatchId);
-    if (byDispatch !== undefined) {
-      if (byDispatch.threadTs !== threadTs) {
-        this.logger.warn(
-          { threadTs, rowThreadTs: byDispatch.threadTs, dispatchId: byDispatch.dispatchId },
-          'event arrived on another thread’s mailbox — handling it in the row’s thread',
-        );
-      }
-      return byDispatch;
-    }
-    if (message.payload.taskId !== undefined) {
-      return (
-        this.store.inFlightByTaskId(threadTs, message.payload.taskId) ??
-        // A closed row still matches (issue #25): a worker_done consumed
-        // after boot reconciliation already closed its delegation must land
-        // on the duplicate guard above, not surface as an unknown worker.
-        this.store.latestByTaskId(threadTs, message.payload.taskId)
+    const row = this.store.resolveWorkerEvent(threadTs, {
+      dispatchId: message.payload.dispatchId,
+      taskId: message.payload.taskId,
+      workerHandle: message.fromHandle,
+    });
+    if (row !== undefined && row.threadTs !== threadTs) {
+      this.logger.warn(
+        { threadTs, rowThreadTs: row.threadTs, dispatchId: row.dispatchId },
+        'event arrived on another thread’s mailbox — handling it in the row’s thread',
       );
     }
-    // The handle fallback only covers id-LESS payloads (an `ask`): a message
-    // that names ids pointing nowhere is a stale straggler — matching it by
-    // handle would let a failed retry's worker_done close the live dispatch.
-    if (message.payload.dispatchId !== undefined || message.fromHandle === undefined) {
-      return undefined;
-    }
-    return this.store.inFlightByWorkerHandle(threadTs, message.fromHandle);
+    return row;
   }
 
   /** The card's final state — duration and issue link resolved daemon-side. */

@@ -15,6 +15,15 @@ lifecycle (`src/delegation/thread-surface.ts`). Every emoji and final-card
 decision goes through it; nothing else touches root reactions.
 _Avoid_: reaction helpers, watcher utils
 
+**Delegation ledger**:
+The persistent record of every delegation's lifecycle and the single source
+of truth for what is in flight (`src/delegation/delegations.ts`). The worker
+cap, boot reconciliation and the watchers all count on it, and it owns the
+identity questions over its own records — which delegation a bus event
+belongs to, which gate owns a re-asked question now — so callers ask
+questions instead of re-deriving answers from raw rows.
+_Avoid_: store, DB layer
+
 ### Releasing
 
 **Release**:

@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { worktreeIssueRef } from './worktree-name.ts';
 
 /** One row of the `delegations` table (spec §9) — written at dispatch. */
 export interface DelegationRow {
@@ -81,6 +82,50 @@ export interface StallAlertRow {
 }
 
 /**
+ * How a bus event names its delegation — what `resolveWorkerEvent` trusts,
+ * strongest first. The preamble makes workers echo the dispatch id; an `ask`
+ * carries no ids at all, so the sending terminal is its only identity.
+ */
+export interface WorkerEventKeys {
+  dispatchId?: string | undefined;
+  taskId?: string | undefined;
+  /** The sending terminal handle (`from_handle` on the bus). */
+  workerHandle?: string | undefined;
+}
+
+/**
+ * One relayed question as the session's turn context needs it (issue
+ * #21/#46) — the read model behind the routing instructions, not a table
+ * row. Superseded rows never appear: their question lives on in the re-ask
+ * successor, and listing both would recreate the duplicate-gate noise the
+ * supersede exists to kill.
+ */
+export interface TurnContextGate {
+  msgId: string;
+  kind: 'decision_gate' | 'escalation';
+  /** Never `superseded` — those rows stay out of the context by design. */
+  status: 'pending' | 'answered' | 'closed';
+  question: string;
+  options: string[];
+  worktreeName: string | null;
+  workerHandle: string | null;
+  /** `repo#n` from the worktree name, degrading to the task id, then the
+   * msg id — the reference the human acknowledges the question by. */
+  ackRef: string;
+}
+
+/** One watchdog stall alert for the same turn context (issue #22). */
+export interface TurnContextStall {
+  dispatchId: string;
+  status: 'pending' | 'answered';
+  worktreeName: string | null;
+  workerHandle: string | null;
+  lastOutput: string;
+  /** `repo#n` from the worktree name, degrading to the dispatch id. */
+  ackRef: string;
+}
+
+/**
  * The pending_gates columns — one definition shared by the fresh CREATE and
  * the issue #46 migration rebuild, so the two shapes can never drift.
  */
@@ -104,20 +149,23 @@ const PENDING_GATES_COLUMNS = `(
       ) STRICT`;
 
 /**
- * The `delegations` + `mailboxes` + `pending_gates` + `stall_alerts` share of
- * the orchestrator state database (spec §9), sharing the SQLite file with
- * SessionStore — same synchronous single-writer design. The delegations
- * ledger is written at dispatch and closed on `worker_done` (slice #20); it
- * is what boot reconciliation and the worker-cap count survive restarts on.
- * The mailboxes table remembers each thread's coordinator terminal
- * (`slack-<thread_ts>`, issue #9) so a thread's dispatches all share one
- * origin handle across daemon restarts. The pending_gates registry is written
- * by the daemon at relay time (issue #21) and anchors the routing of human
- * answers back down. The stall_alerts registry is its watchdog sibling
- * (issue #22): written when a ⚠️ alert is posted, it anchors the terminal-
- * send route for the reply and the no-repeat-spam fingerprint.
+ * The delegation ledger (spec §9): the persistent record of every
+ * delegation's lifecycle and the single source of truth for what is in
+ * flight — the worker cap, boot reconciliation and the watchers all count
+ * on it. It shares the SQLite file with SessionStore — same synchronous
+ * single-writer design — across four tables: `delegations` (written at
+ * dispatch, closed on `worker_done`, slice #20), `mailboxes` (each thread's
+ * coordinator terminal, `slack-<thread_ts>`, issue #9), `pending_gates`
+ * (written by the daemon at relay time, issue #21 — what routes human
+ * answers back down) and `stall_alerts` (its watchdog sibling, issue #22).
  *
- * Unlike `sessions`, both tables key on `thread_ts` alone — deliberate: the
+ * The ledger also OWNS the identity questions over those tables, so callers
+ * never re-derive them from raw rows: which delegation a bus event belongs
+ * to (`resolveWorkerEvent`), which gate owns a re-asked question now
+ * (`liveGateFor`), and what a session's turn context must list
+ * (`turnContextFor`).
+ *
+ * Unlike `sessions`, the tables key on `thread_ts` alone — deliberate: the
  * daemon serves the single pinned channel (spec §2), and the coordinator
  * side only ever sees a thread ts. `channel_id` is stored so the rows stay
  * self-describing, not to disambiguate.
@@ -326,12 +374,41 @@ export class DelegationStore {
   }
 
   /**
-   * Fallback association for a worker_done whose payload lost the dispatch
-   * id: the thread's newest in-flight row for that task. Scoped to the
-   * thread — the mailbox the event arrived on — so the runtime-global bus
-   * can never close another thread's delegation.
+   * The ledger row behind a bus event — the one identity rule for the
+   * watcher (issues #20/#21) and boot reconciliation's mailbox peek (issue
+   * #25): an event resolves by the STRONGEST identity it names, and a named
+   * id pointing nowhere never degrades to a weaker one (a stale straggler's
+   * ids must not let it claim the live retry's delegation).
+   *
+   * - The dispatch id is authoritative, ANY status and ANY thread: a row
+   *   living in another thread is trusted over the arrival mailbox — the
+   *   card to edit lives where the row says.
+   * - The task id covers payloads that name no dispatch id, scoped to the
+   *   thread the event arrived on: newest in-flight row first, then any
+   *   status — after boot reconciliation closes an outage completion, the
+   *   re-armed watcher can still consume the same worker_done, which must
+   *   land on the duplicate guard instead of surfacing as an unknown worker.
+   * - The sending terminal only covers id-LESS events (a worker's `ask`
+   *   carries no ids at all): the thread's newest in-flight row for that
+   *   handle.
    */
-  inFlightByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+  resolveWorkerEvent(threadTs: string, event: WorkerEventKeys): DelegationRow | undefined {
+    if (event.dispatchId !== undefined) return this.getByDispatchId(event.dispatchId);
+    if (event.taskId !== undefined) {
+      return (
+        this.inFlightByTaskId(threadTs, event.taskId) ??
+        this.latestByTaskId(threadTs, event.taskId)
+      );
+    }
+    if (event.workerHandle !== undefined) {
+      return this.inFlightByWorkerHandle(threadTs, event.workerHandle);
+    }
+    return undefined;
+  }
+
+  /** The thread's newest in-flight row for a task — thread-scoped, so the
+   * runtime-global bus can never close another thread's delegation. */
+  private inFlightByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
@@ -342,13 +419,8 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
-  /**
-   * Fallback association for a `decision_gate` (issue #21): a worker's `ask`
-   * carries no task or dispatch id in its payload — the asking terminal
-   * (`from_handle`) is the only identity it has. Same thread scoping as the
-   * task-id fallback, newest first.
-   */
-  inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
+  /** The thread's newest in-flight row for an asking terminal (issue #21). */
+  private inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
@@ -359,14 +431,8 @@ export class DelegationStore {
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
-  /**
-   * The thread's newest row for a task, ANY status (issue #25): after boot
-   * reconciliation closes an outage completion, the re-armed watcher can
-   * still consume the same worker_done — a taskId-only payload must resolve
-   * to the closed row (and hit the duplicate guard) instead of surfacing as
-   * an unknown worker.
-   */
-  latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+  /** The thread's newest row for a task, ANY status (issue #25). */
+  private latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
@@ -520,8 +586,31 @@ export class DelegationStore {
     return row === undefined ? undefined : toPendingGateRow(row);
   }
 
-  /** All of a thread's relayed gates, oldest first — the turn-context list. */
-  listGatesForThread(threadTs: string): PendingGateRow[] {
+  /**
+   * The gate that owns a question NOW (issue #46): the end of the named
+   * gate's re-ask chain, whatever its terminal status, so a caller's
+   * pending/answered/closed handling applies to the one ask the worker
+   * still listens on. A gate that was never superseded answers itself.
+   * Undefined on an unknown msg id, a dangling pointer, a cycle or a
+   * cross-thread hop (a hand-edited registry) — refuse rather than guess.
+   */
+  liveGateFor(msgId: string): PendingGateRow | undefined {
+    let current = this.getGate(msgId);
+    if (current === undefined) return undefined;
+    const threadTs = current.threadTs;
+    const seen = new Set<string>([current.msgId]);
+    while (current.status === 'superseded') {
+      if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
+      seen.add(current.supersededBy);
+      const next = this.getGate(current.supersededBy);
+      if (next === undefined || next.threadTs !== threadTs) return undefined;
+      current = next;
+    }
+    return current;
+  }
+
+  /** All of a thread's relayed gates, oldest first. */
+  private listGatesForThread(threadTs: string): PendingGateRow[] {
     const rows = this.db
       .prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id')
       .all(threadTs) as Array<Record<string, unknown>>;
@@ -531,6 +620,51 @@ export class DelegationStore {
   /** The thread's unanswered gates — what the root reaction and routing read. */
   listPendingGates(threadTs: string): PendingGateRow[] {
     return this.listGatesForThread(threadTs).filter((gate) => gate.status === 'pending');
+  }
+
+  /**
+   * What the session's next turn must know about this thread's relayed state
+   * (spec §6: the session routes "anchored on the registry"): every gate and
+   * stall alert, oldest first, shaped for the turn context. Answered entries
+   * ride along so the session can recognize — and refuse to re-route — a
+   * late correction, and closed entries so it can tell a moot question apart
+   * from an open one (issue #46). Superseded rows stay out: their question
+   * lives on in the re-ask successor.
+   */
+  turnContextFor(threadTs: string): { gates: TurnContextGate[]; stalls: TurnContextStall[] } {
+    const gates = this.listGatesForThread(threadTs)
+      .filter(
+        (gate): gate is PendingGateRow & { status: TurnContextGate['status'] } =>
+          gate.status !== 'superseded',
+      )
+      .map(
+        (gate): TurnContextGate => ({
+          msgId: gate.msgId,
+          kind: gate.kind,
+          status: gate.status,
+          question: gate.question,
+          options: gate.options,
+          worktreeName: gate.worktreeName,
+          workerHandle: gate.workerHandle,
+          ackRef:
+            (gate.worktreeName === null ? null : worktreeIssueRef(gate.worktreeName)) ??
+            gate.taskId ??
+            gate.msgId,
+        }),
+      );
+    const stalls = this.listStallsForThread(threadTs).map(
+      (stall): TurnContextStall => ({
+        dispatchId: stall.dispatchId,
+        status: stall.status,
+        worktreeName: stall.worktreeName,
+        workerHandle: stall.workerHandle,
+        lastOutput: stall.lastOutput,
+        ackRef:
+          (stall.worktreeName === null ? null : worktreeIssueRef(stall.worktreeName)) ??
+          stall.dispatchId,
+      }),
+    );
+    return { gates, stalls };
   }
 
   /**
@@ -582,8 +716,8 @@ export class DelegationStore {
     return row === undefined ? undefined : toStallAlertRow(row);
   }
 
-  /** All of a thread's stall alerts, oldest first — the turn-context list. */
-  listStallsForThread(threadTs: string): StallAlertRow[] {
+  /** All of a thread's stall alerts, oldest first. */
+  private listStallsForThread(threadTs: string): StallAlertRow[] {
     const rows = this.db
       .prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id')
       .all(threadTs) as Array<Record<string, unknown>>;

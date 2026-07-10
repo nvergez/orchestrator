@@ -217,18 +217,6 @@ describe('worker_done — the happy path', () => {
     expect(rmCalls).toEqual(['worktree rm --worktree id:wt-1 --json']);
   });
 
-  it('matches on the task id when the payload lost the dispatch id', async () => {
-    const { watcher, store } = makeWatcher({
-      checks: [checkOut(busMessage({ payload: JSON.stringify({ taskId: 'task_3f81' }) }))],
-    });
-    seedDispatch(store);
-
-    watcher.arm(THREAD);
-    await stopped(watcher);
-
-    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
-  });
-
   it('posts a fresh final card when no ⚙️ card ever landed', async () => {
     const { watcher, store, surface } = makeWatcher({ checks: [checkOut(busMessage())] });
     seedDispatch(store, { cardTs: null });
@@ -579,7 +567,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     // Both windows consumed; the replay changed nothing.
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
-      expect(store.listGatesForThread(THREAD)).toHaveLength(1);
+      expect(store.listPendingGates(THREAD)).toHaveLength(1);
     });
   });
 
@@ -1080,23 +1068,6 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
     expect(surface.posts).toEqual([]);
-  });
-
-  it('a straggler heartbeat from a closed dispatch cannot stamp the live ledger', async () => {
-    const { watcher, store } = makeWatcher({
-      checks: [checkOut(busMessage({ type: 'heartbeat', subject: 'alive', body: '' }))],
-    });
-    seedDispatch(store);
-    seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_retry' });
-    store.closeDelegation('ctx_d1', 'failed');
-
-    watcher.arm(THREAD);
-    await vi.waitFor(() => {
-      expect(watcher.isArmed(THREAD)).toBe(true);
-    });
-
-    expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
-    expect(store.getByDispatchId('ctx_d2')?.lastBusAt).toBeNull();
   });
 
   it('an ask is bus liveness too: stamps the clock and supersedes the pending ⚠️', async () => {

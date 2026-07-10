@@ -314,6 +314,36 @@ describe('prepare — the thread mailbox (issue #9)', () => {
 });
 
 describe('the worker cap — waves (spec §5)', () => {
+  /** An in-flight ledger row — a worker already out there holding a slot. */
+  const seedInFlight = (store: DelegationStore, dispatchId: string): void => {
+    store.recordDispatch({
+      taskId: dispatchId.replace('ctx', 'task'),
+      dispatchId,
+      worktreeId: null,
+      worktreeName: null,
+      worktreePath: null,
+      repo: null,
+      issueNumber: null,
+      agent: null,
+      workerHandle: null,
+      threadTs: THREAD,
+      channelId: CHANNEL,
+      cardTs: null,
+      title: null,
+    });
+  };
+
+  /** What production does when a worker finishes: the watcher closes the
+   * ledger row, then tells the coordinator a slot freed. */
+  const closeDelegation = (
+    store: DelegationStore,
+    coordinator: DelegationCoordinator,
+    dispatchId: string,
+  ): void => {
+    store.closeDelegation(dispatchId, 'completed');
+    coordinator.onDelegationClosed();
+  };
+
   it('lets creates through silently under the cap', async () => {
     const { coordinator, surface } = makeCoordinator({ workerCap: 2 });
     await expect(coordinator.prepare(THREAD, CREATE_CMD)).resolves.toEqual({
@@ -324,8 +354,9 @@ describe('the worker cap — waves (spec §5)', () => {
   });
 
   it('holds an over-cap create with a ⏳ line until a delegation closes', async () => {
-    const { coordinator, surface } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
+    const store = new DelegationStore(':memory:');
+    seedInFlight(store, 'ctx_old');
+    const { coordinator, surface } = makeCoordinator({ workerCap: 1, store });
 
     let resolved = false;
     const waiting = coordinator.prepare(THREAD_B, CREATE_CMD).then((verdict) => {
@@ -341,27 +372,31 @@ describe('the worker cap — waves (spec §5)', () => {
       },
     ]);
 
-    coordinator.onDelegationClosed();
+    closeDelegation(store, coordinator, 'ctx_old');
+    await expect(waiting).resolves.toEqual({ action: 'proceed', command: CREATE_CMD });
+  });
+
+  it('a reservation in the create→dispatch window holds a slot too', async () => {
+    const { coordinator, surface } = makeCoordinator({ workerCap: 1 });
+    await coordinator.prepare(THREAD, CREATE_CMD);
+
+    let resolved = false;
+    const waiting = coordinator.prepare(THREAD_B, CREATE_CMD).then((verdict) => {
+      resolved = true;
+      return verdict;
+    });
+    await settle();
+    expect(resolved).toBe(false);
+    expect(surface.posts[0]?.text).toContain('⏳ Worker cap reached');
+
+    // The reserved create fails — its slot admits the waiting wave.
+    await coordinator.observe(THREAD, CREATE_CMD, '');
     await expect(waiting).resolves.toEqual({ action: 'proceed', command: CREATE_CMD });
   });
 
   it('counts ledger rows already in flight at boot toward the cap', async () => {
     const store = new DelegationStore(':memory:');
-    store.recordDispatch({
-      taskId: 'task_old',
-      dispatchId: 'ctx_old',
-      worktreeId: null,
-      worktreeName: null,
-      worktreePath: null,
-      repo: null,
-      issueNumber: null,
-      agent: null,
-      workerHandle: null,
-      threadTs: THREAD,
-      channelId: CHANNEL,
-      cardTs: null,
-      title: null,
-    });
+    seedInFlight(store, 'ctx_old');
     const { coordinator, surface } = makeCoordinator({ workerCap: 1, store });
 
     let resolved = false;
@@ -376,23 +411,7 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('after a cap decrease, over-cap workers must drain below the new cap first', async () => {
     const store = new DelegationStore(':memory:');
-    for (const n of [1, 2, 3]) {
-      store.recordDispatch({
-        taskId: `task_${n}`,
-        dispatchId: `ctx_${n}`,
-        worktreeId: null,
-        worktreeName: null,
-        worktreePath: null,
-        repo: null,
-        issueNumber: null,
-        agent: null,
-        workerHandle: null,
-        threadTs: THREAD,
-        channelId: CHANNEL,
-        cardTs: null,
-        title: null,
-      });
-    }
+    for (const n of [1, 2, 3]) seedInFlight(store, `ctx_${n}`);
     // WORKER_CAP lowered to 1 while 3 workers are still in flight.
     const { coordinator } = makeCoordinator({ workerCap: 1, store });
 
@@ -403,13 +422,35 @@ describe('the worker cap — waves (spec §5)', () => {
     });
     await settle();
 
-    coordinator.onDelegationClosed();
-    coordinator.onDelegationClosed();
+    closeDelegation(store, coordinator, 'ctx_1');
+    closeDelegation(store, coordinator, 'ctx_2');
     await settle();
     expect(resolved).toBe(false);
 
-    coordinator.onDelegationClosed();
+    closeDelegation(store, coordinator, 'ctx_3');
     await expect(waiting).resolves.toEqual({ action: 'proceed', command: CREATE_CMD });
+  });
+
+  it('a dispatch after abandonThread is still counted — the ledger, not slot bookkeeping, is the cap', async () => {
+    const { coordinator, store } = makeCoordinator({ workerCap: 1 });
+    await coordinator.prepare(THREAD, CREATE_CMD);
+    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    // The session died; its reservation went back to the pool…
+    coordinator.abandonThread(THREAD);
+    // …but a cold-resumed session still dispatches the worktree it created.
+    await primeWorker(coordinator);
+    const prepared = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    expect(prepared.action).toBe('proceed');
+    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    expect(store.inFlightCount()).toBe(1);
+
+    // The dispatched worker holds the only slot — the next create waits.
+    let resolved = false;
+    void coordinator.prepare(THREAD_B, CREATE_CMD).then(() => {
+      resolved = true;
+    });
+    await settle();
+    expect(resolved).toBe(false);
   });
 
   it('a turn abort while waiting denies cleanly and leaves the queue intact', async () => {

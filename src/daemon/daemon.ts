@@ -127,10 +127,9 @@ export async function runDaemon(): Promise<void> {
     // Boot reconciliation (spec §7, issue #25): crash recovery without waking
     // sessions — dispatched rows reconciled against task-list + worktree ps,
     // one truthful ⚠️ line per affected thread, completions missed during the
-    // outage closed right here. Deliberately BEFORE the coordinator (so the
-    // worker-cap count below excludes what the outage already ended) and
-    // BEFORE the watcher re-arm (so a closed row never arms a watcher that
-    // would double-report it as a wake).
+    // outage closed right here. Deliberately BEFORE the watcher re-arm (so a
+    // closed row never arms a watcher that would double-report it as a wake);
+    // the worker cap needs no ordering — it reads the ledger live.
     await new BootReconciler({ store: delegationStore, surface, logger }).reconcile();
 
     // The delegation coordinator (issue #19): worker cap, mailbox terminals,

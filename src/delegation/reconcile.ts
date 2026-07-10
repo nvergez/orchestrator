@@ -206,8 +206,21 @@ export class BootReconciler {
     rows: DelegationRow[],
     observed: Observations,
   ): Promise<Reconciled[]> {
-    const reports = await this.peekWorkerDones(threadTs);
-    return rows.map((row) => this.classify(row, observed, reports));
+    // The ledger owns the identity rule (`resolveWorkerEvent`, shared with
+    // the live watcher): the dispatch id is authoritative, the task id only
+    // covers payloads naming no dispatch at all — a report whose ids point
+    // elsewhere never closes anything here. First report per delegation wins.
+    const reportFor = new Map<string, OrchestrationMessage>();
+    for (const message of await this.peekWorkerDones(threadTs)) {
+      const row = this.store.resolveWorkerEvent(threadTs, {
+        dispatchId: message.payload.dispatchId,
+        taskId: message.payload.taskId,
+      });
+      if (row !== undefined && !reportFor.has(row.dispatchId)) {
+        reportFor.set(row.dispatchId, message);
+      }
+    }
+    return rows.map((row) => this.classify(row, observed, reportFor.get(row.dispatchId)));
   }
 
   /**
@@ -219,15 +232,11 @@ export class BootReconciler {
    * archived or silent keeps its row open (absence of evidence closes
    * nothing); the human decides in the thread.
    */
-  private classify(row: DelegationRow, observed: Observations, reports: OrchestrationMessage[]): Reconciled {
-    const report =
-      reports.find((message) => message.payload.dispatchId === row.dispatchId) ??
-      // Like the watcher: the task-id fallback only covers payloads that
-      // name no dispatch at all — ids pointing elsewhere never match here.
-      reports.find(
-        (message) =>
-          message.payload.dispatchId === undefined && message.payload.taskId === row.taskId,
-      );
+  private classify(
+    row: DelegationRow,
+    observed: Observations,
+    report: OrchestrationMessage | undefined,
+  ): Reconciled {
     if (report !== undefined) {
       return isFailureSubject(report.subject)
         ? {

@@ -205,31 +205,6 @@ describe('DelegationStore — closing and the in-flight views (issue #20)', () =
     expect(store.inFlightCount()).toBe(0);
   });
 
-  it('finds a row by dispatch id, or by task id among the thread’s in-flight', () => {
-    const store = openStore();
-    store.recordDispatch(dispatchRow());
-    store.recordDispatch(
-      dispatchRow({ dispatchId: 'ctx_other_thread', threadTs: '1751970099.000900' }),
-    );
-
-    expect(store.getByDispatchId('ctx_8b685db09a47')?.threadTs).toBe(THREAD);
-    expect(store.getByDispatchId('ctx_nope')).toBeUndefined();
-    // Task-id fallback is thread-scoped: the other thread's row never matches.
-    expect(store.inFlightByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe(
-      'ctx_8b685db09a47',
-    );
-    expect(store.inFlightByTaskId('1751970098.000000', 'task_13c700f151b3')).toBeUndefined();
-  });
-
-  it('the task-id fallback skips closed rows and prefers the newest', () => {
-    const store = openStore();
-    store.recordDispatch(dispatchRow());
-    store.closeDelegation('ctx_8b685db09a47', 'failed');
-    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_retry' }));
-
-    expect(store.inFlightByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_retry');
-  });
-
   it('lists a thread’s in-flight rows and the threads needing a watcher', () => {
     const store = openStore();
     store.recordDispatch(dispatchRow());
@@ -248,6 +223,111 @@ describe('DelegationStore — closing and the in-flight views (issue #20)', () =
     store.closeDelegation('ctx_8b685db09a47', 'completed');
     store.closeDelegation('ctx_3', 'failed');
     expect(store.threadsWithInFlight()).toEqual([]);
+  });
+});
+
+describe('DelegationStore — resolveWorkerEvent (the event identity rules)', () => {
+  it('the dispatch id is authoritative — any status, any thread', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow({ threadTs: '1751970099.000900' }));
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    // Trusted over the arrival mailbox and over the closed status: the
+    // watcher handles the event in the ROW's thread, and a straggler naming
+    // a closed dispatch lands on the duplicate guard instead of matching
+    // anything live.
+    const row = store.resolveWorkerEvent(THREAD, {
+      dispatchId: 'ctx_8b685db09a47',
+      taskId: 'task_13c700f151b3',
+    });
+    expect(row?.threadTs).toBe('1751970099.000900');
+    expect(row?.status).toBe('completed');
+  });
+
+  it('an event naming a closed dispatch never resolves to the live retry', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_retry', taskId: 'task_retry' }));
+    store.closeDelegation('ctx_8b685db09a47', 'failed');
+
+    expect(
+      store.resolveWorkerEvent(THREAD, {
+        dispatchId: 'ctx_8b685db09a47',
+        workerHandle: 'term_300035ab',
+      })?.dispatchId,
+    ).toBe('ctx_8b685db09a47');
+  });
+
+  it('a named id pointing nowhere never degrades to a weaker identity', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+
+    // A stale straggler naming an unknown dispatch or task id must not
+    // claim the live delegation through the ids it also carries.
+    expect(
+      store.resolveWorkerEvent(THREAD, {
+        dispatchId: 'ctx_unknown',
+        taskId: 'task_13c700f151b3',
+        workerHandle: 'term_300035ab',
+      }),
+    ).toBeUndefined();
+    expect(
+      store.resolveWorkerEvent(THREAD, { taskId: 'task_unknown', workerHandle: 'term_300035ab' }),
+    ).toBeUndefined();
+    expect(store.resolveWorkerEvent(THREAD, {})).toBeUndefined();
+  });
+
+  it('the task-id fallback is thread-scoped and prefers the newest in-flight row', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'failed');
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_retry' }));
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_other_thread', threadTs: '1751970099.000900' }),
+    );
+
+    expect(store.resolveWorkerEvent(THREAD, { taskId: 'task_13c700f151b3' })?.dispatchId).toBe(
+      'ctx_retry',
+    );
+    expect(
+      store.resolveWorkerEvent('1751970098.000000', { taskId: 'task_13c700f151b3' }),
+    ).toBeUndefined();
+  });
+
+  it('the task-id fallback still matches a closed row — the #25 duplicate-guard backstop', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    // A worker_done consumed after boot reconciliation already closed its
+    // delegation must resolve to the closed row, not surface as unknown.
+    expect(store.resolveWorkerEvent(THREAD, { taskId: 'task_13c700f151b3' })?.status).toBe(
+      'completed',
+    );
+    expect(
+      store.resolveWorkerEvent('1751970099.000900', { taskId: 'task_13c700f151b3' }),
+    ).toBeUndefined();
+  });
+
+  it('an id-less event resolves by its sending terminal — thread-scoped, newest in-flight only', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_old', workerHandle: 'term_w' }));
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_new', workerHandle: 'term_w' }));
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_other', workerHandle: 'term_w', threadTs: '1751970099.000900' }),
+    );
+
+    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_w' })?.dispatchId).toBe(
+      'ctx_new',
+    );
+    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_unknown' })).toBeUndefined();
+
+    // A closed row never matches by handle — an `ask` can only come from a
+    // worker still out there.
+    store.closeDelegation('ctx_new', 'completed');
+    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_w' })?.dispatchId).toBe(
+      'ctx_old',
+    );
   });
 });
 
@@ -339,7 +419,7 @@ describe('DelegationStore — pending_gates registry (issue #21)', () => {
     store.recordGate(gateRow({ msgId: 'msg_other', threadTs: '1751970099.000900' }));
     store.answerGate('msg_1');
 
-    expect(store.listGatesForThread(THREAD).map((gate) => gate.msgId)).toEqual([
+    expect(store.turnContextFor(THREAD).gates.map((gate) => gate.msgId)).toEqual([
       'msg_1',
       'msg_2',
     ]);
@@ -392,7 +472,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
       status: 'pending',
       answeredAt: null,
     });
-    expect(store.listStallsForThread(THREAD)).toHaveLength(1);
+    expect(store.turnContextFor(THREAD).stalls).toHaveLength(1);
   });
 
   it('answers a stall exactly once — the second flip reports it lost', () => {
@@ -413,7 +493,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
     store.recordStall(stallRow({ dispatchId: 'ctx_other', threadTs: '1751970099.000900' }));
     store.answerStall('ctx_1');
 
-    expect(store.listStallsForThread(THREAD).map((stall) => stall.dispatchId)).toEqual([
+    expect(store.turnContextFor(THREAD).stalls.map((stall) => stall.dispatchId)).toEqual([
       'ctx_1',
       'ctx_2',
     ]);
@@ -445,23 +525,6 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
   });
 });
 
-describe('DelegationStore — the asking-handle fallback (issue #21)', () => {
-  it('finds the thread’s newest in-flight row by worker handle, never a closed one', () => {
-    const store = openStore();
-    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_old', workerHandle: 'term_w' }));
-    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_new', workerHandle: 'term_w' }));
-    store.recordDispatch(
-      dispatchRow({ dispatchId: 'ctx_other', workerHandle: 'term_w', threadTs: '1751970099.000900' }),
-    );
-
-    expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_new');
-    expect(store.inFlightByWorkerHandle(THREAD, 'term_unknown')).toBeUndefined();
-
-    store.closeDelegation('ctx_new', 'completed');
-    expect(store.inFlightByWorkerHandle(THREAD, 'term_w')?.dispatchId).toBe('ctx_old');
-  });
-});
-
 describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
   it('remembers the last posted fingerprint per thread', () => {
     const store = openStore();
@@ -480,18 +543,6 @@ describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
     store.setReconcileFingerprint(THREAD, 'ctx_a=stalled');
 
     expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=stalled');
-  });
-});
-
-describe('DelegationStore — any-status task lookup (issue #25)', () => {
-  it('finds the thread’s newest row for a task even after it closed', () => {
-    const store = openStore();
-    store.recordDispatch(dispatchRow());
-    store.closeDelegation('ctx_8b685db09a47', 'completed');
-
-    expect(store.latestByTaskId(THREAD, 'task_13c700f151b3')?.dispatchId).toBe('ctx_8b685db09a47');
-    expect(store.latestByTaskId('1751970099.000900', 'task_13c700f151b3')).toBeUndefined();
-    expect(store.latestByTaskId(THREAD, 'task_none')).toBeUndefined();
   });
 });
 
@@ -536,12 +587,10 @@ describe('DelegationStore — gate registry hygiene (issue #46)', () => {
     store.closeDelegation('ctx_done', 'completed');
 
     expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_live']);
-    // The full ledger view still shows every row — history is never erased.
-    expect(store.listGatesForThread(THREAD).map((gate) => gate.msgId)).toEqual([
-      'msg_stale',
-      'msg_live',
-      'msg_moot',
-    ]);
+    // History is never erased — every row survives with its honest status.
+    expect(store.getGate('msg_stale')?.status).toBe('superseded');
+    expect(store.getGate('msg_live')?.status).toBe('pending');
+    expect(store.getGate('msg_moot')?.status).toBe('closed');
   });
 
   it('closing a delegation closes its still-pending gates — by dispatch id or identity fallback', () => {
@@ -586,6 +635,69 @@ describe('DelegationStore — gate registry hygiene (issue #46)', () => {
     store.closeDelegation('ctx_8b685db09a47', 'completed');
 
     expect(store.getGate('msg_elsewhere')?.status).toBe('pending');
+  });
+
+  it('follows a chain of re-asks to the gate that owns the question now', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.recordGate(gateRow({ msgId: 'msg_r1' }));
+    store.recordGate(gateRow({ msgId: 'msg_r2' }));
+    store.supersedeGate('msg_6a8c14d55c7d', 'msg_r1');
+    store.supersedeGate('msg_r1', 'msg_r2');
+
+    expect(store.liveGateFor('msg_6a8c14d55c7d')?.msgId).toBe('msg_r2');
+    expect(store.liveGateFor('msg_r1')?.msgId).toBe('msg_r2');
+  });
+
+  it('a gate that was never superseded answers itself — whatever its status', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+
+    expect(store.liveGateFor('msg_6a8c14d55c7d')?.msgId).toBe('msg_6a8c14d55c7d');
+
+    store.answerGate('msg_6a8c14d55c7d');
+    expect(store.liveGateFor('msg_6a8c14d55c7d')?.status).toBe('answered');
+  });
+
+  it('the chain ends on the successor whatever ITS status — answered included', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.recordGate(gateRow({ msgId: 'msg_reask' }));
+    store.supersedeGate('msg_6a8c14d55c7d', 'msg_reask');
+    store.answerGate('msg_reask');
+
+    // The caller's answered/closed handling applies to the live gate — a
+    // forwarded reply must hit the answered denial, not re-route.
+    expect(store.liveGateFor('msg_6a8c14d55c7d')?.status).toBe('answered');
+  });
+
+  it('refuses a dangling pointer or an unknown gate instead of guessing', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.supersedeGate('msg_6a8c14d55c7d', 'msg_ghost');
+
+    expect(store.liveGateFor('msg_6a8c14d55c7d')).toBeUndefined();
+    expect(store.liveGateFor('msg_never_relayed')).toBeUndefined();
+  });
+
+  it('refuses a supersede cycle instead of walking it forever', () => {
+    const store = openStore();
+    store.recordGate(gateRow({ msgId: 'msg_a' }));
+    store.recordGate(gateRow({ msgId: 'msg_b' }));
+    store.supersedeGate('msg_a', 'msg_b');
+    store.supersedeGate('msg_b', 'msg_a');
+
+    expect(store.liveGateFor('msg_a')).toBeUndefined();
+    expect(store.liveGateFor('msg_b')).toBeUndefined();
+  });
+
+  it('refuses a cross-thread hop — a hand-edited registry never re-routes elsewhere', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.recordGate(gateRow({ msgId: 'msg_elsewhere', threadTs: '1751970099.000900' }));
+    store.supersedeGate('msg_6a8c14d55c7d', 'msg_elsewhere');
+
+    expect(store.liveGateFor('msg_6a8c14d55c7d')).toBeUndefined();
   });
 
   it('migrates a pre-#46 pending_gates table in place — rows survive, new statuses work', () => {
@@ -645,5 +757,93 @@ describe('DelegationStore — gate registry hygiene (issue #46)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('DelegationStore — turnContextFor (the session’s turn context)', () => {
+  const stallRow = (overrides: Partial<Parameters<DelegationStore['recordStall']>[0]> = {}) => ({
+    dispatchId: 'ctx_8b685db09a47',
+    threadTs: THREAD,
+    workerHandle: 'term_300035ab',
+    worktreeName: 'sandbox-21-bench',
+    lastOutput: '? Overwrite existing bench.json? (y/N)',
+    fingerprint: '1783528800000',
+    relayTs: '1751970003.000400',
+    ...overrides,
+  });
+
+  it('shapes gates and stalls for the context — ack ref from the worktree name', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.recordStall(stallRow());
+
+    expect(store.turnContextFor(THREAD)).toEqual({
+      gates: [
+        {
+          msgId: 'msg_6a8c14d55c7d',
+          kind: 'decision_gate',
+          status: 'pending',
+          question: 'Which lint config is authoritative for CI?',
+          options: ['root', 'app/', 'merge both'],
+          worktreeName: 'sandbox-21-bench',
+          workerHandle: 'term_300035ab',
+          ackRef: 'sandbox#21',
+        },
+      ],
+      stalls: [
+        {
+          dispatchId: 'ctx_8b685db09a47',
+          status: 'pending',
+          worktreeName: 'sandbox-21-bench',
+          workerHandle: 'term_300035ab',
+          lastOutput: '? Overwrite existing bench.json? (y/N)',
+          ackRef: 'sandbox#21',
+        },
+      ],
+    });
+  });
+
+  it('degrades the ack ref: task id then msg id for a gate, dispatch id for a stall', () => {
+    const store = openStore();
+    store.recordGate(gateRow({ msgId: 'msg_no_wt', worktreeName: null }));
+    store.recordGate(gateRow({ msgId: 'msg_no_ids', worktreeName: null, taskId: null }));
+    store.recordStall(stallRow({ worktreeName: null }));
+
+    const context = store.turnContextFor(THREAD);
+    expect(context.gates.map((gate) => gate.ackRef)).toEqual([
+      'task_13c700f151b3',
+      'msg_no_ids',
+    ]);
+    expect(context.stalls[0]?.ackRef).toBe('ctx_8b685db09a47');
+  });
+
+  it('keeps answered and closed entries, drops superseded ones', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordGate(gateRow({ msgId: 'msg_stale' }));
+    store.recordGate(gateRow({ msgId: 'msg_live' }));
+    store.supersedeGate('msg_stale', 'msg_live');
+    store.recordGate(gateRow({ msgId: 'msg_answered' }));
+    store.answerGate('msg_answered');
+    store.recordGate(gateRow({ msgId: 'msg_moot' }));
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+    store.recordStall(stallRow({ dispatchId: 'ctx_nudged' }));
+    store.answerStall('ctx_nudged');
+
+    const context = store.turnContextFor(THREAD);
+    expect(context.gates.map((gate) => [gate.msgId, gate.status])).toEqual([
+      ['msg_live', 'closed'],
+      ['msg_answered', 'answered'],
+      ['msg_moot', 'closed'],
+    ]);
+    expect(context.stalls.map((stall) => stall.status)).toEqual(['answered']);
+  });
+
+  it('never leaks another thread’s gates or stalls — scoping is hard', () => {
+    const store = openStore();
+    store.recordGate(gateRow({ threadTs: '1751970099.000900' }));
+    store.recordStall(stallRow({ threadTs: '1751970099.000900' }));
+
+    expect(store.turnContextFor(THREAD)).toEqual({ gates: [], stalls: [] });
   });
 });

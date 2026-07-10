@@ -117,9 +117,11 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     this.logger = options.logger;
     this.run = options.run ?? execFileRunner;
     this.now = options.now ?? (() => new Date());
-    // Workers already in flight at boot keep their slots: the ledger, not
-    // process memory, is what the cap survives restarts on.
-    this.slots = new WorkerSlots(options.workerCap, this.store.inFlightCount());
+    // The ledger is the single owner of in-flight counting: the cap reads
+    // it live, so workers already in flight at boot hold their slots and a
+    // dispatch is counted the moment it is ledgered — nothing to re-derive,
+    // nothing that can drift between boots.
+    this.slots = new WorkerSlots(options.workerCap, () => this.store.inFlightCount());
   }
 
   // ── prepare: the canUseTool seam ───────────────────────────────────────────
@@ -170,14 +172,14 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       );
     }
 
-    if (!this.slots.tryAcquire()) {
+    if (!this.slots.tryReserve()) {
       this.logger.info(
         { threadTs, inFlight: this.slots.inUse },
         'worker cap reached — delegation waits its wave',
       );
       await this.postSafe(threadTs, workerCapLine(this.slots.inUse));
       try {
-        await this.slots.acquire(signal);
+        await this.slots.reserve(signal);
       } catch {
         return deny('the turn was interrupted while waiting for a worker slot — nothing was created');
       }
@@ -300,13 +302,13 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       typeof worktree.path !== 'string' ||
       typeof worktree.displayName !== 'string'
     ) {
-      // The create failed (or printed something unreadable): the slot taken
-      // in prepare backs no worker, so it goes back to the pool.
+      // The create failed (or printed something unreadable): the slot
+      // reserved in prepare backs no worker, so it goes back to the pool.
       if (tracker.looseSlots > 0) {
         tracker.looseSlots -= 1;
-        this.slots.release();
+        this.slots.cancel();
       }
-      this.logger.warn({ threadTs }, 'worktree create yielded no worktree — slot released');
+      this.logger.warn({ threadTs }, 'worktree create yielded no worktree — reservation cancelled');
       return;
     }
 
@@ -437,6 +439,15 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       cardTs: pending?.cardTs ?? null,
       title: pending?.title ?? tracker.taskTitles.get(dispatch.task_id) ?? null,
     });
+    // The ledger row just written is what the cap counts from here — the
+    // reservation that covered the create→dispatch window retires. Ledger
+    // first, then confirm, so the count never dips below the truth. A
+    // dispatch whose reservation was released earlier (an abandoned thread)
+    // is simply counted now — the ledger, not slot bookkeeping, is the cap.
+    if (pending !== undefined && pending.holdsSlot) {
+      pending.holdsSlot = false;
+      this.slots.confirm();
+    }
     this.logger.info(
       { threadTs, dispatchId: dispatch.id, taskId: dispatch.task_id, workerHandle },
       'delegation dispatched and ledgered',
@@ -448,12 +459,11 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   // ── lifecycle ────────────────────────────────────────────────────────────
 
   /**
-   * The thread's session process died or its turn failed: slots reserved for
+   * The thread's session process died or its turn failed: reservations for
    * work that will never be dispatched go back to the pool. Tracker state
    * stays — a cold-resumed session may still dispatch a worktree it created
-   * earlier, and the card association survives. (A dispatch after this runs
-   * uncounted until the ledger re-derives the cap at the next boot —
-   * accepted drift, logged at dispatch time.)
+   * earlier, and the card association survives; that dispatch is counted
+   * the moment it is ledgered, reservation or not.
    */
   abandonThread(threadTs: string): void {
     const tracker = this.threads.get(threadTs);
@@ -466,15 +476,16 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
         released += 1;
       }
     }
-    for (let i = 0; i < released; i += 1) this.slots.release();
+    for (let i = 0; i < released; i += 1) this.slots.cancel();
     if (released > 0) {
-      this.logger.info({ threadTs, released }, 'released worker slots of an abandoned thread');
+      this.logger.info({ threadTs, released }, 'cancelled worker reservations of an abandoned thread');
     }
   }
 
-  /** A delegation left the in-flight set (slice #20) — its slot frees a wave. */
+  /** A delegation left the in-flight set (slice #20): the ledger row is
+   * already closed — the freed capacity admits the next waiting wave. */
   onDelegationClosed(): void {
-    this.slots.release();
+    this.slots.admit();
   }
 
   /**
@@ -573,33 +584,40 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 }
 
 /**
- * The concurrent-worker semaphore behind the cap: FIFO, so waved-off
- * delegations start in the order they asked. `initialInUse` may exceed the
- * capacity after a config change — acquisitions then wait until enough
- * in-flight workers finish.
+ * The admission gate behind the concurrent-worker cap (spec §5). The ledger
+ * is the single owner of in-flight counting — `inUse` reads it live and only
+ * adds the reservations covering the create→dispatch window (a slot taken in
+ * prepare that no ledger row backs yet), so the cap can never drift from the
+ * ledger: a dispatch is counted the moment it is ledgered, whatever became
+ * of its reservation. FIFO, so waved-off delegations start in the order they
+ * asked; the ledger count may exceed the capacity after a config change —
+ * reservations then wait until enough in-flight workers finish.
  */
 class WorkerSlots {
   private readonly capacity: number;
-  private used: number;
+  /** The ledger's live in-flight count — never cached, never re-derived. */
+  private readonly ledgered: () => number;
+  /** Slots reserved in prepare that no ledger row backs yet. */
+  private reserved = 0;
   private readonly waiters: Array<{ resolve: () => void; reject: (reason: Error) => void }> = [];
 
-  constructor(capacity: number, initialInUse: number) {
+  constructor(capacity: number, ledgered: () => number) {
     this.capacity = capacity;
-    this.used = initialInUse;
+    this.ledgered = ledgered;
   }
 
   get inUse(): number {
-    return this.used;
+    return this.ledgered() + this.reserved;
   }
 
-  tryAcquire(): boolean {
-    if (this.used >= this.capacity) return false;
-    this.used += 1;
+  tryReserve(): boolean {
+    if (this.inUse >= this.capacity) return false;
+    this.reserved += 1;
     return true;
   }
 
-  acquire(signal?: AbortSignal): Promise<void> {
-    if (this.tryAcquire()) return Promise.resolve();
+  reserve(signal?: AbortSignal): Promise<void> {
+    if (this.tryReserve()) return Promise.resolve();
     if (signal?.aborted === true) {
       return Promise.reject(new Error('aborted before a worker slot freed'));
     }
@@ -624,18 +642,29 @@ class WorkerSlots {
     });
   }
 
-  release(): void {
-    if (this.used === 0) return;
-    this.used -= 1;
-    // Hand the freed slot to the next waiter only when capacity truly
-    // covers it — after a WORKER_CAP decrease, over-cap in-flight workers
-    // must drain below the new cap before any wave proceeds.
-    if (this.used < this.capacity) {
-      const waiter = this.waiters.shift();
-      if (waiter !== undefined) {
-        this.used += 1;
-        waiter.resolve();
-      }
+  /** The reservation backs no worker after all (a failed create, an
+   * abandoned thread) — the freed capacity admits the next wave. */
+  cancel(): void {
+    if (this.reserved > 0) this.reserved -= 1;
+    this.admit();
+  }
+
+  /** The reservation's dispatch was ledgered — the ledger counts the worker
+   * from here, so the reservation retires without freeing capacity. */
+  confirm(): void {
+    if (this.reserved > 0) this.reserved -= 1;
+  }
+
+  /**
+   * Capacity may have freed (a delegation closed in the ledger, a
+   * reservation cancelled) — admit waiters only while the cap truly covers
+   * them: after a WORKER_CAP decrease, over-cap in-flight workers must
+   * drain below the new cap before any wave proceeds.
+   */
+  admit(): void {
+    while (this.waiters.length > 0 && this.inUse < this.capacity) {
+      this.reserved += 1;
+      this.waiters.shift()?.resolve();
     }
   }
 }

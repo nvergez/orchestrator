@@ -1,9 +1,13 @@
 import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
 import { parseOrcaEnvelope } from '../kernel/orca.ts';
-import { worktreeIssueRef } from './worktree-name.ts';
 import type { ThreadSurface } from './thread-surface.ts';
 import type { PrepareVerdict } from './dispatch.ts';
-import type { DelegationStore, PendingGateRow, StallAlertRow } from './delegations.ts';
+import type {
+  DelegationStore,
+  PendingGateRow,
+  TurnContextGate,
+  TurnContextStall,
+} from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 
 /**
@@ -82,21 +86,14 @@ export class GateRelay implements SessionRelay {
   // ── the turn context ─────────────────────────────────────────────────────
 
   /**
-   * Prepends the thread's gate and stall-alert registries to a human message
-   * (spec §6: the session routes "anchored on the registry"). Answered
-   * entries ride along so the LLM can recognize — and refuse to re-route —
-   * a late correction, and closed entries so it can tell the human a moot
-   * question apart from an open one (issue #46). Superseded rows stay out:
-   * their question lives on in the re-ask successor, and listing both would
-   * recreate exactly the duplicate-gate disambiguation noise the supersede
-   * exists to kill. A thread that never relayed anything passes through
-   * untouched.
+   * Prepends the thread's relayed gates and stall alerts to a human message
+   * (spec §6: the session routes "anchored on the registry"). The ledger
+   * decides what the turn must know (issue #46 hygiene included); this only
+   * flattens it into the LLM's context lines. A thread that never relayed
+   * anything passes through untouched.
    */
   decorateReply(threadTs: string, text: string): string {
-    const gates = this.store
-      .listGatesForThread(threadTs)
-      .filter((gate) => gate.status !== 'superseded');
-    const stalls = this.store.listStallsForThread(threadTs);
+    const { gates, stalls } = this.store.turnContextFor(threadTs);
     if (gates.length === 0 && stalls.length === 0) return text;
     return [
       '[relayed worker gates & watchdog stall alerts — daemon context, not part of the human message]',
@@ -175,7 +172,7 @@ export class GateRelay implements SessionRelay {
       // listens on (issue #46): a reply down the stale id returns ok:true
       // into a void — the known expired-ask trap. Same question, so the
       // human's answer applies to the successor verbatim.
-      const successor = this.successorOf(gate);
+      const successor = this.store.liveGateFor(gate.msgId);
       if (successor === undefined) {
         return deny(
           'that question was re-asked and this gate superseded — reply to the live gate ' +
@@ -282,7 +279,7 @@ export class GateRelay implements SessionRelay {
     if (last !== undefined) {
       const named = this.store.getGate(last.msgId);
       if (named !== undefined && named.workerHandle === handle) {
-        const live = this.successorOf(named);
+        const live = this.store.liveGateFor(named.msgId);
         // A closed gate never routes an answer (issue #46: the question is
         // moot) — a send after its delegation ended stays untouched rather
         // than rewritten against a dead ask's numbering.
@@ -296,25 +293,6 @@ export class GateRelay implements SessionRelay {
       .listPendingGates(threadTs)
       .filter((gate) => gate.workerHandle === handle);
     return pending.length === 1 ? pending[0] : undefined;
-  }
-
-  /**
-   * The end of a superseded gate's re-ask chain — whatever its terminal
-   * status, so the caller's pending/answered/closed handling applies to the
-   * gate that actually owns the question now. Undefined on a dangling
-   * pointer or a cycle (a hand-edited registry) — refuse rather than guess.
-   */
-  private successorOf(gate: PendingGateRow): PendingGateRow | undefined {
-    const seen = new Set<string>([gate.msgId]);
-    let current = gate;
-    while (current.status === 'superseded') {
-      if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
-      seen.add(current.supersededBy);
-      const next = this.store.getGate(current.supersededBy);
-      if (next === undefined || next.threadTs !== gate.threadTs) return undefined;
-      current = next;
-    }
-    return current;
   }
 
   // ── observe: the PostToolUse seam ────────────────────────────────────────
@@ -451,15 +429,14 @@ function replaceFlagValue(tokens: string[], flag: string, value: string): string
   });
 }
 
-/** One registry row, flattened for the LLM's turn context. Superseded rows
- * never reach here — decorateReply filters them before the map. */
-function contextLine(gate: PendingGateRow): string {
+/** One relayed question, flattened for the LLM's turn context. */
+function contextLine(gate: TurnContextGate): string {
   const status =
     gate.status === 'pending' ? 'PENDING' : gate.status === 'closed' ? 'CLOSED' : 'ANSWERED';
   const kind = gate.kind === 'escalation' ? '🚨 escalation' : '❓ question';
   const from = gate.worktreeName === null ? 'an unmatched worker' : `\`${gate.worktreeName}\``;
   const parts = [
-    `- [${status}] ${kind} ${gate.msgId} from ${from} (ack ref: ${gateRef(gate)}` +
+    `- [${status}] ${kind} ${gate.msgId} from ${from} (ack ref: ${gate.ackRef}` +
       `${gate.workerHandle === null ? '' : `, worker terminal ${gate.workerHandle}`})`,
     `  asked: "${gate.question}"`,
   ];
@@ -469,25 +446,16 @@ function contextLine(gate: PendingGateRow): string {
   return parts.join('\n');
 }
 
-/** `repo#n` out of the worktree name, degrading to the task id / message id. */
-function gateRef(gate: PendingGateRow): string {
-  const ref = gate.worktreeName === null ? null : worktreeIssueRef(gate.worktreeName);
-  return ref ?? gate.taskId ?? gate.msgId;
-}
-
-/** One stall-alert row, flattened for the LLM's turn context (issue #22). */
-function stallContextLine(stall: StallAlertRow): string {
+/** One stall alert, flattened for the LLM's turn context (issue #22). */
+function stallContextLine(stall: TurnContextStall): string {
   const status = stall.status === 'pending' ? 'PENDING' : 'ANSWERED';
   const from = stall.worktreeName === null ? 'an unmatched worker' : `\`${stall.worktreeName}\``;
-  const ref =
-    (stall.worktreeName === null ? null : worktreeIssueRef(stall.worktreeName)) ??
-    stall.dispatchId;
   const terminal =
     stall.workerHandle === null
       ? 'worker terminal unknown — no route down'
       : `worker terminal ${stall.workerHandle}`;
   return [
-    `- [${status}] ⚠️ stall from ${from} (ack ref: ${ref}, ${terminal})` +
+    `- [${status}] ⚠️ stall from ${from} (ack ref: ${stall.ackRef}, ${terminal})` +
       ' — stalled without asking; an answer goes down as keystrokes via terminal send',
     `  last output: "${oneLine(stall.lastOutput)}"`,
   ].join('\n');
