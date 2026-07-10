@@ -1,4 +1,5 @@
-import { commandSegments, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
+import { commandSegments, flagValue, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
+import { CREATE_STEP, DISPATCH_STEP, flagViolation } from '../kernel/protocol.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from '../kernel/messages.ts';
 import {
   createTerminal,
@@ -21,9 +22,9 @@ import type { Logger } from '../kernel/logger.ts';
  *
  * - `prepare` (from canUseTool, before a command runs): holds the global
  *   concurrent-worker cap — an over-cap `worktree create` suspends until a
- *   slot frees, so multi-repo fan-out proceeds in waves — pins the #4
- *   invariants the LLM must never drift from (no create-time `--prompt`,
- *   dispatch always `--inject`), and rewrites the dispatch to carry the
+ *   slot frees, so multi-repo fan-out proceeds in waves — pins the #4 flag
+ *   invariants from the protocol table (kernel/protocol.ts, the same table
+ *   the routing prose renders from), and rewrites the dispatch to carry the
  *   thread's mailbox terminal as `--from` (lazily created, SQLite-persisted,
  *   reused — issue #9).
  * - `observe` (from the PostToolUse hook, after a command ran): reads the
@@ -128,8 +129,12 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   async prepare(threadTs: string, command: string, signal?: AbortSignal): Promise<PrepareVerdict> {
     const segments = commandSegments(command);
-    const creates = segments.filter((tokens) => isOrcaCommand(tokens, 'worktree', 'create'));
-    const dispatches = segments.filter((tokens) => isOrcaCommand(tokens, 'orchestration', 'dispatch'));
+    const creates = segments.filter((tokens) =>
+      isOrcaCommand(tokens, CREATE_STEP.topic, CREATE_STEP.action),
+    );
+    const dispatches = segments.filter((tokens) =>
+      isOrcaCommand(tokens, DISPATCH_STEP.topic, DISPATCH_STEP.action),
+    );
     if (creates.length === 0 && dispatches.length === 0) {
       return { action: 'proceed', command };
     }
@@ -152,17 +157,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     tokens: string[],
     signal?: AbortSignal,
   ): Promise<PrepareVerdict> {
-    if (hasFlag(tokens, '--prompt')) {
-      return deny(
-        'never pass --prompt at create time — the brief travels via `dispatch --inject`, ' +
-          'otherwise the worker misses the coordinator preamble and never reports done (spec §5)',
-      );
-    }
-    for (const flag of ['--json', '--issue', '--agent', '--no-parent'] as const) {
-      if (!hasFlag(tokens, flag)) {
-        return deny(`\`orca worktree create\` must carry ${flag} here (spec §5) — add it and retry`);
-      }
-    }
+    const violation = flagViolation(CREATE_STEP, tokens);
+    if (violation !== undefined) return deny(violation);
     const name = flagValue(tokens, '--name');
     const issue = flagValue(tokens, '--issue');
     if (name === undefined || issue === undefined || issueFromName(name) !== Number(issue)) {
@@ -194,18 +190,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    * then rewrites the dispatch to origin from the mailbox.
    */
   private async prepareDispatch(threadTs: string, tokens: string[]): Promise<PrepareVerdict> {
-    if (hasFlag(tokens, '--from')) {
-      return deny('never pass --from — the daemon supplies the thread mailbox terminal itself');
-    }
-    if (!hasFlag(tokens, '--inject')) {
-      return deny(
-        'dispatch must use --inject so the worker receives the coordinator ' +
-          'preamble and can emit worker_done (spec §5) — add it and retry',
-      );
-    }
-    if (!hasFlag(tokens, '--json')) {
-      return deny('`orca orchestration dispatch` must carry --json here — add it and retry');
-    }
+    const violation = flagViolation(DISPATCH_STEP, tokens);
+    if (violation !== undefined) return deny(violation);
     if (tokens.some((token) => token.includes('$'))) {
       return deny(
         'shell variables cannot travel through the dispatch rewrite — ' +
@@ -274,7 +260,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   async observe(threadTs: string, command: string, stdout: string): Promise<void> {
     try {
       for (const tokens of commandSegments(command)) {
-        if (isOrcaCommand(tokens, 'worktree', 'create')) {
+        if (isOrcaCommand(tokens, CREATE_STEP.topic, CREATE_STEP.action)) {
           await this.observeCreate(threadTs, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'terminal', 'list')) {
           this.observeTerminalList(threadTs, stdout);
@@ -282,7 +268,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
           this.observeTerminalWait(threadTs, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'orchestration', 'task-create')) {
           this.observeTaskCreate(threadTs, stdout);
-        } else if (isOrcaCommand(tokens, 'orchestration', 'dispatch')) {
+        } else if (isOrcaCommand(tokens, DISPATCH_STEP.topic, DISPATCH_STEP.action)) {
           await this.observeDispatch(threadTs, stdout);
         }
       }
