@@ -240,7 +240,7 @@ describe('routingInstructions', () => {
     );
     expect(prompt).toContain('NEVER pass `--prompt`');
     expect(prompt).toContain('--inject');
-    expect(prompt).toContain('never pass `--from`');
+    expect(prompt).toContain('NEVER pass `--from`');
     expect(prompt).toContain('--no-parent');
   });
 
