@@ -52,7 +52,7 @@ it exit non-zero. What each check means:
 
 | Check | Failure means |
 |---|---|
-| Required env vars present, correct prefixes (`xoxb-`, `xapp-`, `C…`, `U…`, `sk-ant-`) | `~/.config/orchestrator/env` is incomplete or a value was pasted into the wrong slot |
+| Required env vars present, correct prefixes (`xoxb-`, `xapp-`, `C…`, `U…`, `sk-ant-`) | Neither `process.env` nor `~/.config/orchestrator/env` provides valid values — the env file is incomplete or a value was pasted into the wrong slot |
 | Routing hints file parses (+ repo count) | `routing-hints.json` is missing or malformed — both are boot-fatal; the error prints the path it tried |
 | State dir writable | The SQLite database's directory can't be created or written |
 | Node version vs `engines` | Running Node is older than the required ≥ 22.18 |
@@ -62,6 +62,23 @@ it exit non-zero. What each check means:
 
 The last two checks stay silent before `orc service install`, so `doctor` is
 green mid-way through the golden path.
+
+Two of those checks adapt to *where* you run doctor:
+
+- **env** validates `process.env` first (what a systemd-launched daemon
+  sees) and, when the variables aren't exported there — the normal case in
+  a bare shell — falls back to the canonical env file
+  (`$XDG_CONFIG_HOME/orchestrator/env`, default `~/.config/orchestrator/env`),
+  applying the same prefix rules. The ✔ line names which source validated;
+  the ✖ line lists what's wrong and every source consulted. Doctor is the
+  only reader — the daemon itself still gets its environment exclusively
+  from `process.env` ([running without systemd](#running-without-systemd)).
+- **service**, in a shell without the session's user bus (SSH, Orca — see
+  [Service management](#service-management)), reports `cannot reach the user
+  service manager — export XDG_RUNTIME_DIR=/run/user/<uid> (or run from a
+  login shell)`. That's still a failed check, but it makes no claim about
+  the unit being disabled: unit-file *presence* is read from the filesystem
+  and stays accurate; enablement simply couldn't be asked of systemd.
 
 ## Upgrading
 
