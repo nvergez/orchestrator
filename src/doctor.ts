@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
 import { ConfigError, loadConfig } from './config.ts';
@@ -7,7 +7,7 @@ import { probeOrca } from './orca-health.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from './routing.ts';
 import { systemdUnitPath } from './service.ts';
-import { resolveDefaultDbPath, resolveRoutingHintsPath } from './xdg.ts';
+import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from './xdg.ts';
 
 /**
  * `orc doctor` (issue #70 + #74 addendum): read-only diagnosis of the
@@ -32,9 +32,12 @@ export interface DoctorDeps {
   nodeVersion: string;
   enginesNode: string | undefined;
   fileExists(path: string): boolean;
+  /** Reads the canonical env file for the doctor-only fallback — throws like readFileSync. */
+  readFile(path: string): string;
   dirWritable(dir: string): boolean;
   loadHints(path: string): RepoHint[];
   username: string;
+  uid: number;
   unitPath: string;
 }
 
@@ -46,9 +49,11 @@ export function realDoctorDeps(): DoctorDeps {
     nodeVersion: process.versions.node,
     enginesNode: readPackageMeta().enginesNode,
     fileExists: existsSync,
+    readFile: (path) => readFileSync(path, 'utf8'),
     dirWritable: nearestAncestorWritable,
     loadHints: loadRoutingHints,
     username: userInfo().username,
+    uid: userInfo().uid,
     unitPath: systemdUnitPath(),
   };
 }
@@ -73,6 +78,86 @@ export function nearestAncestorWritable(dir: string): boolean {
   }
 }
 
+/**
+ * Minimal KEY=VALUE parser for the canonical env file: blank lines and `#`
+ * comments skipped, an optional `export ` prefix and one layer of matching
+ * quotes stripped — enough for the `orc init` template and the shell-sourcing
+ * style the operations guide suggests. Doctor-only: the daemon itself stays
+ * dotenv-free (spec §10 — systemd's EnvironmentFile materializes the file).
+ */
+export function parseEnvFile(content: string): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim().replace(/^export\s+/, '');
+    if (key === '') continue;
+    let value = line.slice(eq + 1).trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+    }
+    vars[key] = value;
+  }
+  return vars;
+}
+
+/**
+ * The env check validates process.env first (what a systemd-launched daemon
+ * sees), and only when that fails falls back to the canonical env file — a
+ * bare shell has none of the vars exported, yet the install can be perfect.
+ * The file wins over process.env in the fallback, mirroring EnvironmentFile.
+ */
+function checkEnv(deps: DoctorDeps): DoctorCheck {
+  const present = (source: string): DoctorCheck => ({
+    label: 'env',
+    ok: true,
+    detail: `required variables present with the right prefixes (from ${source})`,
+  });
+  let processEnvError: ConfigError;
+  try {
+    loadConfig(deps.env);
+    return present('process.env');
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    processEnvError = error;
+  }
+  const envFilePath = resolveEnvFilePath(deps.env);
+  let fileVars: Record<string, string>;
+  try {
+    fileVars = parseEnvFile(deps.readFile(envFilePath));
+  } catch {
+    return {
+      label: 'env',
+      ok: false,
+      detail: `${processEnvError.message} (checked process.env; ${envFilePath} is missing — run \`orc init\`)`,
+    };
+  }
+  try {
+    loadConfig({ ...deps.env, ...fileVars });
+    return present(envFilePath);
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    return {
+      label: 'env',
+      ok: false,
+      detail: `${error.message} (checked process.env and ${envFilePath})`,
+    };
+  }
+}
+
+/**
+ * `systemctl --user` needs the session's user bus; shells without
+ * XDG_RUNTIME_DIR (SSH, Orca) get "Failed to connect to … bus" — which says
+ * nothing about the unit's state, so it must not read as "disabled".
+ */
+function userBusUnreachable(error: unknown): boolean {
+  const stderr = (error as { stderr?: unknown }).stderr;
+  return typeof stderr === 'string' && /failed to connect to .*bus/i.test(stderr);
+}
+
 /** The `>=X.Y(.Z)` minimum out of an engines range, null if unparseable. */
 function minimumFromEngines(range: string | undefined): string | null {
   const match = /^>=\s*(\d+(?:\.\d+){0,2})/.exec(range ?? '');
@@ -93,13 +178,7 @@ function versionAtLeast(version: string, minimum: string): boolean {
 export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
-  try {
-    loadConfig(deps.env);
-    checks.push({ label: 'env', ok: true, detail: 'required variables present with the right prefixes' });
-  } catch (error) {
-    if (!(error instanceof ConfigError)) throw error;
-    checks.push({ label: 'env', ok: false, detail: error.message });
-  }
+  checks.push(checkEnv(deps));
 
   const hintsPath = resolveRoutingHintsPath(deps.env);
   try {
@@ -159,12 +238,22 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
         ? { label: 'service', ok: true, detail: `unit installed and enabled (${deps.unitPath})` }
         : { label: 'service', ok: false, detail: `unit installed but "${state}" — re-run \`orc service install\`` },
     );
-  } catch {
-    checks.push({
-      label: 'service',
-      ok: false,
-      detail: 'unit installed but not enabled — re-run `orc service install`',
-    });
+  } catch (error) {
+    checks.push(
+      userBusUnreachable(error)
+        ? {
+            label: 'service',
+            ok: false,
+            detail:
+              `unit file present (${deps.unitPath}) but cannot reach the user service manager — ` +
+              `export XDG_RUNTIME_DIR=/run/user/${deps.uid} (or run from a login shell)`,
+          }
+        : {
+            label: 'service',
+            ok: false,
+            detail: 'unit installed but not enabled — re-run `orc service install`',
+          },
+    );
   }
   try {
     const { stdout } = await deps.runSystem('loginctl', ['show-user', deps.username, '--property=Linger']);

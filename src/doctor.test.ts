@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
+import { parseEnvFile, runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
 import { RoutingHintsError, type RepoHint } from './routing.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
@@ -26,17 +26,33 @@ const registryStdout = JSON.stringify({
   result: { repos: [{ id: 'u1', displayName: 'webapp' }, { id: 'u2', displayName: 'sandbox' }] },
 });
 
+const ENV_FILE_PATH = '/home/op/.config/orchestrator/env';
+
+/** ENOENT-style rejection — the doctor env fallback must survive a missing file. */
+const noEnvFile = (): never => {
+  throw Object.assign(new Error(`ENOENT: no such file or directory, open '${ENV_FILE_PATH}'`), {
+    code: 'ENOENT',
+  });
+};
+
+const envFileContent = (vars: Record<string, string>): string =>
+  Object.entries(vars)
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+
 const greenDeps = (): DoctorDeps => ({
-  env: { ...validEnv },
+  env: { ...validEnv, XDG_CONFIG_HOME: '/home/op/.config' },
   runOrca: () => Promise.resolve({ stdout: registryStdout }),
   runSystem: (command) =>
     Promise.resolve({ stdout: command === 'loginctl' ? 'Linger=yes\n' : 'enabled\n' }),
   nodeVersion: '22.18.0',
   enginesNode: '>=22.18',
   fileExists: () => true,
+  readFile: noEnvFile,
   dirWritable: () => true,
   loadHints: () => [hint('webapp'), hint('sandbox')],
   username: 'op',
+  uid: 1000,
   unitPath: UNIT_PATH,
 });
 
@@ -66,12 +82,83 @@ describe('runDoctorChecks', () => {
     expect(hints?.detail).toBe('2 repos at /srv/hints.json');
   });
 
-  it('fails env when required variables are missing or mis-prefixed', async () => {
+  it('passes env from process.env without touching the env file, naming the source', async () => {
     const deps = greenDeps();
-    deps.env = { ...validEnv, SLACK_BOT_TOKEN: 'not-a-bot-token' };
+    deps.readFile = () => {
+      throw new Error('must not be read when process.env validates');
+    };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([]);
+    expect(checks.find((check) => check.label === 'env')?.detail).toBe(
+      'required variables present with the right prefixes (from process.env)',
+    );
+  });
+
+  it('falls back to the canonical env file when process.env lacks the variables', async () => {
+    const deps = greenDeps();
+    deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    const readPaths: string[] = [];
+    deps.readFile = (path) => {
+      readPaths.push(path);
+      return envFileContent(validEnv);
+    };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([]);
+    expect(readPaths).toEqual([ENV_FILE_PATH]);
+    expect(checks.find((check) => check.label === 'env')?.detail).toBe(
+      `required variables present with the right prefixes (from ${ENV_FILE_PATH})`,
+    );
+  });
+
+  it('parses template-style env files: comments, blanks, export, quotes', async () => {
+    const deps = greenDeps();
+    deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    deps.readFile = () =>
+      [
+        '# Bot User OAuth Token — starts with xoxb-',
+        `SLACK_BOT_TOKEN="${validEnv.SLACK_BOT_TOKEN}"`,
+        '',
+        `export SLACK_APP_TOKEN='${validEnv.SLACK_APP_TOKEN}'`,
+        `SLACK_CHANNEL_ID=${validEnv.SLACK_CHANNEL_ID}`,
+        `SLACK_ALLOWED_USER_ID=${validEnv.SLACK_ALLOWED_USER_ID}`,
+        `CLAUDE_CODE_OAUTH_TOKEN=${validEnv.CLAUDE_CODE_OAUTH_TOKEN}`,
+        '#LOG_LEVEL=info',
+      ].join('\n');
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([]);
+  });
+
+  it('applies the same prefix rules to env-file values, naming both sources', async () => {
+    const deps = greenDeps();
+    deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    deps.readFile = () => envFileContent({ ...validEnv, SLACK_BOT_TOKEN: 'not-a-bot-token' });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['env']);
-    expect(checks.find((check) => check.label === 'env')?.detail).toContain('SLACK_BOT_TOKEN');
+    const detail = checks.find((check) => check.label === 'env')?.detail;
+    expect(detail).toContain('SLACK_BOT_TOKEN must start with "xoxb-"');
+    expect(detail).toContain(`checked process.env and ${ENV_FILE_PATH}`);
+  });
+
+  it('env-file values win over mis-prefixed process.env ones, like EnvironmentFile', async () => {
+    const deps = greenDeps();
+    deps.env = { ...validEnv, XDG_CONFIG_HOME: '/home/op/.config', SLACK_BOT_TOKEN: 'not-a-bot-token' };
+    deps.readFile = () => envFileContent({ SLACK_BOT_TOKEN: validEnv.SLACK_BOT_TOKEN });
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([]);
+    expect(checks.find((check) => check.label === 'env')?.detail).toContain(
+      `from ${ENV_FILE_PATH}`,
+    );
+  });
+
+  it('fails env listing both consulted sources when the env file is missing too', async () => {
+    const deps = greenDeps();
+    deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['env']);
+    const detail = checks.find((check) => check.label === 'env')?.detail;
+    expect(detail).toContain('SLACK_BOT_TOKEN is missing');
+    expect(detail).toContain(`${ENV_FILE_PATH} is missing`);
+    expect(detail).toContain('orc init');
   });
 
   it('fails routing hints when the file is missing or malformed', async () => {
@@ -140,10 +227,32 @@ describe('runDoctorChecks', () => {
     const deps = greenDeps();
     deps.runSystem = (command) =>
       command === 'systemctl'
-        ? Promise.reject(new Error('disabled'))
+        ? Promise.reject(Object.assign(new Error('exit 1'), { stdout: 'disabled\n', stderr: '' }))
         : Promise.resolve({ stdout: 'Linger=yes\n' });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['service']);
+    expect(checks.find((check) => check.label === 'service')?.detail).toContain(
+      'not enabled — re-run `orc service install`',
+    );
+  });
+
+  it('reports an unreachable user bus distinctly, never claiming the unit is disabled', async () => {
+    const deps = greenDeps();
+    deps.runSystem = (command) =>
+      command === 'systemctl'
+        ? Promise.reject(
+            Object.assign(new Error('exit 1'), {
+              stderr: 'Failed to connect to user scope bus via local transport: No medium found\n',
+            }),
+          )
+        : Promise.resolve({ stdout: 'Linger=yes\n' });
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['service']);
+    const detail = checks.find((check) => check.label === 'service')?.detail;
+    expect(detail).toContain('cannot reach the user service manager');
+    expect(detail).toContain('export XDG_RUNTIME_DIR=/run/user/1000');
+    expect(detail).toContain(`unit file present (${UNIT_PATH})`);
+    expect(detail).not.toContain('enabled');
   });
 
   it('fails linger when the unit is installed and linger is off, with the one-liner', async () => {
@@ -155,6 +264,20 @@ describe('runDoctorChecks', () => {
     expect(checks.find((check) => check.label === 'linger')?.detail).toContain(
       'sudo loginctl enable-linger op',
     );
+  });
+});
+
+describe('parseEnvFile', () => {
+  it('keeps an empty value empty, so `KEY=` still reads as missing', () => {
+    expect(parseEnvFile('SLACK_BOT_TOKEN=\n')).toEqual({ SLACK_BOT_TOKEN: '' });
+  });
+
+  it('ignores lines without an equals sign', () => {
+    expect(parseEnvFile('garbage line\nKEY=value\n')).toEqual({ KEY: 'value' });
+  });
+
+  it('does not strip mismatched quotes', () => {
+    expect(parseEnvFile(`KEY="value'`)).toEqual({ KEY: `"value'` });
   });
 });
 

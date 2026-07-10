@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   resolveConfigDir,
   resolveDefaultDbPath,
+  resolveEnvFilePath,
   resolveRoutingHintsPath,
   resolveStateDir,
 } from './xdg.ts';
@@ -54,6 +55,15 @@ describe('resolveRoutingHintsPath', () => {
     expect(resolveRoutingHintsPath({})).toBe(
       join(homedir(), '.config', 'orchestrator', 'routing-hints.json'),
     );
+  });
+});
+
+describe('resolveEnvFilePath', () => {
+  it('puts the env file in the config dir', () => {
+    expect(resolveEnvFilePath({ XDG_CONFIG_HOME: '/srv/config' })).toBe(
+      '/srv/config/orchestrator/env',
+    );
+    expect(resolveEnvFilePath({})).toBe(join(homedir(), '.config', 'orchestrator', 'env'));
   });
 });
 

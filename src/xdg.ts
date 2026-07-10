@@ -33,6 +33,15 @@ export function resolveRoutingHintsPath(env: Record<string, string | undefined>)
   return env.ORCHESTRATOR_ROUTING_HINTS_PATH ?? join(resolveConfigDir(env), 'routing-hints.json');
 }
 
+/**
+ * The canonical env file — scaffolded by `orc init`, loaded by the unit's
+ * `EnvironmentFile`. The daemon never reads it (env vars stay the only
+ * boot-config channel); doctor consults it to diagnose a bare shell.
+ */
+export function resolveEnvFilePath(env: Record<string, string | undefined>): string {
+  return join(resolveConfigDir(env), 'env');
+}
+
 /** The DB default under the state dir — `ORCHESTRATOR_DB_PATH` overrides. */
 export function resolveDefaultDbPath(env: Record<string, string | undefined>): string {
   return join(resolveStateDir(env), 'orchestrator.db');
