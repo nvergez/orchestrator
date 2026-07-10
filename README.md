@@ -74,25 +74,26 @@ sudo loginctl enable-linger $USER      # 6 — once
 | `orc --version` | Print the version and exit |
 | `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json}` |
 | `orc doctor` | Read-only diagnosis of the whole setup; non-zero exit on any failure |
+| `orc update` | Update to the latest release — install, unit regeneration and restart, as one step |
 | `orc service install` | Generate, enable and start the systemd user unit (re-run after node upgrades) |
 | `orc service uninstall` | Stop, disable and remove the systemd user unit |
 
-## Upgrading
-
-One ritual for every upgrade:
+## Updating
 
 ```bash
-npm update -g @nvergez/orchestrator && orc service install && systemctl --user restart orchestrator
+orc update
 ```
 
-The explicit restart matters: `orc service install` ends in `enable --now`,
-which does **not** restart an already-running unit — without it the old code
-keeps running. Re-running `service install` every time also covers node/nvm
-upgrades, since the generated unit pins absolute paths. Optionally finish with
-`orc doctor`.
+One command runs the whole ritual: check the registry, install the new
+version, regenerate the systemd unit, restart the service. The restart is the
+step that actually swaps the running code — which is why it is one indivisible
+command and not three you might truncate. Already at the latest version is a
+no-op; without a systemd unit only the package is updated and it tells you to
+restart your daemon yourself.
 
-> **Pre-1.0 caveat:** while the package is on 0.x, read the GitHub Release
-> notes before upgrading; the first breaking release graduates to 1.0.0.
+A **breaking release** (major version jump — pre-1.0, the first one graduates
+to 1.0.0) is refused with a pointer to the release notes; re-run as
+`orc update --yes` once you have read them.
 
 Changelog = [GitHub Releases](https://github.com/nvergez/orchestrator/releases)
 only. To get notified: **Watch → Custom → Releases** on the repo.

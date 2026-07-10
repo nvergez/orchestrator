@@ -23,3 +23,9 @@ never *which* changes it contains.
 The releasable (`fix:`/`feat:`/breaking) merges accumulated on main since the
 last release, waiting for the next release to ship them. A release trigger with
 no pending changes releases nothing.
+
+**Update**:
+Bringing a local install up to the latest release — fetching the new version,
+regenerating the service unit, and restarting the daemon are one indivisible
+ritual, never separate steps.
+_Avoid_: Upgrade

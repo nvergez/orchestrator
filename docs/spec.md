@@ -145,7 +145,7 @@ One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTR
 
 ## 10. Deployment & operations
 
-Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runbook for the packaged install (service management, upgrades, uninstall): [`docs/operations.md`](operations.md).
+Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runbook for the packaged install (service management, updates, uninstall): [`docs/operations.md`](operations.md).
 
 - **The daemon is this repo**: `package.json` at the root, code in `src/`; the `main` checkout at `<checkout>` **is** the deployed instance. Deploy = `git pull` + `npm ci` + `systemctl --user restart orchestrator`.
 - **systemd user unit** `~/.config/systemd/user/orchestrator.service`: `ExecStart` = absolute node path (e.g. `~/.nvm/versions/node/<version>/bin/node` — user units don't source shell profiles); `Environment=PATH=…` including the `orca` CLI's bin dir + the node bin dir (SDK spawns the bundled `claude`); `WorkingDirectory=` the checkout; `Restart=always`, `RestartSec=5`; `WantedBy=default.target` + enable → reboot survival via linger. Cold restart is safe by design (#5 boot rule). Ops note: in Orca shells, `export XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user`/`journalctl --user`.
