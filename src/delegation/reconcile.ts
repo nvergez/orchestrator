@@ -40,7 +40,8 @@ import type { Logger } from '../kernel/logger.ts';
  *   delegations and their classes is persisted, and a restart that observes
  *   the same picture posts nothing.
  *
- * Ordering contract with the rest of boot (index.ts): reconciliation runs
+ * Ordering contract with the rest of boot (runtime.ts `boot()`, pinned by
+ * runtime.test.ts): reconciliation runs
  * BEFORE the delegation coordinator derives the worker-cap count and BEFORE
  * the gate watchers re-arm — rows closed here free their cap slots by never
  * being counted, and threads left with nothing in flight never arm a

@@ -45,7 +45,13 @@ export default tseslint.config(
   },
   {
     files: ['src/daemon/**/*.ts'],
-    ignores: ['src/daemon/daemon.ts'], // the composition root wires the clusters by value
+    // The composition root wires the clusters by value; its composition
+    // tests (runtime.test.ts, app.test.ts) drive that same real graph.
+    ignores: [
+      'src/daemon/runtime.ts',
+      'src/daemon/runtime.test.ts',
+      'src/daemon/app.test.ts',
+    ],
     rules: {
       '@typescript-eslint/no-restricted-imports': [
         'error',
@@ -54,7 +60,7 @@ export default tseslint.config(
             {
               group: ['../delegation/*'],
               allowTypeImports: true,
-              message: 'daemon/ ↔ delegation/ value edges live only in the composition root daemon.ts.',
+              message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'daemon/ must not import cli/.' },
           ],
@@ -72,7 +78,7 @@ export default tseslint.config(
             {
               group: ['../daemon/*'],
               allowTypeImports: true,
-              message: 'daemon/ ↔ delegation/ value edges live only in the composition root daemon.ts.',
+              message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'delegation/ must not import cli/.' },
           ],

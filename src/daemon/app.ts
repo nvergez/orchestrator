@@ -1,9 +1,31 @@
-import type { App } from '@slack/bolt';
 import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
 import { refusalLine } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from '../kernel/logger.ts';
 import type { CloseResult, ReplyResult } from './sessions.ts';
+
+/**
+ * The slice of the Bolt App the router registers on — event subscription,
+ * the error hook, and the refusal post. daemon.ts passes the real `App`;
+ * app.test.ts a captured fake that invokes the handlers with synthetic
+ * events.
+ */
+export interface SlackApp {
+  event(
+    name: 'app_mention' | 'message',
+    handler: (args: { event: unknown }) => Promise<void>,
+  ): void;
+  error(handler: (error: Error) => Promise<void>): void;
+  client: {
+    chat: {
+      postMessage(args: {
+        channel: string;
+        thread_ts: string;
+        text: string;
+      }): Promise<unknown>;
+    };
+  };
+}
 
 /** The slice of SessionManager the event handlers drive. */
 export interface SessionGateway {
@@ -37,7 +59,7 @@ const CLOSE_LOG_LINES: Record<CloseResult, string> = {
  * `type: "message"`, so one listener covers either.
  */
 export function registerHandlers(
-  app: App,
+  app: SlackApp,
   guard: Guard,
   sessions: SessionGateway,
   gates: GateResolver,

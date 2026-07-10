@@ -4,23 +4,18 @@ import { ConfigError, loadConfig, type Config } from '../kernel/config.ts';
 import { createLogger, toBoltLogger } from '../kernel/logger.ts';
 import { registerHandlers } from './app.ts';
 import { reportOrcaHealth } from '../kernel/orca-health.ts';
-import { SessionStore } from './db.ts';
-import { DelegationStore } from '../delegation/delegations.ts';
-import { DelegationCoordinator } from '../delegation/dispatch.ts';
-import { SessionManager } from './sessions.ts';
-import { GateWatcher } from '../delegation/watcher.ts';
-import { ThreadSurface } from '../delegation/thread-surface.ts';
-import { BootReconciler } from '../delegation/reconcile.ts';
-import { Watchdog } from '../delegation/watchdog.ts';
-import { GateRelay } from '../delegation/relay.ts';
 import { createProcessFactory } from './claude.ts';
-import { execFileRunner, safeRegistryIssueUrls } from '../kernel/orca.ts';
-import { GateKeeper } from './gate.ts';
-import { Voice } from './voice.ts';
-import { loadRoutingHints, RepoAllowList, routingInstructions } from '../kernel/routing.ts';
+import { buildRuntime } from './runtime.ts';
+import type { Surface } from '../delegation/thread-surface.ts';
+import { loadRoutingHints } from '../kernel/routing.ts';
 import { resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
-/** The daemon boot — what bare `orc` runs (the CLI dispatch lives in cli.ts). */
+/**
+ * The daemon boot — what bare `orc` runs (the CLI dispatch lives in cli.ts).
+ * Deliberately thin: env config, the Bolt connection and the process
+ * lifecycle live here; everything wired from them lives in runtime.ts,
+ * where the composition is testable.
+ */
 export async function runDaemon(): Promise<void> {
   let config: Config;
   try {
@@ -50,15 +45,6 @@ export async function runDaemon(): Promise<void> {
       'routing hints loaded — the delegation allow-list',
     );
 
-    const store = new SessionStore(config.dbPath);
-    const delegationStore = new DelegationStore(config.dbPath);
-    // Boot rule (spec §3): rows survive the restart, every session comes back
-    // dormant, and nothing below wakes one — the next human message does.
-    logger.info(
-      { dbPath: config.dbPath, sessions: store.count(), inFlight: delegationStore.inFlightCount() },
-      'state database open — all sessions dormant',
-    );
-
     const app = new App({
       token: config.slackBotToken,
       appToken: config.slackAppToken,
@@ -82,181 +68,51 @@ export async function runDaemon(): Promise<void> {
       botUserId: auth.user_id,
     };
 
-    const postToThread = async (threadTs: string, text: string): Promise<string> => {
-      const result = await app.client.chat.postMessage({
-        channel: config.slackChannelId,
-        thread_ts: threadTs,
-        text,
-      });
-      if (result.ts === undefined) {
-        throw new Error('chat.postMessage returned no ts');
-      }
-      return result.ts;
+    // The raw Slack adapter under everything the runtime posts — threads,
+    // gates, voices, reactions — pinned to the one configured channel.
+    const surface: Surface = {
+      post: async (threadTs, text) => {
+        const result = await app.client.chat.postMessage({
+          channel: config.slackChannelId,
+          thread_ts: threadTs,
+          text,
+        });
+        if (result.ts === undefined) {
+          throw new Error('chat.postMessage returned no ts');
+        }
+        return result.ts;
+      },
+      update: async (ts, text) => {
+        await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+      },
+      react: async (ts, name) => {
+        await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
+      },
+      unreact: async (ts, name) => {
+        await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
+      },
     };
 
-    // 🚦 gates post as their own thread messages (spec §8: anything requiring
-    // the human is a new message, never an edit of the streaming voice).
-    const gates = new GateKeeper({
-      allowedUserId: config.slackAllowedUserId,
-      post: postToThread,
-      logger,
-    });
-
-    const allowList = new RepoAllowList({ hints, logger });
-
-    // ONE thread surface for every delegation coordinator — it owns what a
-    // thread's root message shows (root reactions, delegation cards) over
-    // the raw Slack adapter below.
-    const surface = new ThreadSurface({
-      surface: {
-        post: postToThread,
-        update: async (ts: string, text: string): Promise<void> => {
-          await app.client.chat.update({ channel: config.slackChannelId, ts, text });
-        },
-        react: async (ts: string, name: string): Promise<void> => {
-          await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
-        },
-        unreact: async (ts: string, name: string): Promise<void> => {
-          await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
-        },
-      },
-      store: delegationStore,
-      logger,
-    });
-
-    // Boot reconciliation (spec §7, issue #25): crash recovery without waking
-    // sessions — dispatched rows reconciled against task-list + worktree ps,
-    // one truthful ⚠️ line per affected thread, completions missed during the
-    // outage closed right here. Deliberately BEFORE the watcher re-arm (so a
-    // closed row never arms a watcher that would double-report it as a wake);
-    // the worker cap needs no ordering — it reads the ledger live.
-    await new BootReconciler({ store: delegationStore, surface, logger }).reconcile();
-
-    // The delegation coordinator (issue #19): worker cap, mailbox terminals,
-    // delegation cards and the `delegations` ledger — the daemon half of §5.
-    const delegations = new DelegationCoordinator({
-      store: delegationStore,
+    const runtime = buildRuntime({
+      config,
+      hints,
       surface,
-      channelId: config.slackChannelId,
-      workerCap: config.workerCap,
+      createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
       // Mailbox terminals live in the daemon's own checkout — the one worktree
       // that always exists and never gets archived with a delegation.
       mailboxWorktreePath: process.cwd(),
-      // Evaluated at dispatch time, long after the watcher below exists.
-      onDispatched: (threadTs) => {
-        watcher.arm(threadTs);
-      },
       logger,
     });
+    await runtime.boot();
 
-    // The gate relay (issue #21): route-back enforcement anchored on the
-    // pending_gates registry — reply provenance, answer fidelity, the
-    // sanctioned terminal-send fallback, and the turn-context decoration.
-    const relay = new GateRelay({ store: delegationStore, surface, logger });
-
-    const sessions = new SessionManager({
-      store,
-      spawn: createProcessFactory({
-        cwd: process.cwd(),
-        gates,
-        allowList,
-        delegations,
-        relay,
-        systemPromptAppend: routingInstructions(hints),
-        logger,
-      }),
-      voiceFor: (threadTs) =>
-        new Voice(
-          {
-            post: (text) => postToThread(threadTs, text),
-            update: async (ts, text) => {
-              await app.client.chat.update({ channel: config.slackChannelId, ts, text });
-            },
-          },
-          { onError: (err) => logger.warn({ err, threadTs }, 'voice flush failed') },
-        ),
-      // 💸 warnings are events, not status: always a fresh message (spec §8).
-      notify: async (threadTs, text) => {
-        await postToThread(threadTs, text);
-      },
-      costThresholdsUsd: config.costWarnThresholdsUsd,
-      warmTtlMs: config.warmTtlMs,
-      liveSessionCap: config.liveSessionCap,
-      autoCloseAfterMs: config.autoCloseAfterMs,
-      // The 🔚 summary's ledger (issue #51): every delegation with its outcome,
-      // issue links resolved off one registry read — folder repos stay plain.
-      listDelegations: (threadTs) =>
-        safeRegistryIssueUrls(execFileRunner, logger, delegationStore.listForThread(threadTs)),
-      // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
-      // — session open included — and off again when the turn ends with no
-      // delegation in flight and nothing pending.
-      onTurnStart: (threadTs) => surface.ackWorking(threadTs),
-      onTurnEnd: (threadTs) =>
-        surface.settleTurnEnd(threadTs, delegations.hasUndispatched(threadTs)),
-      logger,
-    });
-
-    // The per-thread gate watcher (spec §6, issue #20): the daemon listens,
-    // the session thinks — one `check --wait` child per thread with in-flight
-    // work, worker_done → ✅ card + summary wake, gates surfaced verbatim.
-    const watcher = new GateWatcher({
-      store: delegationStore,
-      surface,
-      wake: (threadTs, channelId, text) => sessions.wake(threadTs, channelId, text),
-      onDelegationClosed: () => {
-        delegations.onDelegationClosed();
-      },
-      windowMs: config.watchWindowMs,
-      logger,
-    });
-    // Boot re-arm (spec §6): the ledger, not process memory, says which
-    // threads still have workers out — a completion sent while the daemon was
-    // down is still sitting unread on the mailbox and lands right here.
-    const rearmed = watcher.rearmFromStore();
-    if (rearmed > 0) {
-      logger.info({ threads: rearmed }, 'gate watchers re-armed from the delegations ledger');
-    }
-
-    // The stalled-worker watchdog (spec §5, issue #22): the second detection
-    // layer — a periodic staleness sweep over the in-flight delegations'
-    // worktrees; a silent worker gets its ⚠️ alert through the same relay
-    // mold as gates, and the reply routes down as terminal keystrokes. The
-    // same sweep carries the max in-flight age signal (issue #48): a worker
-    // whose terminal looks alive but whose bus said nothing for the whole
-    // window alerts through the same mold.
-    const watchdog = new Watchdog({
-      store: delegationStore,
-      surface,
-      stallAfterMs: config.watchdogStallAfterMs,
-      maxInflightMs: config.watchdogMaxInflightMs,
-      logger,
-    });
-    const stallSweep = (): void => {
-      watchdog.sweep().catch((error: unknown) => {
-        logger.error({ err: error }, 'watchdog sweep failed');
-      });
-    };
-    // One pass at boot: a worker that stalled while the daemon was down must
-    // not wait a full interval to surface.
-    stallSweep();
-    setInterval(stallSweep, config.watchdogSweepIntervalMs).unref();
-
-    registerHandlers(app, guard, sessions, gates, relay, logger);
+    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger);
     await app.start();
     logger.info(
       { botUserId: guard.botUserId, channelId: guard.channelId },
       'connected to Slack over Socket Mode',
     );
 
-    // Dormancy sweep (spec §3: auto-close after 7 days dormant). One pass at
-    // boot catches sessions that crossed the span while the daemon was down.
-    const sweep = (): void => {
-      sessions.sweepDormant().catch((error: unknown) => {
-        logger.error({ err: error }, 'dormancy sweep failed');
-      });
-    };
-    sweep();
-    setInterval(sweep, config.sweepIntervalMs).unref();
+    runtime.startDormancySweep();
   } catch (error) {
     logger.fatal({ err: error }, 'boot failed');
     process.exit(1);
