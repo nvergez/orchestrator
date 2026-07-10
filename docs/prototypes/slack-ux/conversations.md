@@ -3,7 +3,8 @@
 Reading convention: each quoted block `>` is **one Slack message**. `**who** — time` at
 the top. The *(annotations in italics)* are not messages: they explain the mechanics.
 When a message is **edited in place**, its successive versions are shown with
-"✏️ the same message, after editing".
+"✏️ the same message, after editing". Repos, issue links, and Slack IDs are
+fictional examples (`acme/webapp`, `U0EXAMPLE456`, …).
 
 ---
 
@@ -22,8 +23,8 @@ appears via post-then-edit — truncated at first, then complete in ~2 s:)*
 
 > **orchestrator** `APP` — 14:02
 > Two repos could match:
-> **1.** `forwardly` — the product: the export would live in the app, wired to real data
-> **2.** `scratch` — sandbox: a one-shot script alongside the product
+> **1.** `webapp` — the product: the export would live in the app, wired to real data
+> **2.** `sandbox` — scratch space: a one-shot script alongside the product
 > I'd go with the **claude** agent. Reply **1**, **2**, or name another repo.
 >
 > root reaction: 👀 → ❓
@@ -39,8 +40,8 @@ counts as go, including for the announced agent. No second gate.)*
 status message that will be edited at milestones, never re-posted:)*
 
 > **orchestrator** `APP` — 14:04
-> ⚙️ **forwardly#84 — CSV export of send metrics**
-> `forwardly-84-csv-export` · claude · issue [forwardly#84](https://github.com/lemlist/forwardly/issues/84)
+> ⚙️ **webapp#84 — CSV export of send metrics**
+> `webapp-84-csv-export` · claude · issue [webapp#84](https://github.com/acme/webapp/issues/84)
 > • 14:04 — issue created, worktree ready, brief handed off (task `t-3f81`)
 >
 > root reaction: ❓ → 👀
@@ -49,8 +50,8 @@ status message that will be edited at milestones, never re-posted:)*
 notify: that's intentional, it's ambient.)*
 
 > **orchestrator** `APP` — 14:04 *(edited)*
-> ⚙️ **forwardly#84 — CSV export of send metrics**
-> `forwardly-84-csv-export` · claude · issue [forwardly#84](https://github.com/lemlist/forwardly/issues/84)
+> ⚙️ **webapp#84 — CSV export of send metrics**
+> `webapp-84-csv-export` · claude · issue [webapp#84](https://github.com/acme/webapp/issues/84)
 > • 14:04 — issue created, worktree ready, brief handed off (task `t-3f81`)
 > • 14:12 — worker: "endpoint `/metrics/export` in place, tests running"
 > • last sign of life: 2 min ago
@@ -60,13 +61,13 @@ it **edits the card** to its final ✅ state — the durable links live there �
 **short summary** as a new message, because "it's done" deserves a notification.)*
 
 > **orchestrator** `APP` — 14:04 *(edited)*
-> ✅ **forwardly#84 — CSV export of send metrics — delivered in 27 min**
-> • PR: [forwardly#87 — Add CSV export of send metrics](https://github.com/lemlist/forwardly/pull/87) *(ready for review)*
-> • issue: [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — resolution comment posted
-> • worktree: `~/orca/workspaces/forwardly/forwardly-84-csv-export`
+> ✅ **webapp#84 — CSV export of send metrics — delivered in 27 min**
+> • PR: [webapp#87 — Add CSV export of send metrics](https://github.com/acme/webapp/pull/87) *(ready for review)*
+> • issue: [webapp#84](https://github.com/acme/webapp/issues/84) — resolution comment posted
+> • worktree: `~/orca/workspaces/webapp/webapp-84-csv-export`
 
 > **orchestrator** `APP` — 14:31
-> ✅ Delivered — [forwardly#87](https://github.com/lemlist/forwardly/pull/87) ready for review:
+> ✅ Delivered — [webapp#87](https://github.com/acme/webapp/pull/87) ready for review:
 > `/metrics/export` endpoint + dashboard button, tests green. Details in the card ⤴
 >
 > root reaction: 👀 → ✅
@@ -80,17 +81,17 @@ confirmation gate, per #10. But `git push` is in the CONFIRM category, per #8:
 `canUseTool` suspends the command and posts a ONE-line gate.)*
 
 > **Nicolas** — 09:15
-> @orchestrator PR forwardly#87 has a conflict — rebase it on main and re-push
+> @orchestrator PR webapp#87 has a conflict — rebase it on main and re-push
 >
 > reactions: 👀
 
 > **orchestrator** `APP` — 09:16
-> Rebase done in `forwardly-84-csv-export`, conflict resolved (lockfile), tests green.
+> Rebase done in `webapp-84-csv-export`, conflict resolved (lockfile), tests green.
 >
 > root reaction: 👀
 
 > **orchestrator** `APP` — 09:18
-> 🚦 `git push --force-with-lease` on `forwardly/csv-export-metrics` — go?
+> 🚦 `git push --force-with-lease` on `webapp/csv-export-metrics` — go?
 >
 > root reaction: 👀 → ❓
 
@@ -98,26 +99,26 @@ confirmation gate, per #10. But `git push` is in the CONFIRM category, per #8:
 > go
 
 > **orchestrator** `APP` — 09:20
-> ✅ Pushed — CI re-triggered on [forwardly#87](https://github.com/lemlist/forwardly/pull/87).
+> ✅ Pushed — CI re-triggered on [webapp#87](https://github.com/acme/webapp/pull/87).
 >
 > root reaction: ❓ → ✅
 
 *(The 🚦 gate is an ordinary thread message awaiting a reply — not a button,
 not a DAG `decision_gate`. Same mold for merge, deploy, deletion:
-"🚦 `gh pr merge forwardly#87` (squash) — go?", "🚦 `orca worktree delete
-forwardly-84-csv-export` — go?".)*
+"🚦 `gh pr merge webapp#87` (squash) — go?", "🚦 `orca worktree delete
+webapp-84-csv-export` — go?".)*
 
 ---
 
 ## C — Worker gate relayed: verbatim question + options → reply
 
-*(A delegation `orca#53` has been in flight for 20 min; the session has gone dormant (30 min TTL
+*(A delegation `tooling#53` has been in flight for 20 min; the session has gone dormant (30 min TTL
 per #5). The worker posts an `ask`. The daemon — which is listening, per #9 — wakes the session, which
 posts a **new** gate message. Content contract per #9: who is asking, the question
 **verbatim, never paraphrased**, the numbered options, the instructions.)*
 
 > **orchestrator** `APP` — 16:40
-> ❓ **`orca-53-lint-ci`** ([orca#53](https://github.com/nvergez/orca/issues/53)) asks:
+> ❓ **`tooling-53-lint-ci`** ([tooling#53](https://github.com/acme/tooling/issues/53)) asks:
 >
 > > Two lint configs coexist (`.eslintrc.cjs` at the root, `eslint.config.mjs` in
 > > `app/`). Which one is authoritative for CI?
@@ -137,7 +138,7 @@ posts a **new** gate message. Content contract per #9: who is asking, the questi
 rephrases a human decision. Sent back down via `orchestration reply --id`.)*
 
 > **orchestrator** `APP` — 16:52
-> ✅ Relayed to `orca#53` — "Merge both into flat config"
+> ✅ Relayed to `tooling#53` — "Merge both into flat config"
 >
 > root reaction: ❓ → 👀
 
@@ -171,7 +172,7 @@ message; the card remains the living surface.)*
 > where is the CSV export at?
 
 > **orchestrator** `APP` — 15:05
-> ⚙️ Still in progress — `forwardly-84-csv-export` (claude) has been working for 22 min.
+> ⚙️ Still in progress — `webapp-84-csv-export` (claude) has been working for 22 min.
 > Last status (3 min ago): "endpoint done, wiring up the dashboard button".
 > No question pending. Details: card ⤴
 
@@ -190,8 +191,8 @@ technical state, not an event. At 17:48, resume in-thread **without re-mention**
 > by the way, also add a JSON export
 
 > **orchestrator** `APP` — 17:48
-> Nice follow-up to [forwardly#84](https://github.com/lemlist/forwardly/issues/84) — I'll create
-> a linked issue and delegate on **forwardly** with **claude**. Go?
+> Nice follow-up to [webapp#84](https://github.com/acme/webapp/issues/84) — I'll create
+> a linked issue and delegate on **webapp** with **claude**. Go?
 
 *(The cold wake via `resume` costs a few seconds of latency — that's ALL the
 human perceives. The confirmation gate reappears here because repo/agent are inferred
@@ -214,10 +215,10 @@ from context, per #10.)*
 **G1 — root @mention by a third party → polite refusal, no session created:**
 
 > **Charline** — 10:12
-> @orchestrator deploy forwardly to prod
+> @orchestrator deploy webapp to prod
 
 > **orchestrator** `APP` — 10:12
-> v1: only <@U09CC6M3W1W> can drive me.
+> v1: only <@U0EXAMPLE456> can drive me.
 
 *(Discoverable: a colleague trying it out doesn't think the bot is broken. No 👀 reaction, no
 session.)*
@@ -242,7 +243,7 @@ drive a running session. Deliberate silence — no "I'm ignoring you" polluting 
 
 > **orchestrator** `APP` — 18:30
 > 🔚 Session closed.
-> • 2 delegations: ✅ `forwardly#84` (PR [#87](https://github.com/lemlist/forwardly/pull/87) merged) · ✅ `forwardly#91` (JSON export, PR [#93](https://github.com/lemlist/forwardly/pull/93) to review)
+> • 2 delegations: ✅ `webapp#84` (PR [#87](https://github.com/acme/webapp/pull/87) merged) · ✅ `webapp#91` (JSON export, PR [#93](https://github.com/acme/webapp/pull/93) to review)
 > • thread cost: $6.84 · 19 turns
 > Mention me on a new root message to start again.
 
@@ -262,7 +263,7 @@ drive a running session. Deliberate silence — no "I'm ignoring you" polluting 
 ps`, post ONE line per affected thread — without waking the session.)*
 
 > **orchestrator** `APP` — 08:04
-> ⚠️ Restarted — `forwardly#84` was in flight: still in progress (last sign
+> ⚠️ Restarted — `webapp#84` was in flight: still in progress (last sign
 > 4 min ago). Reply to resume supervision.
 
 ### Zero match — stop + list
@@ -271,15 +272,15 @@ ps`, post ONE line per affected thread — without waking the session.)*
 > @orchestrator fix the showcase site bug
 
 > **orchestrator** `APP` — 11:40
-> No repo I drive matches. I know: `forwardly`, `orca`, `scratch`,
+> No repo I drive matches. I know: `webapp`, `tooling`, `sandbox`,
 > `orchestrator`. Rephrase targeting one of them.
 
-*(Per #10: never a silent fallback, no catch-all `scratch`.)*
+*(Per #10: never a silent fallback, no catch-all `sandbox`.)*
 
 ### Worker escalation
 
 > **orchestrator** `APP` — 15:47
-> 🚨 **`forwardly-84-csv-export`** ([forwardly#84](https://github.com/lemlist/forwardly/issues/84)) escalates:
+> 🚨 **`webapp-84-csv-export`** ([webapp#84](https://github.com/acme/webapp/issues/84)) escalates:
 >
 > > The e2e tests break on `main` even without my changes — I'm pausing until further notice.
 >
@@ -293,7 +294,7 @@ per #9.)*
 ### Stalled worker (watchdog)
 
 > **orchestrator** `APP` — 16:20
-> ⚠️ **`scratch-21-bench`** ([scratch#21](https://github.com/nvergez/scratch/issues/21)) seems stalled —
+> ⚠️ **`sandbox-21-bench`** ([sandbox#21](https://github.com/acme/sandbox/issues/21)) seems stalled —
 > no sign for 25 min, without having asked a question. Last output:
 >
 > > `? Overwrite existing bench.json? (y/N)`

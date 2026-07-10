@@ -14,15 +14,15 @@ thread" as the single gesture.
 
 ```json
 {
-  "channel": "C0ASJR3LAE6",
+  "channel": "C0EXAMPLE123",
   "thread_ts": "1751970120.000200",
-  "text": "⚙️ forwardly#84 — CSV export of send metrics (in progress)",
+  "text": "⚙️ webapp#84 — CSV export of send metrics (in progress)",
   "blocks": [
     {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "*⚙️ forwardly#84 — CSV export of send metrics*"
+        "text": "*⚙️ webapp#84 — CSV export of send metrics*"
       }
     },
     {
@@ -30,7 +30,7 @@ thread" as the single gesture.
       "elements": [
         {
           "type": "mrkdwn",
-          "text": "`forwardly-84-csv-export` · claude · <https://github.com/lemlist/forwardly/issues/84|forwardly#84>"
+          "text": "`webapp-84-csv-export` · claude · <https://github.com/acme/webapp/issues/84|webapp#84>"
         }
       ]
     },
@@ -58,15 +58,15 @@ verbatim per #9); free text in the thread always remains accepted in parallel.
 
 ```json
 {
-  "channel": "C0ASJR3LAE6",
+  "channel": "C0EXAMPLE123",
   "thread_ts": "1751970120.000200",
-  "text": "❓ orca-53-lint-ci asks: which lint config is authoritative for CI?",
+  "text": "❓ tooling-53-lint-ci asks: which lint config is authoritative for CI?",
   "blocks": [
     {
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "❓ *`orca-53-lint-ci`* (<https://github.com/nvergez/orca/issues/53|orca#53>) asks:"
+        "text": "❓ *`tooling-53-lint-ci`* (<https://github.com/acme/tooling/issues/53|tooling#53>) asks:"
       }
     },
     {

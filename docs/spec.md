@@ -3,7 +3,7 @@
 > The executable spec this repo's [wayfinder map (#1)](https://github.com/nvergez/orchestrator/issues/1) was finding its way to.
 > Every section below condenses a decision resolved on the tracker; the linked ticket holds the full rationale, the alternatives that were rejected, and the HITL discussion. When this document and a ticket disagree, the ticket wins.
 
-**What it is.** A Slack-driven **orchestrator-dispatcher**: a single long-lived Node daemon on this VPS that gives a Claude Code agent a Slack presence — **one session per Slack thread** — and lets it interpret requests, **delegate** the work to Orca worktree agents (any allow-listed repo), **supervise** them (worker questions and escalations relayed into the thread), and report status + results back. The orchestrator *never codes itself*; it routes, delegates, supervises, relays.
+**What it is.** A Slack-driven **orchestrator-dispatcher**: a single long-lived Node daemon on the operator's VPS that gives a Claude Code agent a Slack presence — **one session per Slack thread** — and lets it interpret requests, **delegate** the work to Orca worktree agents (any allow-listed repo), **supervise** them (worker questions and escalations relayed into the thread), and report status + results back. The orchestrator *never codes itself*; it routes, delegates, supervises, relays.
 
 **Non-goals (v1)** — ruled out of scope on the map:
 - Managing Orca automations from Slack.
@@ -36,16 +36,16 @@ Orca runtime (headless, system unit) ── worktrees + worker agents
 Stack decision ([#3](https://github.com/nvergez/orchestrator/issues/3), research asset: [`docs/research/slack-claude-bridge.md`](research/slack-claude-bridge.md)):
 - **Slack half**: Bolt (JS) in **Socket Mode** — outbound WebSocket, no public URL/reverse proxy. Internal (non-distributed) app to keep Tier-3 rate limits.
 - **Claude half**: **Claude Agent SDK (TypeScript)**, in-process — one `claude` subprocess per thread (fault isolation), session resume via `session_id`, streaming input to inject replies into live sessions, `canUseTool` as the enforcement hook, per-turn cost on `ResultMessage`.
-- Rejected: headless CLI shell-out per message (re-implements session tracking), Slack HTTP Events (needs inbound URL), Anthropic-hosted managed agents (`orca` must run on this VPS), homegrown loop on the Messages API.
+- Rejected: headless CLI shell-out per message (re-implements session tracking), Slack HTTP Events (needs inbound URL), Anthropic-hosted managed agents (`orca` must run on the same machine as the daemon), homegrown loop on the Messages API.
 
 ## 2. Slack surface
 
-Provisioned ([#2](https://github.com/nvergez/orchestrator/issues/2)) on the **lemlist** workspace:
-- App `@nikolai` (`U0BGRT64CPJ`), Socket Mode ON; the single channel is `C0ASJR3LAE6` — a **private** channel, today named **#radical-squad** (bot is a member); authorized user `U09CC6M3W1W`.
+Provisioned ([#2](https://github.com/nvergez/orchestrator/issues/2)) on the operator's Slack workspace — to provision your own app, see [`docs/setup-slack.md`](setup-slack.md). IDs below are placeholders for the instance's real values:
+- App `@orchestrator` (bot user `U0EXAMPLEBOT`), Socket Mode ON; the single channel is `C0EXAMPLE123` — a **private** channel in this deployment (bot is a member); authorized user `U0EXAMPLE456`.
 - Bot scopes (6): `chat:write, app_mentions:read, channels:history, groups:history, reactions:write, users:read`. Events: `app_mention`, **`message.groups`** (+ `message.channels`).
   - The channel's **privacy decides the message event**: Slack emits `message.groups` for private channels and `message.channels` for public ones — `groups:history` is load-bearing, not incidental. Subscribing to only `message.channels` on a private channel silently delivers **no message event at all**, so plain thread replies never reach the daemon while `app_mention` keeps working ([#38](https://github.com/nvergez/orchestrator/issues/38)). Both subscriptions arrive as `type: "message"` (private ones carry `channel_type: "group"`), so one listener handles either; a mention fires the `message` copy *and* `app_mention`, deduped by the filter.
 - `channels:read` is **not granted and not needed in v1** (single pinned channel + single-user allow-list; no `conversations.info/members`).
-- Secrets in `/home/dev/projects/orchestrator/.env` (chmod 600, git-ignored; template `.env.example`).
+- Secrets in the daemon's env file (chmod 600, outside git; template `.env.example`).
 
 ## 3. Session model — thread ↔ Claude Code session
 
@@ -115,9 +115,9 @@ Decision [#8](https://github.com/nvergez/orchestrator/issues/8). Enforcement = t
 | **CONFIRM** | `git push` / `git merge`, `gh pr merge`, deploys, deletions (`worktree delete`, `rm`, branches), writes outside the delegated worktree | one-line gate in the thread; the call suspends until the reply |
 | **FORBIDDEN** | anything outside the `orca` / `gh` / `git` allow-list; Orca automations; repo creation/registration | hard deny, never asked |
 
-- **Repo allow-list = the routing hints file**: no entry ⇒ not delegable, even if registered in Orca (treated as zero-match). Adding a repo = 1 commit. Initially: `forwardly`, `orca`, `scratch`, `orchestrator`.
+- **Repo allow-list = the routing hints file**: no entry ⇒ not delegable, even if registered in Orca (treated as zero-match). Adding a repo = one edit to the hints file. Example set: `webapp`, `tooling`, `sandbox`, `orchestrator`.
 - **Cost: measure-only in v1.** SQLite ledger (per-session `turn_count`, `cost_usd_total` from `ResultMessage`); threshold warnings in the thread at **$5 then $10** (env-configurable); nothing ever blocks; no time cap. Known limitation: delegated workers' own token usage is not measured.
-- **User allow-list (env)**: v1 = `U09CC6M3W1W` only, filtered at the source. Third-party @mention → one-line polite refusal, no session. Third-party reply inside an active thread → **silently ignored, never injected** (anti-injection: resumption needs no re-mention).
+- **User allow-list (env)**: v1 = the single `SLACK_ALLOWED_USER_ID` (placeholder `U0EXAMPLE456`), filtered at the source. Third-party @mention → one-line polite refusal, no session. Third-party reply inside an active thread → **silently ignored, never injected** (anti-injection: resumption needs no re-mention).
 - **Crash recovery: reconcile + notify, resume on demand.** Workers are independent processes — never killed at boot. At boot: re-read `delegations` with `status=dispatched`, reconcile against `task-list` + `worktree ps`, post one ⚠️ status line per affected thread **without waking sessions**; the next human message resumes supervision. Nothing is lost: results stay reachable via the linked GitHub issue and `task-list`.
 
 ## 8. Slack UX
@@ -130,7 +130,7 @@ Guiding principle: **"edit the status, post the event."** Anything requiring the
 - **Root reactions** = coarse state readable from the channel: 👀 in progress · ❓ blocked on the human · 🚨 attention · ✅ delivered · ❌ failed (stale one removed).
 - **One card per delegation**, posted at dispatch and edited at **milestones** only (worktree created, brief handed over, heartbeats, done) + a liveness line at most every 2 min — never a token stream. The conversational **voice** streams via post-then-edit (~1 edit/s, Tier-3 throttle).
 - **Done**: the card flips to ✅ and becomes the durable home for links (PR, issue, worktree path, duration) **and** a short summary goes out as a new message.
-- **Reference verbatims** (fixed by the mock): autonomy gate `🚦 <command> on <worktree> — go?`; worker gate = verbatim question + numbered options + "Reply in this thread"; queue `⏳ Queued (5 active sessions)…`; close 🔚 summary; cost `💸 This thread has cost $5.03…`; third party "v1: only <@U09CC6M3W1W> can drive me."; reboot `⚠️ Restarted — <repo>#<n> was in flight: <state>. Reply to resume supervision.`
+- **Reference verbatims** (fixed by the mock): autonomy gate `🚦 <command> on <worktree> — go?`; worker gate = verbatim question + numbered options + "Reply in this thread"; queue `⏳ Queued (5 active sessions)…`; close 🔚 summary; cost `💸 This thread has cost $5.03…`; third party "v1: only <@U0EXAMPLE456> can drive me."; reboot `⚠️ Restarted — <repo>#<n> was in flight: <state>. Reply to resume supervision.`
 - **No welcome message** — no per-thread pin, no channel pin/canvas.
 
 ## 9. Data model (SQLite)
@@ -145,12 +145,12 @@ One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTR
 
 ## 10. Deployment & operations
 
-Decision [#6](https://github.com/nvergez/orchestrator/issues/6).
+Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runbook for the packaged install (service management, upgrades, uninstall): [`docs/operations.md`](operations.md).
 
-- **The daemon is this repo**: `package.json` at the root, code in `src/`; the `main` checkout at `/home/dev/projects/orchestrator` **is** the deployed instance. Deploy = `git pull` + `npm ci` + `systemctl --user restart orchestrator`.
-- **systemd user unit** `~/.config/systemd/user/orchestrator.service` (modeled on `observer.service`): `ExecStart` = absolute nvm node path (`/home/dev/.nvm/versions/node/v22.23.1/bin/node`); `Environment=PATH=…` including `/home/dev/.local/bin` (orca CLI) + nvm bin (SDK spawns the bundled `claude`); `WorkingDirectory=` the checkout; `Restart=always`, `RestartSec=5`; `WantedBy=default.target` + enable → reboot survival via the already-active linger. Cold restart is safe by design (#5 boot rule). Ops note: in Orca shells, `export XDG_RUNTIME_DIR=/run/user/1000` before `systemctl --user`/`journalctl --user`.
-- **Auth**: `claude setup-token` → **`CLAUDE_CODE_OAUTH_TOKEN`** in `.env` (subscription-billed; independent of the interactive login used by delegated workers). Never `--bare` (strips the OAuth token). `ANTHROPIC_API_KEY` = plan B only.
-- **Secrets**: `EnvironmentFile=/home/dev/projects/orchestrator/.env`; code reads `process.env` only (no dotenv). Dev run: `node --env-file=.env`.
+- **The daemon is this repo**: `package.json` at the root, code in `src/`; the `main` checkout at `<checkout>` **is** the deployed instance. Deploy = `git pull` + `npm ci` + `systemctl --user restart orchestrator`.
+- **systemd user unit** `~/.config/systemd/user/orchestrator.service`: `ExecStart` = absolute node path (e.g. `~/.nvm/versions/node/<version>/bin/node` — user units don't source shell profiles); `Environment=PATH=…` including the `orca` CLI's bin dir + the node bin dir (SDK spawns the bundled `claude`); `WorkingDirectory=` the checkout; `Restart=always`, `RestartSec=5`; `WantedBy=default.target` + enable → reboot survival via linger. Cold restart is safe by design (#5 boot rule). Ops note: in Orca shells, `export XDG_RUNTIME_DIR=/run/user/$(id -u)` before `systemctl --user`/`journalctl --user`.
+- **Auth**: `claude setup-token` → **`CLAUDE_CODE_OAUTH_TOKEN`** in the env file (subscription-billed; independent of the interactive login used by delegated workers). Never `--bare` (strips the OAuth token). `ANTHROPIC_API_KEY` = plan B only.
+- **Secrets**: `EnvironmentFile=` pointing at the daemon's env file; code reads `process.env` only (no dotenv). Dev run: `node --env-file=.env`.
 - **Orca dependency**: none at boot (user units can't order against system units anyway). Non-blocking startup healthcheck (`orca repo list --json`, logged); **every `orca` call wrapped** — on failure, a clear "Orca runtime unavailable" message in the thread, never a crash.
 - **Logs**: structured JSON (pino) on stdout → persistent journald (rotation already configured). `LOG_LEVEL` env (default `info`). Read: `journalctl --user -u orchestrator -f`.
 
@@ -160,8 +160,8 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6).
 |---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-…` bot token (#2) |
 | `SLACK_APP_TOKEN` | `xapp-…` app-level token, `connections:write` (#2) |
-| `SLACK_CHANNEL_ID` | `C0ASJR3LAE6` — the single channel (#2) |
-| `SLACK_ALLOWED_USER_ID` | `U09CC6M3W1W` — single-user allow-list (#2/#8) |
+| `SLACK_CHANNEL_ID` | `C…` — the single pinned channel (#2) |
+| `SLACK_ALLOWED_USER_ID` | `U…` — single-user allow-list (#2/#8) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | daemon auth, from `claude setup-token` (#6) |
 | `LOG_LEVEL` | pino level, default `info` (#6) |
 | `ORCHESTRATOR_DB_PATH` | optional SQLite override (#6) |
