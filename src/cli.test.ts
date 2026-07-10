@@ -11,6 +11,7 @@ const makeDeps = (): { deps: CliDeps; out: string[]; err: string[] } => {
     daemon: vi.fn(() => Promise.resolve()),
     init: vi.fn(() => 0),
     doctor: vi.fn(() => Promise.resolve(0)),
+    update: vi.fn(() => Promise.resolve(0)),
     serviceInstall: vi.fn(() => Promise.resolve(0)),
     serviceUninstall: vi.fn(() => Promise.resolve(0)),
   };
@@ -51,6 +52,20 @@ describe('runCli', () => {
     await expect(runCli(['doctor'], deps)).resolves.toBe(1);
   });
 
+  it('dispatches update, passing --yes through as the major-jump consent', async () => {
+    const { deps } = makeDeps();
+    await expect(runCli(['update'], deps)).resolves.toBe(0);
+    expect(deps.update).toHaveBeenCalledWith(false);
+    await expect(runCli(['update', '--yes'], deps)).resolves.toBe(0);
+    expect(deps.update).toHaveBeenCalledWith(true);
+  });
+
+  it('propagates update’s non-zero exit code', async () => {
+    const { deps } = makeDeps();
+    vi.mocked(deps.update).mockResolvedValue(1);
+    await expect(runCli(['update'], deps)).resolves.toBe(1);
+  });
+
   it('dispatches service install / service uninstall', async () => {
     const { deps } = makeDeps();
     await expect(runCli(['service', 'install'], deps)).resolves.toBe(0);
@@ -74,6 +89,8 @@ describe('runCli', () => {
     [['init', 'extra']],
     [['doctor', '--fix']],
     [['service', 'install', '--force']],
+    [['update', 'now']],
+    [['update', '--yes', 'extra']],
   ])('rejects %j with exit 1 and usage on stderr', async (argv) => {
     const { deps, err } = makeDeps();
     await expect(runCli(argv, deps)).resolves.toBe(1);
@@ -82,6 +99,7 @@ describe('runCli', () => {
     expect(deps.daemon).not.toHaveBeenCalled();
     expect(deps.init).not.toHaveBeenCalled();
     expect(deps.doctor).not.toHaveBeenCalled();
+    expect(deps.update).not.toHaveBeenCalled();
     expect(deps.serviceInstall).not.toHaveBeenCalled();
     expect(deps.serviceUninstall).not.toHaveBeenCalled();
   });

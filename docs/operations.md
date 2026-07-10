@@ -80,31 +80,49 @@ Two of those checks adapt to *where* you run doctor:
   the unit being disabled: unit-file *presence* is read from the filesystem
   and stays accurate; enablement simply couldn't be asked of systemd.
 
-## Upgrading
-
-One ritual for every upgrade:
+## Updating
 
 ```bash
-npm update -g @nvergez/orchestrator && orc service install && systemctl --user restart orchestrator
+orc update
 ```
 
-Step by step:
+What it does, in order:
 
-1. `npm update -g` fetches the new version. Pre-1.0, read the
-   [GitHub Release notes](https://github.com/nvergez/orchestrator/releases)
-   first — the first breaking release graduates to 1.0.0.
-2. `orc service install` regenerates the unit. This matters more than it
-   looks: the unit pins **absolute paths** to the node binary and the
-   package's entry point, so after a node or nvm upgrade the old unit points
-   at a binary that may no longer exist. Re-running install every time makes
-   that case impossible to hit.
-3. `systemctl --user restart orchestrator` is **load-bearing**: `service
-   install` ends in `enable --now`, which does *not* restart an
-   already-running unit — skip the restart and the old code keeps running.
+1. Refuses unless it *is* the global npm install — a dev checkout or an
+   `npm link` is updated with git, never by this command.
+2. Checks the registry. Already at the latest version is a pure no-op:
+   exit 0, service untouched.
+3. Refuses a **breaking release** (major version jump) with a pointer to the
+   [release notes](https://github.com/nvergez/orchestrator/releases); re-run
+   as `orc update --yes` once you have read them. Same-major updates apply
+   without ceremony.
+4. Installs the new version, regenerates the unit **via the freshly installed
+   binary** (see `docs/adr/0001`), and restarts the service. The restart is
+   the step that actually swaps the running code — `service install` alone
+   ends in `enable --now`, which does *not* restart a running unit.
+
+Without a systemd unit (mid-setup, or [running without
+systemd](#running-without-systemd)) only the package is updated, and update
+says so — restart your daemon by hand.
 
 Optionally finish with `orc doctor`. A restart is safe by design: sessions
 come back dormant and resume on the next message; in-flight delegations are
 reconciled and reported in their threads.
+
+After a **node/nvm upgrade** (no new release involved), the unit's pinned
+absolute paths go stale — `orc doctor` flags this as a failed `unit paths`
+check; fix with `orc service install && systemctl --user restart orchestrator`.
+
+### Rolling back
+
+`orc update` only moves forward. To pin or roll back, run the ritual by hand:
+
+```bash
+npm install -g @nvergez/orchestrator@0.1.0 && orc service install && systemctl --user restart orchestrator
+```
+
+The explicit restart matters for the same reason as above — without it the
+old code keeps running.
 
 ## Running without systemd
 

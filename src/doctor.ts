@@ -12,9 +12,10 @@ import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } fro
 /**
  * `orc doctor` (issue #70 + #74 addendum): read-only diagnosis of the
  * install — env vars, routing hints, state dir, node version, Orca
- * reachability, and (only once the unit is installed) unit enablement and
- * linger, so doctor stays green through the pre-install phase of the
- * golden path. Non-zero exit on any failure. Nothing here writes.
+ * reachability, and (only once the unit is installed) unit enablement,
+ * the unit's pinned ExecStart paths, and linger, so doctor stays green
+ * through the pre-install phase of the golden path. Non-zero exit on any
+ * failure. Nothing here writes.
  */
 
 export interface DoctorCheck {
@@ -164,6 +165,46 @@ function minimumFromEngines(range: string | undefined): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * The generated unit pins absolute paths (node binary + entry point); a
+ * node/nvm upgrade leaves them dangling while the in-memory daemon keeps
+ * running — invisible until the next restart fails. `orc update` is a no-op
+ * at latest, so this is the only place the rot gets diagnosed.
+ */
+function checkUnitPaths(deps: DoctorDeps): DoctorCheck {
+  let content: string;
+  try {
+    content = deps.readFile(deps.unitPath);
+  } catch {
+    return { label: 'unit paths', ok: false, detail: `could not read ${deps.unitPath}` };
+  }
+  const execStart = content
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('ExecStart='));
+  if (execStart === undefined) {
+    return {
+      label: 'unit paths',
+      ok: false,
+      detail: `no ExecStart in ${deps.unitPath} — re-run \`orc service install\``,
+    };
+  }
+  const missing = execStart
+    .slice('ExecStart='.length)
+    .trim()
+    .split(/\s+/)
+    .filter((path) => !deps.fileExists(path));
+  return missing.length === 0
+    ? { label: 'unit paths', ok: true, detail: 'ExecStart paths exist (node binary + entry point)' }
+    : {
+        label: 'unit paths',
+        ok: false,
+        detail:
+          `ExecStart points at missing ${missing.join(', ')} — stale after a node upgrade? ` +
+          're-run `orc service install`, then restart',
+      };
+}
+
 function versionAtLeast(version: string, minimum: string): boolean {
   const have = version.split('.').map(Number);
   const need = minimum.split('.').map(Number);
@@ -255,6 +296,7 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
           },
     );
   }
+  checks.push(checkUnitPaths(deps));
   try {
     const { stdout } = await deps.runSystem('loginctl', ['show-user', deps.username, '--property=Linger']);
     checks.push(

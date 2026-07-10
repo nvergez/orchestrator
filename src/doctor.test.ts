@@ -35,6 +35,17 @@ const noEnvFile = (): never => {
   });
 };
 
+const NODE_PATH = '/usr/bin/node';
+const ENTRY_PATH = '/usr/lib/node_modules/@nvergez/orchestrator/dist/index.js';
+
+const UNIT_CONTENT = ['[Service]', `ExecStart=${NODE_PATH} ${ENTRY_PATH}`, ''].join('\n');
+
+/** readFile serves the unit for the unit-paths check, everything else goes to the env-file impl. */
+const readFiles =
+  (envImpl: (path: string) => string): DoctorDeps['readFile'] =>
+  (path) =>
+    path === UNIT_PATH ? UNIT_CONTENT : envImpl(path);
+
 const envFileContent = (vars: Record<string, string>): string =>
   Object.entries(vars)
     .map(([key, value]) => `${key}=${value}`)
@@ -48,7 +59,7 @@ const greenDeps = (): DoctorDeps => ({
   nodeVersion: '22.18.0',
   enginesNode: '>=22.18',
   fileExists: () => true,
-  readFile: noEnvFile,
+  readFile: readFiles(noEnvFile),
   dirWritable: () => true,
   loadHints: () => [hint('webapp'), hint('sandbox')],
   username: 'op',
@@ -70,6 +81,7 @@ describe('runDoctorChecks', () => {
       'node',
       'orca',
       'service',
+      'unit paths',
       'linger',
     ]);
   });
@@ -84,9 +96,9 @@ describe('runDoctorChecks', () => {
 
   it('passes env from process.env without touching the env file, naming the source', async () => {
     const deps = greenDeps();
-    deps.readFile = () => {
+    deps.readFile = readFiles(() => {
       throw new Error('must not be read when process.env validates');
-    };
+    });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
     expect(checks.find((check) => check.label === 'env')?.detail).toBe(
@@ -98,10 +110,10 @@ describe('runDoctorChecks', () => {
     const deps = greenDeps();
     deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
     const readPaths: string[] = [];
-    deps.readFile = (path) => {
+    deps.readFile = readFiles((path) => {
       readPaths.push(path);
       return envFileContent(validEnv);
-    };
+    });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
     expect(readPaths).toEqual([ENV_FILE_PATH]);
@@ -113,7 +125,7 @@ describe('runDoctorChecks', () => {
   it('parses template-style env files: comments, blanks, export, quotes', async () => {
     const deps = greenDeps();
     deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
-    deps.readFile = () =>
+    deps.readFile = readFiles(() =>
       [
         '# Bot User OAuth Token — starts with xoxb-',
         `SLACK_BOT_TOKEN="${validEnv.SLACK_BOT_TOKEN}"`,
@@ -123,7 +135,8 @@ describe('runDoctorChecks', () => {
         `SLACK_ALLOWED_USER_ID=${validEnv.SLACK_ALLOWED_USER_ID}`,
         `CLAUDE_CODE_OAUTH_TOKEN=${validEnv.CLAUDE_CODE_OAUTH_TOKEN}`,
         '#LOG_LEVEL=info',
-      ].join('\n');
+      ].join('\n'),
+    );
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
   });
@@ -131,7 +144,7 @@ describe('runDoctorChecks', () => {
   it('applies the same prefix rules to env-file values, naming both sources', async () => {
     const deps = greenDeps();
     deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
-    deps.readFile = () => envFileContent({ ...validEnv, SLACK_BOT_TOKEN: 'not-a-bot-token' });
+    deps.readFile = readFiles(() => envFileContent({ ...validEnv, SLACK_BOT_TOKEN: 'not-a-bot-token' }));
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['env']);
     const detail = checks.find((check) => check.label === 'env')?.detail;
@@ -142,7 +155,7 @@ describe('runDoctorChecks', () => {
   it('env-file values win over mis-prefixed process.env ones, like EnvironmentFile', async () => {
     const deps = greenDeps();
     deps.env = { ...validEnv, XDG_CONFIG_HOME: '/home/op/.config', SLACK_BOT_TOKEN: 'not-a-bot-token' };
-    deps.readFile = () => envFileContent({ SLACK_BOT_TOKEN: validEnv.SLACK_BOT_TOKEN });
+    deps.readFile = readFiles(() => envFileContent({ SLACK_BOT_TOKEN: validEnv.SLACK_BOT_TOKEN }));
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
     expect(checks.find((check) => check.label === 'env')?.detail).toContain(
@@ -255,6 +268,25 @@ describe('runDoctorChecks', () => {
     expect(detail).not.toContain('enabled');
   });
 
+  it('fails unit paths when a pinned ExecStart path is dangling (node/nvm upgrade)', async () => {
+    const deps = greenDeps();
+    deps.fileExists = (path) => path !== NODE_PATH;
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['unit paths']);
+    const detail = checks.find((check) => check.label === 'unit paths')?.detail;
+    expect(detail).toContain(NODE_PATH);
+    expect(detail).not.toContain(ENTRY_PATH);
+    expect(detail).toContain('orc service install');
+  });
+
+  it('fails unit paths when the unit has no ExecStart line at all', async () => {
+    const deps = greenDeps();
+    deps.readFile = (path) => (path === UNIT_PATH ? '[Service]\n' : noEnvFile());
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['unit paths']);
+    expect(checks.find((check) => check.label === 'unit paths')?.detail).toContain('no ExecStart');
+  });
+
   it('fails linger when the unit is installed and linger is off, with the one-liner', async () => {
     const deps = greenDeps();
     deps.runSystem = (command) =>
@@ -291,7 +323,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(7);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(8);
     expect(out.at(-1)).toBe('all checks passed');
   });
 
