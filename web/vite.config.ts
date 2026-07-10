@@ -16,5 +16,11 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8787',
     },
+    // Dev over a tailnet: bind past loopback per-invocation with
+    // `npm run dev -w web -- --host "$(tailscale ip -4)"` — bind to the
+    // tailnet IP, not 0.0.0.0, on machines with a public interface. The
+    // MagicDNS Host header is pre-allowed here so the *.ts.net URL isn't
+    // rejected by Vite's DNS-rebinding protection.
+    allowedHosts: ['.ts.net'],
   },
 });
