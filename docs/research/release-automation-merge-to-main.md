@@ -1,5 +1,11 @@
 # Release automation for merge-to-main npm publishing
 
+> **Superseded (2026-07-10):** the repo no longer releases on every merge to
+> main. Releases are label-gated — merging a PR that carries the `release`
+> label (or a manual `workflow_dispatch`) triggers semantic-release, which
+> ships everything merged since the last tag. See `.github/workflows/ci.yml`
+> and `CONTEXT.md` ("Releasing"). The tool comparison below remains valid.
+
 > Resolution asset for ticket [#68 "Research: release automation for merge-to-main npm publishing"](https://github.com/nvergez/orchestrator/issues/68) (map [#65](https://github.com/nvergez/orchestrator/issues/65)).
 > Type `research` (AFK). First-hand sources: the tools' own repos/READMEs/release notes, docs.npmjs.com, the GitHub changelog (github.blog), docs.github.com, registry.npmjs.org, nodejs.org. Researched on 2026-07-09.
 

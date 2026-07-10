@@ -5,12 +5,15 @@ on:
     types: [opened, edited, synchronize, reopened]
   push:
     branches: [main]
+  # Manual fallback release trigger: forgotten label, superseded queued run,
+  # or releasing without a merge. Only releases when dispatched on main.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# PR runs cancel superseded runs of the same PR; push-to-main runs are
-# never cancelled (a release run must not die mid-publish).
+# PR runs cancel superseded runs of the same PR; push-to-main and dispatch
+# runs are never cancelled (a release run must not die mid-publish).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -85,9 +88,45 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release:
+  # Releases are label-gated: a merge to main releases only when the merged
+  # PR carried the `release` label. The label is a trigger, not a selector —
+  # semantic-release ships everything merged since the last tag (see
+  # CONTEXT.md "Releasing"). The push event has no PR payload, so this job
+  # looks the PR up from the commit SHA.
+  check-label:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [typecheck, lint, test, pack-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      release: ${{ steps.label.outputs.release }}
+    steps:
+      - id: label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          labeled="$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+            --jq '[.[].labels[].name] | contains(["release"])')"
+          echo "release=${labeled:-false}" >> "$GITHUB_OUTPUT"
+          echo "release label present: ${labeled:-false}"
+
+  release:
+    # Runs on a labeled merge to main, or a manual dispatch on main. A direct
+    # push (no PR) never releases; check-label is skipped on dispatch, and its
+    # empty output makes the label branch of the condition false.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.typecheck.result == 'success' &&
+        needs.lint.result == 'success' &&
+        needs.test.result == 'success' &&
+        needs.pack-smoke.result == 'success' &&
+        (
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+          needs.check-label.outputs.release == 'true'
+        )
+      }}
+    needs: [typecheck, lint, test, pack-smoke, check-label]
     runs-on: ubuntu-latest
     permissions:
       contents: write

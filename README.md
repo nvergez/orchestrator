@@ -117,8 +117,10 @@ npm test && npm run typecheck && npm run lint
 
 PRs are squash-merged and the PR title must follow
 [Conventional Commits](https://www.conventionalcommits.org/) — merged titles
-drive automated releases (`fix:` → patch, `feat:` → minor, breaking → major;
-anything else releases nothing).
+drive version bumps (`fix:` → patch, `feat:` → minor, breaking → major;
+anything else counts for nothing). Merging alone does not release: a release
+happens when a merged PR carries the `release` label (or via a manual
+workflow dispatch), and it ships everything merged since the last tag.
 
 ## License
 
