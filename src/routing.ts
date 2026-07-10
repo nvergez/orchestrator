@@ -5,7 +5,9 @@ import type { Logger } from './logger.ts';
 
 /**
  * Repo routing & agent selection (spec §4, issues #10/#18): the curated
- * routing-hints file, versioned at the repo root, is both the enrichment the
+ * routing-hints file, living in the operator's config dir (issue #70:
+ * `~/.config/orchestrator/routing-hints.json`, or wherever
+ * `ORCHESTRATOR_ROUTING_HINTS_PATH` points), is both the enrichment the
  * LLM routes on and the delegation allow-list (spec §7) — a repo absent from
  * it is not delegable even if registered in Orca.
  *
@@ -104,15 +106,31 @@ export function parseRoutingHints(jsonText: string): RepoHint[] {
   return hints;
 }
 
-/** Load the versioned hints file — called once at boot, failure is fatal. */
+/**
+ * Load the operator's hints file — called once at boot, failure is fatal
+ * (issue #70): a missing file gets the actionable resolved-path + `orc init`
+ * message, a malformed one gets the parse problems prefixed with the path.
+ */
 export function loadRoutingHints(filePath: string): RepoHint[] {
   let text: string;
   try {
     text = readFileSync(filePath, 'utf8');
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new RoutingHintsError(
+        `routing hints not found at ${filePath} — run \`orc init\` to scaffold the config directory, then list your repos there`,
+      );
+    }
     throw new RoutingHintsError(`cannot read routing hints at ${filePath}: ${String(error)}`);
   }
-  return parseRoutingHints(text);
+  try {
+    return parseRoutingHints(text);
+  } catch (error) {
+    if (error instanceof RoutingHintsError) {
+      throw new RoutingHintsError(`${filePath}: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -242,8 +260,8 @@ Ask as soon as the second candidate is credible, or whenever you are not clearly
 - Two or more credible candidates → ask ONE numbered question: each plausible repo with a one-line reason it fits, the agent you'd use, and how to answer. Model (from the UX mock):
 
 Two repos could match:
-*1.* \`forwardly\` — the product: the export would live in the app, wired to real data
-*2.* \`scratch\` — sandbox: a one-shot script alongside the product
+*1.* \`webapp\` — the product: the export would live in the app, wired to real data
+*2.* \`sandbox\` — scratch space: a one-shot script alongside the product
 I'd go with the *claude* agent. Reply *1*, *2*, or name another repo.
 
   The answer to that question IS the confirmation, including for the announced agent — never follow it with another question.

@@ -8,7 +8,7 @@ const repoListJson = JSON.stringify({
   ok: true,
   result: {
     repos: [
-      { id: 'u1', displayName: 'forwardly' },
+      { id: 'u1', displayName: 'webapp' },
       { id: 'u2', displayName: 'orchestrator' },
     ],
   },

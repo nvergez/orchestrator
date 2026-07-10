@@ -3,7 +3,7 @@ import { createLogger } from './logger.ts';
 import { GateKeeper, isApproval } from './gate.ts';
 
 const THREAD = '1751970000.000100';
-const USER = 'U09CC6M3W1W';
+const USER = 'U0EXAMPLE456';
 const INTRUDER = 'U0INTRUDER99';
 
 interface Harness {

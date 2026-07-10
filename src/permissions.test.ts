@@ -154,11 +154,11 @@ describe('buildCanUseTool', () => {
     const canUseTool = makeCanUseTool(gates);
     await canUseTool(
       'Bash',
-      { command: 'git -C /home/dev/orca/workspaces/forwardly/csv-export-metrics push --force-with-lease' },
+      { command: 'git -C /home/op/orca/workspaces/webapp/csv-export-metrics push --force-with-lease' },
       callOptions(),
     );
     expect(gates.requests[0]?.gateText).toBe(
-      '🚦 `git push --force-with-lease` on `forwardly/csv-export-metrics` — go?',
+      '🚦 `git push --force-with-lease` on `webapp/csv-export-metrics` — go?',
     );
   });
 

@@ -12,7 +12,7 @@ import type { CommandRunner } from './orca.ts';
 
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';
-const CHANNEL = 'C0ASJR3LAE6';
+const CHANNEL = 'C0EXAMPLE123';
 const MAILBOX = 'term_mb1';
 
 /** The orca CLI `--json` envelope, as captured from the real runtime. */
@@ -28,7 +28,7 @@ const busMessage = (over: Partial<Record<string, unknown>> = {}): object => ({
   to_handle: MAILBOX,
   subject: 'CSV export shipped',
   body:
-    'Opened https://github.com/lemlist/forwardly/pull/87 with the export endpoint. ' +
+    'Opened https://github.com/acme/webapp/pull/87 with the export endpoint. ' +
     'Tests green. Nothing left.',
   type: 'worker_done',
   priority: 'normal',
@@ -40,10 +40,10 @@ const REPO_LIST_OUT = envelope({
   repos: [
     {
       id: 'repo-fwd',
-      displayName: 'forwardly',
-      gitRemoteIdentity: { canonicalKey: 'github.com/lemlist/forwardly' },
+      displayName: 'webapp',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/webapp' },
     },
-    { id: 'repo-scratch', displayName: 'scratch' },
+    { id: 'repo-sandbox', displayName: 'sandbox' },
   ],
 });
 
@@ -109,9 +109,9 @@ const seedDispatch = (
     taskId: 'task_3f81',
     dispatchId: 'ctx_d1',
     worktreeId: 'wt-1',
-    worktreeName: 'forwardly-84-csv-export',
-    worktreePath: '/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export',
-    repo: 'forwardly',
+    worktreeName: 'webapp-84-csv-export',
+    worktreePath: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
+    repo: 'webapp',
     issueNumber: 84,
     agent: 'claude',
     workerHandle: 'term_w1',
@@ -200,10 +200,10 @@ describe('worker_done — the happy path', () => {
     expect(surface.updates).toHaveLength(1);
     const card = surface.updates[0];
     expect(card?.ts).toBe('card-ts-1');
-    expect(card?.text).toContain('✅ *forwardly#84 — CSV export of send metrics — delivered in 27 min*');
-    expect(card?.text).toContain('• PR: <https://github.com/lemlist/forwardly/pull/87|forwardly#87>');
-    expect(card?.text).toContain('• issue: <https://github.com/lemlist/forwardly/issues/84|forwardly#84>');
-    expect(card?.text).toContain('• worktree: `/home/dev/orca/workspaces/forwardly/forwardly-84-csv-export`');
+    expect(card?.text).toContain('✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*');
+    expect(card?.text).toContain('• PR: <https://github.com/acme/webapp/pull/87|webapp#87>');
+    expect(card?.text).toContain('• issue: <https://github.com/acme/webapp/issues/84|webapp#84>');
+    expect(card?.text).toContain('• worktree: `/home/op/orca/workspaces/webapp/webapp-84-csv-export`');
 
     // Root reaction 👀 → ✅ (the add, plus best-effort removal of the rest).
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'white_check_mark' }]);
@@ -213,8 +213,8 @@ describe('worker_done — the happy path', () => {
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ threadTs: THREAD, channelId: CHANNEL });
     expect(wakes[0]?.text).toContain('worker_done');
-    expect(wakes[0]?.text).toContain('forwardly#84');
-    expect(wakes[0]?.text).toContain('https://github.com/lemlist/forwardly/pull/87');
+    expect(wakes[0]?.text).toContain('webapp#84');
+    expect(wakes[0]?.text).toContain('https://github.com/acme/webapp/pull/87');
     expect(wakes[0]?.text).toContain('✅ Delivered');
     expect(surface.posts).toEqual([]);
 
@@ -242,7 +242,7 @@ describe('worker_done — the happy path', () => {
     await stopped(watcher);
 
     expect(surface.updates).toEqual([]);
-    expect(surface.posts.some((post) => post.text.startsWith('✅ *forwardly#84'))).toBe(true);
+    expect(surface.posts.some((post) => post.text.startsWith('✅ *webapp#84'))).toBe(true);
   });
 
   it('degrades the issue link to plain repo#n when the registry is unreachable', async () => {
@@ -255,7 +255,7 @@ describe('worker_done — the happy path', () => {
     watcher.arm(THREAD);
     await stopped(watcher);
 
-    expect(surface.updates[0]?.text).toContain('• issue: forwardly#84');
+    expect(surface.updates[0]?.text).toContain('• issue: webapp#84');
     expect(surface.updates[0]?.text).not.toContain('issues/84');
   });
 
@@ -303,7 +303,7 @@ describe('worker_done — the happy path', () => {
       dispatchId: 'ctx_d2',
       threadTs: THREAD,
       workerHandle: 'term_stalled',
-      worktreeName: 'scratch-9-slug',
+      worktreeName: 'sandbox-9-slug',
       lastOutput: '? proceed (y/N)',
       fingerprint: '1751970000000',
       relayTs: null,
@@ -373,7 +373,7 @@ describe('worker_done — failure', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
     const card = surface.updates[0]?.text ?? '';
-    expect(card).toContain('❌ *forwardly#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card).toContain('❌ *webapp#84 — CSV export of send metrics — failed after 27 min*');
     expect(card).toContain('• reason: Failed: e2e tests break on main');
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
     expect(wakes[0]?.text).toContain('FAILED');
@@ -405,7 +405,7 @@ describe('worker_done — worktree cleanup (issue #43)', () => {
         ok: false,
         error: {
           code: 'runtime_error',
-          message: 'Failed to delete worktree at /home/dev/orca/workspaces/forwardly/forwardly-84-csv-export. ?? notes.md',
+          message: 'Failed to delete worktree at /home/op/orca/workspaces/webapp/webapp-84-csv-export. ?? notes.md',
         },
       }),
     });
@@ -424,8 +424,8 @@ describe('worker_done — worktree cleanup (issue #43)', () => {
       {
         threadTs: THREAD,
         text:
-          '🧹 Could not clean up worktree `forwardly-84-csv-export` — kept for inspection.\n' +
-          '> Failed to delete worktree at /home/dev/orca/workspaces/forwardly/forwardly-84-csv-export. ?? notes.md',
+          '🧹 Could not clean up worktree `webapp-84-csv-export` — kept for inspection.\n' +
+          '> Failed to delete worktree at /home/op/orca/workspaces/webapp/webapp-84-csv-export. ?? notes.md',
       },
     ]);
   });
@@ -487,7 +487,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
 
     expect(surface.posts[0]?.text).toBe(
       [
-        '❓ *`forwardly-84-csv-export`* (<https://github.com/lemlist/forwardly/issues/84|forwardly#84>) asks:',
+        '❓ *`webapp-84-csv-export`* (<https://github.com/acme/webapp/issues/84|webapp#84>) asks:',
         '',
         '> Which lint config is authoritative for CI?',
         '> *1.* root',
@@ -505,7 +505,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
       threadTs: THREAD,
       taskId: 'task_3f81',
       workerHandle: 'term_w1',
-      worktreeName: 'forwardly-84-csv-export',
+      worktreeName: 'webapp-84-csv-export',
       kind: 'decision_gate',
       question: 'Which lint config is authoritative for CI?',
       options: ['root', 'app/', 'merge both'],
@@ -540,7 +540,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
 
     const post = surface.posts[0]?.text ?? '';
-    expect(post).toContain('🚨 *`forwardly-84-csv-export`*');
+    expect(post).toContain('🚨 *`webapp-84-csv-export`*');
     expect(post).toContain('escalates:');
     expect(post).toContain('> The e2e tests break on `main` — pausing.');
     expect(post).toContain('Reply in this thread.');
@@ -1074,7 +1074,7 @@ describe('turn-lifecycle root ack (issue #49)', () => {
         taskId: 'task_3f81',
         dispatchId: 'ctx_d1',
         workerHandle: 'term_w1',
-        worktreeName: 'forwardly-84-csv-export',
+        worktreeName: 'webapp-84-csv-export',
         kind: 'decision_gate',
         question: 'push the branch?',
         options: [],
@@ -1093,7 +1093,7 @@ describe('turn-lifecycle root ack (issue #49)', () => {
         dispatchId: 'ctx_d1',
         threadTs: THREAD,
         workerHandle: 'term_w1',
-        worktreeName: 'forwardly-84-csv-export',
+        worktreeName: 'webapp-84-csv-export',
         lastOutput: 'npm test (hanging)',
         fingerprint: '2026-07-08T14:20:00.000Z',
         relayTs: 'msg-ts-1',
@@ -1141,7 +1141,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
       dispatchId: 'ctx_d1',
       threadTs: THREAD,
       workerHandle: 'term_w1',
-      worktreeName: 'forwardly-84-csv-export',
+      worktreeName: 'webapp-84-csv-export',
       lastOutput: 'Exit code 1 / Orca is not running.',
       fingerprint: 'inflight:1751970240000',
       relayTs: 'alert-ts-1',

@@ -7,7 +7,7 @@ import type { CommandRunner } from './orca.ts';
 
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';
-const CHANNEL = 'C0ASJR3LAE6';
+const CHANNEL = 'C0EXAMPLE123';
 const MAILBOX = 'term_mb1';
 const NOW = Date.parse('2026-07-08T12:30:00.000Z');
 
@@ -22,7 +22,7 @@ const workerDone = (over: Partial<Record<string, unknown>> = {}): object => ({
   from_handle: 'term_w1',
   to_handle: MAILBOX,
   subject: 'bench harness shipped',
-  body: 'Opened https://github.com/nvergez/scratch/pull/22 with the harness. Tests green.',
+  body: 'Opened https://github.com/acme/sandbox/pull/22 with the harness. Tests green.',
   type: 'worker_done',
   priority: 'normal',
   payload: JSON.stringify({ taskId: 'task_3f81', dispatchId: 'ctx_d1' }),
@@ -34,7 +34,7 @@ const taskListOut = (...tasks: object[]): string => envelope({ tasks });
 
 const psWorktree = (over: Partial<Record<string, unknown>> = {}): object => ({
   worktreeId: 'wt-1',
-  path: '/home/dev/orca/workspaces/scratch/scratch-21-bench',
+  path: '/home/op/orca/workspaces/sandbox/sandbox-21-bench',
   isArchived: false,
   liveTerminalCount: 2,
   lastOutputAt: NOW - 4 * 60_000,
@@ -46,9 +46,9 @@ const psOut = (...worktrees: object[]): string => envelope({ worktrees });
 const REPO_LIST_OUT = envelope({
   repos: [
     {
-      id: 'repo-scratch',
-      displayName: 'scratch',
-      gitRemoteIdentity: { canonicalKey: 'github.com/nvergez/scratch' },
+      id: 'repo-sandbox',
+      displayName: 'sandbox',
+      gitRemoteIdentity: { canonicalKey: 'github.com/acme/sandbox' },
     },
   ],
 });
@@ -134,9 +134,9 @@ const seedDispatch = (
     taskId: 'task_3f81',
     dispatchId: 'ctx_d1',
     worktreeId: 'wt-1',
-    worktreeName: 'scratch-21-bench',
-    worktreePath: '/home/dev/orca/workspaces/scratch/scratch-21-bench',
-    repo: 'scratch',
+    worktreeName: 'sandbox-21-bench',
+    worktreePath: '/home/op/orca/workspaces/sandbox/sandbox-21-bench',
+    repo: 'sandbox',
     issueNumber: 21,
     agent: 'claude',
     workerHandle: 'term_w1',
@@ -191,13 +191,13 @@ describe('BootReconciler — completions missed during the outage', () => {
     // The card flipped to its final ✅ state with the report's PR link.
     expect(surface.updates).toHaveLength(1);
     expect(surface.updates[0]?.ts).toBe('card-ts-1');
-    expect(surface.updates[0]?.text).toContain('✅ *scratch#21 — bench harness');
-    expect(surface.updates[0]?.text).toContain('https://github.com/nvergez/scratch/pull/22');
+    expect(surface.updates[0]?.text).toContain('✅ *sandbox#21 — bench harness');
+    expect(surface.updates[0]?.text).toContain('https://github.com/acme/sandbox/pull/22');
     // Exactly one ⚠️ line, truthful about the completion.
     const notices = restartPosts(surface);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toBe(
-      '⚠️ Restarted — `scratch#21` was in flight: ✅ completed during the outage ' +
+      '⚠️ Restarted — `sandbox#21` was in flight: ✅ completed during the outage ' +
         '(details in the card ⤴). Reply to resume supervision.',
     );
     // Root reaction flips to ✅ — nothing else is in flight.
@@ -219,7 +219,7 @@ describe('BootReconciler — completions missed during the outage', () => {
     await reconciler.reconcile();
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
-    expect(surface.updates[0]?.text).toContain('❌ *scratch#21 — bench harness');
+    expect(surface.updates[0]?.text).toContain('❌ *sandbox#21 — bench harness');
     expect(surface.updates[0]?.text).toContain('Failed: bench deps will not install');
     expect(restartPosts(surface)[0]).toContain(
       '❌ failed during the outage — Failed: bench deps will not install',
@@ -289,7 +289,7 @@ describe('BootReconciler — completions missed during the outage', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     expect(
-      surface.posts.some((post) => post.text.includes('🧹 Could not clean up worktree `scratch-21-bench`')),
+      surface.posts.some((post) => post.text.includes('🧹 Could not clean up worktree `sandbox-21-bench`')),
     ).toBe(true);
     expect(restartPosts(surface)).toHaveLength(1);
   });
@@ -328,7 +328,7 @@ describe('BootReconciler — workers still out there', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(restartPosts(surface)).toEqual([
-      '⚠️ Restarted — `scratch#21` was in flight: still in progress (last sign 4 min ago). ' +
+      '⚠️ Restarted — `sandbox#21` was in flight: still in progress (last sign 4 min ago). ' +
         'Reply to resume supervision.',
     ]);
     // No card edit, no reaction change — the worker was never touched.
@@ -446,8 +446,8 @@ describe('BootReconciler — one ⚠️ per thread, idempotence', () => {
       taskId: 'task_9c22',
       dispatchId: 'ctx_d2',
       worktreeId: 'wt-2',
-      worktreeName: 'scratch-22-docs',
-      worktreePath: '/home/dev/orca/workspaces/scratch/scratch-22-docs',
+      worktreeName: 'sandbox-22-docs',
+      worktreePath: '/home/op/orca/workspaces/sandbox/sandbox-22-docs',
       issueNumber: 22,
       cardTs: 'card-ts-2',
       title: 'docs pass',
@@ -458,7 +458,7 @@ describe('BootReconciler — one ⚠️ per thread, idempotence', () => {
         { id: 'task_3f81', status: 'completed' },
         { id: 'task_9c22', status: 'dispatched' },
       ),
-      ps: psOut(psWorktree({ worktreeId: 'wt-2', path: '/home/dev/orca/workspaces/scratch/scratch-22-docs' })),
+      ps: psOut(psWorktree({ worktreeId: 'wt-2', path: '/home/op/orca/workspaces/sandbox/sandbox-22-docs' })),
       checks: { [MAILBOX]: checkOut() },
     });
 
@@ -469,8 +469,8 @@ describe('BootReconciler — one ⚠️ per thread, idempotence', () => {
     expect(notices[0]).toBe(
       [
         '⚠️ Restarted — 2 delegations were in flight:',
-        '• `scratch#21` — ✅ completed during the outage (details in the card ⤴)',
-        '• `scratch#22` — still in progress (last sign 4 min ago)',
+        '• `sandbox#21` — ✅ completed during the outage (details in the card ⤴)',
+        '• `sandbox#22` — still in progress (last sign 4 min ago)',
         'Reply to resume supervision.',
       ].join('\n'),
     );
@@ -594,7 +594,7 @@ describe('BootReconciler — degraded runtimes', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(restartPosts(first.surface)).toEqual([
-      '⚠️ Restarted — `scratch#21` was in flight: state unknown (Orca runtime unavailable). ' +
+      '⚠️ Restarted — `sandbox#21` was in flight: state unknown (Orca runtime unavailable). ' +
         'Reply to resume supervision.',
     ]);
 
@@ -642,7 +642,7 @@ describe('BootReconciler — degraded runtimes', () => {
 
     await reconciler.reconcile();
 
-    expect(surface.updates[0]?.text).toContain('• issue: scratch#21');
+    expect(surface.updates[0]?.text).toContain('• issue: sandbox#21');
     expect(restartPosts(surface)).toHaveLength(1);
   });
 });
@@ -652,11 +652,11 @@ describe('BootReconciler — worktree matching', () => {
     const store = new DelegationStore(':memory:');
     // Folder-repo shape: the recorded worktree id vanished, but a sibling
     // workspace (the folder's main entry) still lives at the same path.
-    seedDispatch(store, { worktreePath: '/home/dev/scratch' });
+    seedDispatch(store, { worktreePath: '/home/op/sandbox' });
     store.setMailbox(THREAD, CHANNEL, MAILBOX);
     const { reconciler, surface } = makeReconciler(store, {
       taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
-      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/dev/scratch' })),
+      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/op/sandbox' })),
       checks: { [MAILBOX]: checkOut() },
     });
 
@@ -666,11 +666,11 @@ describe('BootReconciler — worktree matching', () => {
 
     // An id-less row at the same path does borrow the path match.
     const store2 = new DelegationStore(':memory:');
-    seedDispatch(store2, { worktreeId: null, worktreePath: '/home/dev/scratch' });
+    seedDispatch(store2, { worktreeId: null, worktreePath: '/home/op/sandbox' });
     store2.setMailbox(THREAD, CHANNEL, MAILBOX);
     const second = makeReconciler(store2, {
       taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
-      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/dev/scratch' })),
+      ps: psOut(psWorktree({ worktreeId: 'wt-main-folder', path: '/home/op/sandbox' })),
       checks: { [MAILBOX]: checkOut() },
     });
     await second.reconciler.reconcile();

@@ -2,23 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { classifyEvent } from './filter.ts';
 
 const guard = {
-  channelId: 'C0ASJR3LAE6',
-  allowedUserId: 'U09CC6M3W1W',
-  botUserId: 'U0BGRT64CPJ',
+  channelId: 'C0EXAMPLE123',
+  allowedUserId: 'U0EXAMPLE456',
+  botUserId: 'U0EXAMPLEBOT',
 };
 
 const mention = {
   type: 'app_mention' as const,
-  channel: 'C0ASJR3LAE6',
-  user: 'U09CC6M3W1W',
+  channel: 'C0EXAMPLE123',
+  user: 'U0EXAMPLE456',
   ts: '1751970000.000100',
-  text: '<@U0BGRT64CPJ> deploy the fix',
+  text: '<@U0EXAMPLEBOT> deploy the fix',
 };
 
 const threadReply = {
   type: 'message' as const,
-  channel: 'C0ASJR3LAE6',
-  user: 'U09CC6M3W1W',
+  channel: 'C0EXAMPLE123',
+  user: 'U0EXAMPLE456',
   ts: '1751970002.000300',
   thread_ts: '1751970000.000100',
   text: 'yes, go ahead',
@@ -76,7 +76,7 @@ describe('classifyEvent', () => {
   it('skips the message.channels copy of a mention — the app_mention event already carries it', () => {
     const messageCopy = {
       ...threadReply,
-      text: '<@U0BGRT64CPJ> deploy the fix',
+      text: '<@U0EXAMPLEBOT> deploy the fix',
     };
 
     expect(classifyEvent(messageCopy, guard)).toEqual({
@@ -108,7 +108,7 @@ describe('classifyEvent', () => {
     ],
     [
       "the bot's own message",
-      { ...threadReply, user: 'U0BGRT64CPJ' },
+      { ...threadReply, user: 'U0EXAMPLEBOT' },
       'self',
     ],
     [
@@ -128,7 +128,7 @@ describe('classifyEvent', () => {
     ],
     [
       'an in-thread mention that carries no content once the tag is stripped',
-      { ...mention, thread_ts: '1751960000.000001', text: '<@U0BGRT64CPJ>  ' },
+      { ...mention, thread_ts: '1751960000.000001', text: '<@U0EXAMPLEBOT>  ' },
       'empty_text',
     ],
     [
@@ -149,7 +149,7 @@ describe('classifyEvent', () => {
     const closeCommand = {
       ...mention,
       thread_ts: '1751960000.000001',
-      text: '<@U0BGRT64CPJ> close',
+      text: '<@U0EXAMPLEBOT> close',
     };
 
     expect(classifyEvent(closeCommand, guard)).toEqual({
@@ -164,7 +164,7 @@ describe('classifyEvent', () => {
       const closeCommand = {
         ...mention,
         thread_ts: '1751960000.000001',
-        text: `<@U0BGRT64CPJ> ${variant}`,
+        text: `<@U0EXAMPLEBOT> ${variant}`,
       };
 
       expect(classifyEvent(closeCommand, guard).action).toBe('close');
@@ -211,14 +211,14 @@ describe('classifyEvent', () => {
     const sentence = {
       ...mention,
       thread_ts: '1751960000.000001',
-      text: '<@U0BGRT64CPJ> close it once the PR merges',
+      text: '<@U0EXAMPLEBOT> close it once the PR merges',
     };
 
     expect(classifyEvent(sentence, guard).action).toBe('reply');
   });
 
   it('a root "@orchestrator close" mention opens a session — close is a thread command', () => {
-    expect(classifyEvent({ ...mention, text: '<@U0BGRT64CPJ> close' }, guard).action).toBe(
+    expect(classifyEvent({ ...mention, text: '<@U0EXAMPLEBOT> close' }, guard).action).toBe(
       'open',
     );
   });
@@ -228,7 +228,7 @@ describe('classifyEvent', () => {
       ...mention,
       user: 'U0THIRDPARTY',
       thread_ts: '1751960000.000001',
-      text: '<@U0BGRT64CPJ> close',
+      text: '<@U0EXAMPLEBOT> close',
     };
 
     expect(classifyEvent(thirdParty, guard)).toEqual({
@@ -238,7 +238,7 @@ describe('classifyEvent', () => {
   });
 
   it('a bare root mention still opens the session — the mention IS the open (spec §3)', () => {
-    const bare = { ...mention, text: '<@U0BGRT64CPJ>' };
+    const bare = { ...mention, text: '<@U0EXAMPLEBOT>' };
 
     const decision = classifyEvent(bare, guard);
 
@@ -270,20 +270,20 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
     },
     {
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: '*Envoyé avec* <@U0A2GC44JKY>' }],
+      elements: [{ type: 'mrkdwn', text: '*Envoyé avec* <@U0EXAMPLE789>' }],
     },
   ];
 
   it('close command still matches when a context footer pollutes event.text', () => {
     const event = {
       type: 'app_mention' as const,
-      channel: 'C0ASJR3LAE6',
-      user: 'U09CC6M3W1W',
+      channel: 'C0EXAMPLE123',
+      user: 'U0EXAMPLE456',
       ts: '1751970003.000400',
       thread_ts: '1751970000.000100',
-      text: '<@U0BGRT64CPJ> close *Envoyé avec* <@U0A2GC44JKY>',
+      text: '<@U0EXAMPLEBOT> close *Envoyé avec* <@U0EXAMPLE789>',
       blocks: footerBlocks([
-        { user: 'U0BGRT64CPJ', text: '' },
+        { user: 'U0EXAMPLEBOT', text: '' },
         { text: ' close' },
       ]),
     };
@@ -297,7 +297,7 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
   it('strips the footer from reply text handed to the session', () => {
     const event = {
       ...threadReply,
-      text: 'yes, go ahead *Envoyé avec* <@U0A2GC44JKY>',
+      text: 'yes, go ahead *Envoyé avec* <@U0EXAMPLE789>',
       blocks: footerBlocks([{ text: 'yes, go ahead' }]),
     };
 
@@ -313,7 +313,7 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
       ...threadReply,
       text: 'ignored',
       blocks: footerBlocks([
-        { user: 'U0BGRT64CPJ', text: '' },
+        { user: 'U0EXAMPLEBOT', text: '' },
         { text: ' hello' },
       ]),
     };

@@ -6,8 +6,8 @@ import { ConfigError, loadConfig } from './config.ts';
 const validEnv = {
   SLACK_BOT_TOKEN: 'xoxb-1111-2222-abc',
   SLACK_APP_TOKEN: 'xapp-1-A111-222-abc',
-  SLACK_CHANNEL_ID: 'C0ASJR3LAE6',
-  SLACK_ALLOWED_USER_ID: 'U09CC6M3W1W',
+  SLACK_CHANNEL_ID: 'C0EXAMPLE123',
+  SLACK_ALLOWED_USER_ID: 'U0EXAMPLE456',
   CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-abc123',
 };
 
@@ -18,8 +18,8 @@ describe('loadConfig', () => {
     expect(config).toEqual({
       slackBotToken: 'xoxb-1111-2222-abc',
       slackAppToken: 'xapp-1-A111-222-abc',
-      slackChannelId: 'C0ASJR3LAE6',
-      slackAllowedUserId: 'U09CC6M3W1W',
+      slackChannelId: 'C0EXAMPLE123',
+      slackAllowedUserId: 'U0EXAMPLE456',
       claudeCodeOauthToken: 'sk-ant-oat01-abc123',
       logLevel: 'info',
       dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
@@ -46,8 +46,8 @@ describe('loadConfig', () => {
   it.each([
     ['SLACK_BOT_TOKEN', 'xapp-not-a-bot-token', 'xoxb-'],
     ['SLACK_APP_TOKEN', 'xoxb-not-an-app-token', 'xapp-'],
-    ['SLACK_CHANNEL_ID', 'U09CC6M3W1W', 'C'],
-    ['SLACK_ALLOWED_USER_ID', 'C0ASJR3LAE6', 'U'],
+    ['SLACK_CHANNEL_ID', 'U0EXAMPLE456', 'C'],
+    ['SLACK_ALLOWED_USER_ID', 'C0EXAMPLE123', 'U'],
     ['CLAUDE_CODE_OAUTH_TOKEN', 'xoxb-not-an-oauth-token', 'sk-ant-'],
   ])('rejects a malformed %s (must start with %s)', (key, badValue) => {
     const env = { ...validEnv, [key]: badValue };
@@ -72,6 +72,22 @@ describe('loadConfig', () => {
   it('honors the ORCHESTRATOR_DB_PATH override (spec §9)', () => {
     const config = loadConfig({
       ...validEnv,
+      ORCHESTRATOR_DB_PATH: '/var/tmp/test-orchestrator.db',
+    });
+
+    expect(config.dbPath).toBe('/var/tmp/test-orchestrator.db');
+  });
+
+  it('defaults the DB under $XDG_STATE_HOME when set (issue #70)', () => {
+    const config = loadConfig({ ...validEnv, XDG_STATE_HOME: '/srv/state' });
+
+    expect(config.dbPath).toBe('/srv/state/orchestrator/orchestrator.db');
+  });
+
+  it('lets ORCHESTRATOR_DB_PATH beat $XDG_STATE_HOME — the override is absolute', () => {
+    const config = loadConfig({
+      ...validEnv,
+      XDG_STATE_HOME: '/srv/state',
       ORCHESTRATOR_DB_PATH: '/var/tmp/test-orchestrator.db',
     });
 

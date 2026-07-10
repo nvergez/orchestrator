@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from './db.ts';
 
 const THREAD = '1751970000.000100';
-const CHANNEL = 'C0ASJR3LAE6';
-const USER = 'U09CC6M3W1W';
+const CHANNEL = 'C0EXAMPLE123';
+const USER = 'U0EXAMPLE456';
 
 describe('SessionStore', () => {
   const tempDirs: string[] = [];
