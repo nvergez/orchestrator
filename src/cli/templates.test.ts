@@ -40,6 +40,11 @@ describe('ENV_TEMPLATE', () => {
     expect(ENV_TEMPLATE).toMatch(/^#LOG_LEVEL=info$/m);
   });
 
+  it('documents the dashboard address, commented at its localhost defaults (issue #87)', () => {
+    expect(ENV_TEMPLATE).toMatch(/^#DASHBOARD_PORT=8787$/m);
+    expect(ENV_TEMPLATE).toMatch(/^#DASHBOARD_BIND=127\.0\.0\.1$/m);
+  });
+
   it('contains no live token material', () => {
     expect(ENV_TEMPLATE).not.toMatch(/=(xoxb|xapp|sk-ant)-/);
   });

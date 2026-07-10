@@ -3,6 +3,7 @@ import { parseEnvFile, runDoctor, runDoctorChecks, type DoctorDeps } from './doc
 import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
+const DASHBOARD_UNIT_PATH = '/home/op/.config/systemd/user/orchestrator-dashboard.service';
 
 const validEnv = {
   SLACK_BOT_TOKEN: 'xoxb-1111-2222-abc',
@@ -51,11 +52,17 @@ const envFileContent = (vars: Record<string, string>): string =>
     .map(([key, value]) => `${key}=${value}`)
     .join('\n');
 
+/** Answers is-enabled/is-active/loginctl the way a healthy box does. */
+const greenRunSystem: DoctorDeps['runSystem'] = (command, args) => {
+  if (command === 'loginctl') return Promise.resolve({ stdout: 'Linger=yes\n' });
+  if (args.includes('is-active')) return Promise.resolve({ stdout: 'active\n' });
+  return Promise.resolve({ stdout: 'enabled\n' });
+};
+
 const greenDeps = (): DoctorDeps => ({
   env: { ...validEnv, XDG_CONFIG_HOME: '/home/op/.config' },
   runOrca: () => Promise.resolve({ stdout: registryStdout }),
-  runSystem: (command) =>
-    Promise.resolve({ stdout: command === 'loginctl' ? 'Linger=yes\n' : 'enabled\n' }),
+  runSystem: greenRunSystem,
   nodeVersion: '22.18.0',
   enginesNode: '>=22.18',
   fileExists: () => true,
@@ -65,6 +72,8 @@ const greenDeps = (): DoctorDeps => ({
   username: 'op',
   uid: 1000,
   unitPath: UNIT_PATH,
+  dashboardUnitPath: DASHBOARD_UNIT_PATH,
+  httpGet: () => Promise.resolve({ status: 200 }),
 });
 
 const failures = (checks: { label: string; ok: boolean }[]): string[] =>
@@ -82,6 +91,8 @@ describe('runDoctorChecks', () => {
       'orca',
       'service',
       'unit paths',
+      'dashboard',
+      'dashboard http',
       'linger',
     ]);
   });
@@ -116,7 +127,9 @@ describe('runDoctorChecks', () => {
     });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
-    expect(readPaths).toEqual([ENV_FILE_PATH]);
+    // Consulted by the env fallback and again by the dashboard port probe —
+    // never anything but the canonical file.
+    expect(readPaths).toEqual([ENV_FILE_PATH, ENV_FILE_PATH]);
     expect(checks.find((check) => check.label === 'env')?.detail).toBe(
       `required variables present with the right prefixes (from ${ENV_FILE_PATH})`,
     );
@@ -225,23 +238,28 @@ describe('runDoctorChecks', () => {
     expect(checks.find((check) => check.label === 'orca')?.detail).toContain('PATH');
   });
 
-  it('skips unit + linger entirely while the unit is not installed (#74 addendum)', async () => {
+  it('skips unit, dashboard + linger entirely while nothing is installed (#74 addendum)', async () => {
     const deps = greenDeps();
     deps.fileExists = () => false;
     deps.runSystem = () => Promise.reject(new Error('must not be called'));
+    deps.httpGet = () => Promise.reject(new Error('must not be probed'));
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
     const service = checks.find((check) => check.label === 'service');
     expect(service?.detail).toContain('orc service install');
+    expect(checks.find((check) => check.label === 'dashboard')?.detail).toContain(
+      'orc service install',
+    );
+    expect(checks.some((check) => check.label === 'dashboard http')).toBe(false);
     expect(checks.some((check) => check.label === 'linger')).toBe(false);
   });
 
   it('fails service when the unit is installed but not enabled', async () => {
     const deps = greenDeps();
-    deps.runSystem = (command) =>
-      command === 'systemctl'
+    deps.runSystem = (command, args) =>
+      command === 'systemctl' && args.includes('is-enabled')
         ? Promise.reject(Object.assign(new Error('exit 1'), { stdout: 'disabled\n', stderr: '' }))
-        : Promise.resolve({ stdout: 'Linger=yes\n' });
+        : greenRunSystem(command, args);
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['service']);
     expect(checks.find((check) => check.label === 'service')?.detail).toContain(
@@ -260,12 +278,63 @@ describe('runDoctorChecks', () => {
           )
         : Promise.resolve({ stdout: 'Linger=yes\n' });
     const checks = await runDoctorChecks(deps);
-    expect(failures(checks)).toEqual(['service']);
+    expect(failures(checks)).toEqual(['service', 'dashboard']);
     const detail = checks.find((check) => check.label === 'service')?.detail;
     expect(detail).toContain('cannot reach the user service manager');
     expect(detail).toContain('export XDG_RUNTIME_DIR=/run/user/1000');
     expect(detail).toContain(`unit file present (${UNIT_PATH})`);
     expect(detail).not.toContain('enabled');
+    // The dashboard unit-state check degrades the same honest way.
+    expect(checks.find((check) => check.label === 'dashboard')?.detail).toContain(
+      'cannot reach the user service manager',
+    );
+  });
+
+  it('fails dashboard when its unit is installed but not active (issue #87)', async () => {
+    const deps = greenDeps();
+    deps.runSystem = (command, args) =>
+      command === 'systemctl' && args.includes('is-active')
+        ? Promise.reject(Object.assign(new Error('exit 3'), { stdout: 'failed\n', stderr: '' }))
+        : greenRunSystem(command, args);
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['dashboard']);
+    const detail = checks.find((check) => check.label === 'dashboard')?.detail;
+    expect(detail).toContain('"failed"');
+    expect(detail).toContain('journalctl --user -u orchestrator-dashboard');
+  });
+
+  it('fails dashboard http when nothing answers on the port', async () => {
+    const deps = greenDeps();
+    deps.httpGet = () => Promise.reject(new Error('ECONNREFUSED'));
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['dashboard http']);
+    const detail = checks.find((check) => check.label === 'dashboard http')?.detail;
+    expect(detail).toContain('http://127.0.0.1:8787/api/state');
+    expect(detail).toContain('journalctl --user -u orchestrator-dashboard');
+  });
+
+  it('probes the address the canonical env file configures, like EnvironmentFile would', async () => {
+    const deps = greenDeps();
+    deps.readFile = readFiles(() => envFileContent({ DASHBOARD_PORT: '9000' }));
+    const probed: string[] = [];
+    deps.httpGet = (url) => {
+      probed.push(url);
+      return Promise.resolve({ status: 200 });
+    };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([]);
+    expect(probed).toEqual(['http://127.0.0.1:9000/api/state']);
+  });
+
+  it('fails dashboard http on a malformed DASHBOARD_PORT instead of probing a guess', async () => {
+    const deps = greenDeps();
+    deps.env.DASHBOARD_PORT = 'http';
+    deps.httpGet = () => Promise.reject(new Error('must not be probed'));
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['dashboard http']);
+    expect(checks.find((check) => check.label === 'dashboard http')?.detail).toContain(
+      'DASHBOARD_PORT',
+    );
   });
 
   it('fails unit paths when a pinned ExecStart path is dangling (node/nvm upgrade)', async () => {
@@ -289,8 +358,10 @@ describe('runDoctorChecks', () => {
 
   it('fails linger when the unit is installed and linger is off, with the one-liner', async () => {
     const deps = greenDeps();
-    deps.runSystem = (command) =>
-      Promise.resolve({ stdout: command === 'loginctl' ? 'Linger=no\n' : 'enabled\n' });
+    deps.runSystem = (command, args) =>
+      command === 'loginctl'
+        ? Promise.resolve({ stdout: 'Linger=no\n' })
+        : greenRunSystem(command, args);
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['linger']);
     expect(checks.find((check) => check.label === 'linger')?.detail).toContain(
@@ -323,7 +394,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(8);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(10);
     expect(out.at(-1)).toBe('all checks passed');
   });
 

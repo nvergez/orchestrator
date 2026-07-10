@@ -62,6 +62,34 @@ const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
 
 export const DAY_MS = 24 * 60 * 60_000;
 
+const DEFAULT_DASHBOARD_PORT = 8787;
+
+const DEFAULT_DASHBOARD_BIND = '127.0.0.1';
+
+/** Where the dashboard sidecar listens — bind address + port (issue #87). */
+export interface DashboardAddress {
+  bind: string;
+  port: number;
+}
+
+/**
+ * Where the dashboard sidecar listens (issue #87). Localhost is the default
+ * security boundary — the project never terminates remote traffic, so
+ * exposing the page beyond the machine means the operator changing
+ * DASHBOARD_BIND (or tunneling) on their own authority (ADR 0002). Lives
+ * here, not in loadConfig: the sidecar must boot without the daemon's Slack
+ * tokens, and doctor reads it without either.
+ */
+export function resolveDashboardAddress(
+  env: Record<string, string | undefined>,
+): DashboardAddress {
+  const port = Number(env.DASHBOARD_PORT ?? DEFAULT_DASHBOARD_PORT);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new ConfigError('invalid configuration: DASHBOARD_PORT must be a port number (1-65535)');
+  }
+  return { bind: env.DASHBOARD_BIND ?? DEFAULT_DASHBOARD_BIND, port };
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const problems: string[] = [];
 

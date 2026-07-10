@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from './db.ts';
 
@@ -44,6 +45,7 @@ describe('SessionStore', () => {
       lastActivityAt: '2026-07-08T10:00:00.000Z',
       turnCount: 0,
       costUsdTotal: 0,
+      closedAt: null,
     });
   });
 
@@ -154,6 +156,53 @@ describe('SessionStore', () => {
     expect(row?.costUsdTotal).toBeCloseTo(1.5);
   });
 
+  it('closeSession stamps when it happened — a sweep-closed dormant session closes NOW, not 7 days ago (issue #87)', () => {
+    const timestamps = ['2026-07-01T10:00:00.000Z', '2026-07-08T10:00:00.000Z'];
+    const store = memoryStore(() => timestamps.shift() ?? '2026-07-08T23:59:59.000Z');
+    store.register(THREAD, CHANNEL, USER);
+
+    store.closeSession(THREAD, CHANNEL);
+
+    const row = store.get(THREAD, CHANNEL);
+    expect(row?.closedAt).toBe('2026-07-08T10:00:00.000Z');
+    // The dormancy clock is untouched — closing is not activity.
+    expect(row?.lastActivityAt).toBe('2026-07-01T10:00:00.000Z');
+  });
+
+  it('migrates a pre-#87 sessions table in place — rows survive, closing stamps', () => {
+    const dbPath = tempDbPath('orchestrator.db');
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE sessions (
+        thread_ts        TEXT NOT NULL,
+        channel_id       TEXT NOT NULL,
+        session_id       TEXT,
+        root_user        TEXT NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'open'
+                         CHECK (status IN ('open', 'closed')),
+        created_at       TEXT NOT NULL,
+        last_activity_at TEXT NOT NULL,
+        turn_count       INTEGER NOT NULL DEFAULT 0,
+        cost_usd_total   REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (thread_ts, channel_id)
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO sessions (thread_ts, channel_id, root_user, created_at, last_activity_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(THREAD, CHANNEL, USER, '2026-07-01T10:00:00.000Z', '2026-07-01T10:00:00.000Z');
+    legacy.close();
+
+    const store = new SessionStore(dbPath, () => '2026-07-08T10:00:00.000Z');
+    stores.push(store);
+
+    expect(store.get(THREAD, CHANNEL)?.closedAt).toBeNull();
+    store.closeSession(THREAD, CHANNEL);
+    expect(store.get(THREAD, CHANNEL)?.closedAt).toBe('2026-07-08T10:00:00.000Z');
+  });
+
   it('a closed row survives a close-and-reopen — closed is final across restarts', () => {
     const dbPath = tempDbPath('orchestrator.db');
     const first = new SessionStore(dbPath);
@@ -190,5 +239,18 @@ describe('SessionStore', () => {
     store.register('1751970001.000200', CHANNEL, USER);
 
     expect(store.count()).toBe(2);
+  });
+
+  it('puts the database file in WAL mode — the dashboard reader depends on it (ADR 0002)', () => {
+    const dbPath = tempDbPath('orchestrator.db');
+    const store = new SessionStore(dbPath);
+    stores.push(store);
+    store.register(THREAD, CHANNEL, USER);
+
+    const reader = new DatabaseSync(dbPath, { readOnly: true });
+    const mode = reader.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+    reader.close();
+
+    expect(mode.journal_mode).toBe('wal');
   });
 });

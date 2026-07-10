@@ -180,6 +180,9 @@ export class DelegationStore {
     }
     this.db = new DatabaseSync(dbPath);
     this.now = now;
+    // WAL is load-bearing for the dashboard sidecar (ADR 0002): its
+    // concurrent read-only connection must never trip the daemon's writes.
+    this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS delegations (
         dispatch_id   TEXT PRIMARY KEY,

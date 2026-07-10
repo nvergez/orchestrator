@@ -47,4 +47,10 @@ CLAUDE_CODE_OAUTH_TOKEN=
 
 # Optional: pino log level (default: info)
 #LOG_LEVEL=info
+
+# Optional: where the dashboard sidecar listens (defaults shown). Localhost
+# is the security boundary — expose it beyond the machine your own way
+# (Tailscale, SSH tunnel); the project ships no auth.
+#DASHBOARD_PORT=8787
+#DASHBOARD_BIND=127.0.0.1
 `;

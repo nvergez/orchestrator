@@ -29,6 +29,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # The frontend's only test gate in v1 (issue #87): typecheck here,
+      # the Vite build via prepack in pack-smoke — its /api/state contract
+      # is pinned by the sidecar's HTTP-seam suite.
+      - run: npm run typecheck:web
 
   lint:
     runs-on: ubuntu-latest

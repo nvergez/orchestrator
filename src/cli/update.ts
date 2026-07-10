@@ -191,16 +191,18 @@ export async function runUpdate(deps: UpdateDeps, opts: { yes: boolean }): Promi
   }
 
   try {
-    await deps.run('systemctl', ['--user', 'restart', 'orchestrator']);
+    // Both units in one restart (issue #87): the update ritual is indivisible,
+    // so daemon and dashboard versions never skew.
+    await deps.run('systemctl', ['--user', 'restart', 'orchestrator', 'orchestrator-dashboard']);
   } catch (error) {
     deps.err(
       '✖ restart failed — the OLD code is still running; run ' +
-        `\`systemctl --user restart orchestrator\` yourself: ${String(error)}`,
+        `\`systemctl --user restart orchestrator orchestrator-dashboard\` yourself: ${String(error)}`,
     );
     return 1;
   }
 
-  deps.out(`✔ updated ${deps.installedVersion} → ${latest} — unit regenerated, service restarted`);
+  deps.out(`✔ updated ${deps.installedVersion} → ${latest} — units regenerated, services restarted`);
   deps.out('  run `orc doctor` to verify');
   return 0;
 }

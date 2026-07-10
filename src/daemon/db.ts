@@ -15,6 +15,10 @@ export interface SessionRow {
   turnCount: number;
   /** Populated by the cost-ledger slice; carried in the schema from day one. */
   costUsdTotal: number;
+  /** When the terminal transition happened; null while open. The dashboard's
+   * recently-closed window keys on this — a sweep-closed dormant session
+   * closes NOW, its last activity was ~7 days ago (issue #87). */
+  closedAt: string | null;
 }
 
 /**
@@ -33,6 +37,9 @@ export class SessionStore {
     }
     this.db = new DatabaseSync(dbPath);
     this.now = now;
+    // WAL is load-bearing for the dashboard sidecar (ADR 0002): its
+    // concurrent read-only connection must never trip the daemon's writes.
+    this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         thread_ts        TEXT NOT NULL,
@@ -45,9 +52,24 @@ export class SessionStore {
         last_activity_at TEXT NOT NULL,
         turn_count       INTEGER NOT NULL DEFAULT 0,
         cost_usd_total   REAL NOT NULL DEFAULT 0,
+        closed_at        TEXT,
         PRIMARY KEY (thread_ts, channel_id)
       ) STRICT;
     `);
+    this.migrateSessions();
+  }
+
+  /**
+   * Adds the issue #87 `closed_at` column to a pre-#87 sessions table. A
+   * plain nullable add — ALTER TABLE suffices; sessions closed before the
+   * migration read null and simply never enter the recently-closed window.
+   */
+  private migrateSessions(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`)
+      .get() as { sql?: unknown } | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes('closed_at')) return;
+    this.db.exec(`ALTER TABLE sessions ADD COLUMN closed_at TEXT`);
   }
 
   /** Opens the thread's row; a re-register of a known thread is a no-op. */
@@ -110,8 +132,11 @@ export class SessionStore {
    */
   closeSession(threadTs: string, channelId: string): void {
     this.db
-      .prepare(`UPDATE sessions SET status = 'closed' WHERE thread_ts = ? AND channel_id = ?`)
-      .run(threadTs, channelId);
+      .prepare(
+        `UPDATE sessions SET status = 'closed', closed_at = ?
+          WHERE thread_ts = ? AND channel_id = ?`,
+      )
+      .run(this.now(), threadTs, channelId);
   }
 
   /**
@@ -153,5 +178,6 @@ function toSessionRow(row: Record<string, unknown>): SessionRow {
     lastActivityAt: row.last_activity_at as string,
     turnCount: Number(row.turn_count),
     costUsdTotal: Number(row.cost_usd_total),
+    closedAt: (row.closed_at ?? null) as string | null,
   };
 }

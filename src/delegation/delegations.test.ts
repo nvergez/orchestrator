@@ -146,6 +146,24 @@ describe('DelegationStore — delegations ledger', () => {
     }
   });
 
+  it('puts the database file in WAL mode — the dashboard reader depends on it (ADR 0002)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-delegations-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      const store = new DelegationStore(dbPath);
+      store.recordDispatch(dispatchRow());
+
+      const reader = new DatabaseSync(dbPath, { readOnly: true });
+      const mode = reader.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+      reader.close();
+      store.close();
+
+      expect(mode.journal_mode).toBe('wal');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('close flips the status and stamps closed_at — the #20 seam', () => {
     const store = openStore();
     store.recordDispatch(dispatchRow());

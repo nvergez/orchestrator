@@ -13,6 +13,9 @@
   "engines": {
     "node": ">=22.18"
   },
+  "workspaces": [
+    "web"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nvergez/orchestrator.git"
@@ -34,9 +37,12 @@
   "scripts": {
     "start": "node src/index.ts",
     "dev": "node --env-file=.env src/index.ts",
+    "dev:web": "npm run dev --workspace web",
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
+    "build:web": "npm run build --workspace web",
+    "prepack": "npm run build && npm run build:web",
     "typecheck": "tsc --noEmit",
+    "typecheck:web": "npm run typecheck --workspace web",
     "lint": "eslint .",
     "test": "vitest run"
   },
