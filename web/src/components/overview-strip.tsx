@@ -12,18 +12,14 @@ export function OverviewStrip({ stats }: { stats: OverviewStats }) {
   return (
     <section aria-label="Overview" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <StatTile label="Open sessions" value={stats.openSessions} />
-      <StatTile label="Delegations in flight" value={stats.delegationsInFlight} />
+      <StatTile label="In flight" value={stats.delegationsInFlight} />
       <StatTile
         label="Needs attention"
         value={stats.needsAttention}
         tone={stats.needsAttention > 0 ? 'warning' : 'default'}
         sub={stats.needsAttention > 0 ? '⚠ waiting on you' : 'all quiet'}
       />
-      <StatTile
-        label="Closed · last 48 h"
-        value={stats.closedDelegations + stats.closedSessions}
-        sub={closedSub}
-      />
+      <StatTile label="Closed · last 48 h" value={stats.closedTotal} sub={closedSub} />
     </section>
   );
 }
@@ -46,7 +42,9 @@ function StatTile({
         tone === 'warning' ? 'border-status-warning/45' : 'border-border/80',
       )}
     >
-      <div className="text-2xs font-medium tracking-[0.08em] uppercase text-muted-foreground">
+      {/* Two label lines' worth of room: a wrapping label must not push its
+          value off the baseline its neighbours sit on. */}
+      <div className="min-h-8 text-2xs font-medium tracking-[0.08em] uppercase text-muted-foreground">
         {label}
       </div>
       <div

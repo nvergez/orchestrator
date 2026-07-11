@@ -13,11 +13,13 @@ export function IssueRef({ delegation }: { delegation: DelegationView }) {
     return <span className="font-medium">{label}</span>;
   }
   return (
+    /* Underlined at rest: color alone doesn't carry "this is a link" for anyone
+       who can't see the accent hue. Hover deepens it rather than adding it. */
     <a
       href={delegation.issueUrl}
       target="_blank"
       rel="noreferrer"
-      className="rounded-xs font-medium text-accent underline-offset-2 hover:underline"
+      className="rounded-xs font-medium text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
     >
       {label}
     </a>

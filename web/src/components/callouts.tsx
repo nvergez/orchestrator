@@ -31,11 +31,14 @@ export function GateCallout({ gate, asOf }: { gate: GateView; asOf: string }) {
         {gate.question}
       </blockquote>
       {gate.options.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap gap-1.5">
-          {gate.options.map((option) => (
-            <Badge key={option}>{option}</Badge>
-          ))}
-        </div>
+        /* Options are data, not controls: this page can't answer a gate, so they
+           must not wear a chip's clickable affordance. */
+        <p className="mt-2.5 flex flex-wrap items-baseline gap-x-2 text-2xs">
+          <span className="font-medium tracking-[0.08em] uppercase text-muted-foreground">
+            options
+          </span>
+          <span className="font-mono">{gate.options.join(' · ')}</span>
+        </p>
       )}
     </div>
   );

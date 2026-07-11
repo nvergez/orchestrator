@@ -63,7 +63,7 @@ describe('deriveOverviewStats', () => {
       openSessions: 0,
       delegationsInFlight: 0,
       needsAttention: 0,
-      closedDelegations: 0,
+      closedTotal: 0,
       closedSessions: 0,
       closedCostUsd: 0,
     });
@@ -132,8 +132,39 @@ describe('deriveOverviewStats', () => {
         },
       }),
     );
-    expect(stats.closedDelegations).toBe(2);
+    expect(stats.closedTotal).toBe(4);
     expect(stats.closedSessions).toBe(2);
     expect(stats.closedCostUsd).toBeCloseTo(2.65);
+  });
+
+  /**
+   * The closed tile and the Recently closed section header both render
+   * `closedTotal`. Every closed row the section lists — delegation or session —
+   * must be inside it, or the strip contradicts the list right under it.
+   */
+  it('closedTotal counts every row the Recently closed section renders', () => {
+    const closedSession = {
+      threadTs: '1751970001.000200',
+      channelId: 'C0EXAMPLE123',
+      createdAt: '2026-07-06T10:00:00.000Z',
+      lastActivityAt: '2026-07-10T10:00:00.000Z',
+      closedAt: '2026-07-10T11:00:00.000Z',
+      turnCount: 4,
+      costUsdTotal: 2.25,
+    };
+    const recentlyClosed = {
+      delegations: [
+        delegation({ status: 'completed' as const, closedAt: '2026-07-11T10:00:00.000Z' }),
+        delegation({ dispatchId: 'ctx_fail', status: 'failed' as const, closedAt: '2026-07-11T09:30:00.000Z' }),
+        delegation({ dispatchId: 'ctx_c', status: 'completed' as const, closedAt: '2026-07-11T09:00:00.000Z' }),
+      ],
+      sessions: [closedSession, { ...closedSession, threadTs: '1751970002.000300' }],
+    };
+    const stats = deriveOverviewStats(snapshot({ recentlyClosed }));
+    const rowsTheSectionRenders =
+      recentlyClosed.delegations.length + recentlyClosed.sessions.length;
+
+    expect(stats.closedTotal).toBe(rowsTheSectionRenders);
+    expect(stats.closedTotal).toBe(5);
   });
 });

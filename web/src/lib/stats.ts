@@ -8,12 +8,14 @@ export interface OverviewStats {
   openSessions: number;
   delegationsInFlight: number;
   needsAttention: number;
-  closedDelegations: number;
+  /** Everything the Recently closed section lists: its tile reads this, never its own sum. */
+  closedTotal: number;
   closedSessions: number;
   closedCostUsd: number;
 }
 
 export function deriveOverviewStats(snapshot: StateSnapshot): OverviewStats {
+  const { delegations, sessions } = snapshot.recentlyClosed;
   return {
     openSessions: snapshot.sessions.length,
     delegationsInFlight: snapshot.sessions.reduce(
@@ -22,11 +24,8 @@ export function deriveOverviewStats(snapshot: StateSnapshot): OverviewStats {
       0,
     ),
     needsAttention: snapshot.pendingGates.length + snapshot.pendingStalls.length,
-    closedDelegations: snapshot.recentlyClosed.delegations.length,
-    closedSessions: snapshot.recentlyClosed.sessions.length,
-    closedCostUsd: snapshot.recentlyClosed.sessions.reduce(
-      (sum, session) => sum + session.costUsdTotal,
-      0,
-    ),
+    closedTotal: delegations.length + sessions.length,
+    closedSessions: sessions.length,
+    closedCostUsd: sessions.reduce((sum, session) => sum + session.costUsdTotal, 0),
   };
 }

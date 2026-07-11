@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
+    <!--
+      The latin faces the page always paints in, fetched in parallel with the CSS
+      instead of after it: `swap` without this flashes the fallback face first.
+      Vite hashes both into dist/web/assets — same emitted files the @font-face
+      rules point at, no external origin.
+    -->
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      crossorigin
+      href="../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"
+    />
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      crossorigin
+      href="../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2"
+    />
     <!-- Inline radar-sweep glyph: no extra request, works offline like everything else here. -->
     <link
       rel="icon"

@@ -36,33 +36,50 @@ export default function App() {
   const stats = deriveOverviewStats(data);
   return (
     <div className="min-h-dvh">
+      {/*
+       * The header is the one thing scrolling can't take away, so it — not just
+       * the banner below it — has to say when the data is dead: glyph, the word
+       * "stale", and a color, never color alone. The banner rides along inside
+       * the sticky region for the same reason.
+       */}
       <header className="sticky top-0 z-10 border-b border-border/70 bg-background/85 backdrop-blur">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-4 gap-y-1 px-6 py-2.5">
           <h1 className="text-sm font-semibold tracking-tight">
-            orc
-            <span className="ml-2 font-normal text-muted-foreground">orchestrator</span>
+            orc{' '}
+            <span className="ml-1 font-normal text-muted-foreground">orchestrator</span>
           </h1>
           <DaemonStatus unitState={data.daemon.unitState} />
-          <span
-            className="ml-auto flex items-center gap-2 font-mono text-2xs text-muted-foreground tabular-nums"
-            title="polls /api/state every 3 s"
-          >
+          <span className="ml-auto flex items-center gap-2">
+            <span className="hidden text-2xs text-muted-foreground sm:inline">
+              refreshes every 3 s
+            </span>
             <span
-              key={dataUpdatedAt}
-              aria-hidden="true"
               className={cn(
-                'size-2 rounded-full',
-                isError ? 'bg-status-critical' : 'animate-tick bg-accent',
+                'flex items-center gap-2 font-mono text-2xs tabular-nums',
+                isError ? 'font-medium text-status-critical' : 'text-muted-foreground',
               )}
-            />
-            as of {clockTime(data.asOf)}
+            >
+              <span
+                key={dataUpdatedAt}
+                aria-hidden="true"
+                className={cn(
+                  'size-2 rounded-full',
+                  isError ? 'bg-status-critical' : 'animate-tick bg-accent',
+                )}
+              />
+              {isError ? '✗ stale · as of' : 'as of'} {clockTime(data.asOf)}
+            </span>
           </span>
         </div>
+
+        {isError && (
+          <div className="mx-auto max-w-5xl px-6 pb-3">
+            <UnreachableBanner asOf={data.asOf} />
+          </div>
+        )}
       </header>
 
       <main className="mx-auto max-w-5xl space-y-10 px-6 py-6">
-        {isError && <UnreachableBanner asOf={data.asOf} />}
-
         {data.noStateYet ? (
           <p className="rounded-xl border border-border/80 bg-card p-5 text-sm text-muted-foreground shadow-lift">
             No state yet — the daemon has never run on this machine. Once it handles its first
@@ -103,11 +120,7 @@ export default function App() {
             </section>
 
             <section className="space-y-3">
-              <SectionHeader
-                title="Recently closed"
-                count={stats.closedDelegations + stats.closedSessions}
-                hint="last 48 h"
-              />
+              <SectionHeader title="Recently closed" count={stats.closedTotal} hint="last 48 h" />
               <RecentlyClosed
                 delegations={data.recentlyClosed.delegations}
                 sessions={data.recentlyClosed.sessions}
