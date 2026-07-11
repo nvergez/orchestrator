@@ -54,6 +54,42 @@ describe('serviceCollision', () => {
     expect(refusal).not.toBeNull();
   });
 
+  it('follows an explicit ORCHESTRATOR_DB_PATH in the canonical env file, resolved', async () => {
+    const refusal = await serviceCollision(
+      deps({
+        readFile: () => 'SLACK_APP_TOKEN=xapp-1-SERVICE\nORCHESTRATOR_DB_PATH=/srv/db/orchestrator.db\n',
+        env: {
+          XDG_CONFIG_HOME: '/cfg',
+          XDG_STATE_HOME: '/state',
+          SLACK_APP_TOKEN: 'xapp-1-DEV',
+          ORCHESTRATOR_DB_PATH: '/srv/other/../db/orchestrator.db',
+        },
+      }),
+    );
+
+    expect(refusal).toContain('/srv/db/orchestrator.db');
+  });
+
+  it("resolves the service's default under the env file's own XDG vars, not this process's", async () => {
+    // The service file relocates the state dir; the dev default stays under
+    // /state — no collision. Dropping the env-file-over-process merge would
+    // resolve both to /state and refuse a legitimately isolated boot.
+    const refusal = await serviceCollision(
+      deps({
+        readFile: () => 'SLACK_APP_TOKEN=xapp-1-SERVICE\nXDG_STATE_HOME=/svc-state\n',
+        env: { XDG_CONFIG_HOME: '/cfg', XDG_STATE_HOME: '/state', SLACK_APP_TOKEN: 'xapp-1-DEV' },
+      }),
+    );
+
+    expect(refusal).toBeNull();
+  });
+
+  it('refuses while the unit is still activating — a starting service is a service', async () => {
+    const refusal = await serviceCollision(deps({ run: () => Promise.resolve({ stdout: 'activating\n' }) }));
+
+    expect(refusal).not.toBeNull();
+  });
+
   it('lets an isolated dev instance boot — own Slack app, own database', async () => {
     const refusal = await serviceCollision(
       deps({
