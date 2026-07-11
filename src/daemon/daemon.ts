@@ -1,10 +1,13 @@
+import { readFileSync } from 'node:fs';
 import { App } from '@slack/bolt';
 import { pino } from 'pino';
 import { ConfigError, loadConfig, type Config } from '../kernel/config.ts';
 import { createLogger, toBoltLogger } from '../kernel/logger.ts';
 import { registerHandlers } from './app.ts';
 import { reportOrcaHealth } from '../kernel/orca-health.ts';
+import { execFileRunner } from '../kernel/orca.ts';
 import { createProcessFactory } from './claude.ts';
+import { serviceCollision } from './collision.ts';
 import { buildRuntime } from './runtime.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
 import { loadRoutingHints } from '../kernel/routing.ts';
@@ -29,6 +32,18 @@ export async function runDaemon(): Promise<void> {
   }
 
   const logger = createLogger(config.logLevel);
+
+  // A checkout-run daemon must not collide with the installed service —
+  // same Slack app or same database corrupts both worlds (ADR 0003).
+  const refusal = await serviceCollision({
+    env: process.env,
+    run: execFileRunner,
+    readFile: (path) => readFileSync(path, 'utf8'),
+  });
+  if (refusal !== null) {
+    logger.fatal(refusal);
+    process.exit(1);
+  }
 
   // Fire-and-forget: the probe runs while we connect to Slack and logs whenever
   // it lands — Orca being down must never crash or delay startup (spec §10).
