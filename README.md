@@ -124,11 +124,49 @@ npm ci
 npm test && npm run typecheck && npm run lint
 ```
 
+### Dev loops
+
+Three composite commands, named by the world they put you in (each is a
+`concurrently` composition — when one process dies, the whole loop dies
+loud):
+
+| Command | Runs | Database |
+| --- | --- | --- |
+| `npm run dev:all` | daemon + sidecar + Vite | `.dev/orchestrator.db` |
+| `npm run dev:dashboard` | sidecar + Vite | the real one (XDG, or `ORCHESTRATOR_DB_PATH`) |
+| `npm run dev:dashboard:demo` | seed, then sidecar + Vite | `.dev/demo.db`, reseeded fresh every run |
+
+`npm run dev:all` boots the daemon from `.env` and fails immediately with
+the missing-variable list without one. A dev instance coexists with an
+installed service **by isolation** (ADR 0003): its own Slack app, its own
+database, its own port. Create a second Slack app for dev (same manifest
+as [`docs/setup-slack.md`](docs/setup-slack.md), Socket Mode, its own
+channel) and put its tokens in `.env` — the daemon refuses to boot while
+the service is active on this machine and `.env` holds the service's
+`SLACK_APP_TOKEN` or points at its database. The dev defaults isolate the
+rest: the sidecar listens on 8788 (the service's on 8787; `DASHBOARD_PORT`
+overrides — set it in the shell, not `.env`: the loop exports one value to
+both the sidecar and the Vite proxy, and a `.env` entry could only reach
+the sidecar), and the dev databases live under the git-ignored `.dev/`.
+
+`npm run dev:dashboard:demo` needs no daemon, no Slack app, no Orca: it
+writes demo state through the real stores — a live session, in-flight and
+failed delegations, a decision gate, an escalation, a stall — so every
+dashboard section renders from a bare checkout. Timestamps sit relative
+to now; reseed any time with `npm run seed:demo`. The demo database path
+is fixed (the seed ignores `ORCHESTRATOR_DB_PATH`, so ambient daemon env
+can never aim the reseed at a real database), and it is a different file
+from `dev:all`'s — a demo run never clobbers dev-daemon state.
+
+Dev over a tailnet: `WEB_DEV_HOST="$(tailscale ip -4)" npm run dev:all`
+binds Vite past loopback (`*.ts.net` Host headers are pre-allowed — bind
+the tailnet IP, never `0.0.0.0`, on a box with a public interface). By
+default nothing binds beyond loopback, and the sidecar never does: the
+browser reaches Vite, and Vite proxies `/api` locally (ADR 0002).
+
 The dashboard frontend lives in the `web/` npm workspace (React + Vite),
 built into `dist/web` by `npm run build:web` and shipped pre-built in the
-npm tarball — the published package carries zero frontend dependencies. For
-frontend work, run `orc dashboard` (the API) and `npm run dev:web` (Vite
-dev server, hot reload, proxying `/api` to `127.0.0.1:8787`).
+npm tarball — the published package carries zero frontend dependencies.
 
 PRs are squash-merged and the PR title must follow
 [Conventional Commits](https://www.conventionalcommits.org/) — merged titles

@@ -2,7 +2,8 @@ import { resolveDefaultDbPath } from './xdg.ts';
 
 /**
  * Boot configuration, read from process.env only (spec §10: no dotenv —
- * systemd provides EnvironmentFile, dev runs use `node --env-file=.env`).
+ * systemd provides EnvironmentFile, dev runs use `node --env-file-if-exists=.env`,
+ * so a missing file surfaces here as the full missing-variable list).
  */
 export interface Config {
   slackBotToken: string;

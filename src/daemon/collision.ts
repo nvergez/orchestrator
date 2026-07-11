@@ -55,7 +55,7 @@ export async function serviceCollision(deps: CollisionDeps): Promise<string | nu
   if (serviceDb === devDb) {
     return (
       `the orchestrator service is active on this machine and this daemon would write its database (${devDb}) — ` +
-      'set ORCHESTRATOR_DB_PATH to a dev-instance path (e.g. a file under your checkout).'
+      'set ORCHESTRATOR_DB_PATH to a dev-instance path (`npm run dev:all` defaults it to .dev/ under the checkout).'
     );
   }
 

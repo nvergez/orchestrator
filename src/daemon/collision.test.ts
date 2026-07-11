@@ -37,6 +37,7 @@ describe('serviceCollision', () => {
 
     expect(refusal).toContain('/state/orchestrator/orchestrator.db');
     expect(refusal).toContain('ORCHESTRATOR_DB_PATH');
+    expect(refusal).toContain('npm run dev:all');
   });
 
   it('compares resolved paths — the service default against an explicit dev path spelled differently', async () => {
