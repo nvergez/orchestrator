@@ -8,8 +8,8 @@
 # convenience (ORCHESTRATOR_ROUTING_HINTS_PATH); the repo ships only the example.
 routing-hints.json
 
-# Demo state (issue #94) — the git-ignored dev path `npm run seed:demo`
-# writes the demo database into.
+# Dev-instance state (ADR 0003) — the databases the dev loops write:
+# dev:all's daemon db and the seeded demo db (`npm run seed:demo`).
 .dev/
 
 node_modules/
