@@ -30,7 +30,12 @@ export function durationSince(iso: string, asOf: string): string {
   return formatDuration(Math.max(0, Date.parse(asOf) - Date.parse(iso)));
 }
 
-/** Local wall-clock time of an ISO stamp — the "as of" display. */
+/**
+ * Local wall-clock time of an ISO stamp — the "as of" display. Fixed-width
+ * 24h HH:MM:SS regardless of locale, so the ticking clock never jitters.
+ */
 export function clockTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString();
+  const date = new Date(iso);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }

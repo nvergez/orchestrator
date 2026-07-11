@@ -2,6 +2,7 @@ import type { ClosedSessionView, DelegationView } from '../api';
 import { ago } from '../lib/time';
 import { IssueRef } from './delegation-row';
 import { Badge } from './ui/badge';
+import { listRow } from './ui/row';
 
 /**
  * The muted history strip: the page is never meaninglessly blank, and a
@@ -18,16 +19,17 @@ export function RecentlyClosed({
   asOf: string;
 }) {
   if (delegations.length === 0 && sessions.length === 0) {
-    return <p className="text-sm text-muted-foreground">Nothing closed in the last 48 h.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        Nothing closed in the last 48 h — quiet on the wire.
+      </p>
+    );
   }
   return (
-    <div className="space-y-1 text-muted-foreground">
+    <div className="text-muted-foreground">
       <ul>
         {delegations.map((delegation) => (
-          <li
-            key={delegation.dispatchId}
-            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-border py-2 text-sm first:border-t-0"
-          >
+          <li key={delegation.dispatchId} className={`animate-enter ${listRow}`}>
             {delegation.status === 'failed' ? (
               <Badge variant="critical">✗ failed</Badge>
             ) : (
@@ -40,18 +42,17 @@ export function RecentlyClosed({
               </span>
             )}
             {delegation.closedAt !== null && (
-              <span className="ml-auto text-xs">closed {ago(delegation.closedAt, asOf)}</span>
+              <span className="ml-auto text-2xs tabular-nums">
+                closed {ago(delegation.closedAt, asOf)}
+              </span>
             )}
           </li>
         ))}
         {sessions.map((session) => (
-          <li
-            key={session.threadTs}
-            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-border py-2 text-sm first:border-t-0"
-          >
-            <Badge>session closed</Badge>
-            <span className="font-mono text-xs">thread {session.threadTs}</span>
-            <span className="ml-auto text-xs">
+          <li key={session.threadTs} className={`animate-enter ${listRow}`}>
+            <Badge>◌ session closed</Badge>
+            <span className="font-mono text-2xs">thread {session.threadTs}</span>
+            <span className="ml-auto text-2xs tabular-nums">
               {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
               {' · '}${session.costUsdTotal.toFixed(2)}
               {' · '}closed {ago(session.closedAt, asOf)}
