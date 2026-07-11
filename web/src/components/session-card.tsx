@@ -13,11 +13,13 @@ const STATUS_BADGE = {
 export function SessionCard({ session, asOf }: { session: SessionCardView; asOf: string }) {
   const status = STATUS_BADGE[session.status];
   return (
-    <Card>
+    <Card className="animate-enter">
       <CardHeader className="flex-row flex-wrap items-baseline gap-x-3">
-        <CardTitle className="font-mono">thread {session.threadTs}</CardTitle>
+        <CardTitle className="font-mono font-medium">
+          <span className="text-muted-foreground">thread</span> {session.threadTs}
+        </CardTitle>
         <Badge variant={status.variant}>{status.label}</Badge>
-        <span className="ml-auto text-xs text-muted-foreground">
+        <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
           {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
           {' · '}${session.costUsdTotal.toFixed(2)}
           {session.lastActivityAt !== null && ` · active ${ago(session.lastActivityAt, asOf)}`}

@@ -1,51 +1,113 @@
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/jetbrains-mono';
 @import 'tailwindcss';
 
 /*
- * Theme tokens, shadcn-style: neutral surfaces in light and dark (dark
- * follows the OS — this is an ops page, not a product with a toggle).
- * Status colors are reserved for state (good / warning / serious /
- * critical), identical in both modes, and always paired with a glyph and
- * a word — never color alone.
+ * "Calm control room" tokens. Surfaces are warm — paper-white in light,
+ * deep warm charcoal in dark (OS-followed; an ops page has no toggle) —
+ * with one teal accent used sparingly (links, the live pulse). Status
+ * colors are re-tuned per mode so each holds WCAG AA (≥ 4.5:1) as text on
+ * background, card, and muted surfaces (verified computationally), and by
+ * hard rule they are never the only signal: every status ships with a
+ * glyph and a word.
  */
 :root {
-  --background: oklch(0.99 0.002 100);
-  --foreground: oklch(0.22 0.005 100);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.22 0.005 100);
-  --muted: oklch(0.96 0.003 100);
-  --muted-foreground: oklch(0.52 0.008 100);
-  --border: oklch(0.9 0.004 100);
-  --accent: oklch(0.55 0.13 255);
+  --background: oklch(0.975 0.006 85);
+  --card: oklch(0.993 0.003 90);
+  --muted: oklch(0.947 0.007 85);
+  --border: oklch(0.898 0.01 85);
+  --foreground: oklch(0.245 0.015 75);
+  --muted-foreground: oklch(0.5 0.018 75);
+  --accent: oklch(0.5 0.105 215);
+  --status-good: oklch(0.49 0.135 150);
+  --status-warning: oklch(0.5 0.115 80);
+  --status-serious: oklch(0.505 0.135 45);
+  --status-critical: oklch(0.505 0.185 27);
+  --lift:
+    0 1px 2px oklch(0.245 0.015 75 / 0.05),
+    0 2px 10px -4px oklch(0.245 0.015 75 / 0.08);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: oklch(0.21 0.004 100);
-    --foreground: oklch(0.93 0.004 100);
-    --card: oklch(0.25 0.005 100);
-    --card-foreground: oklch(0.93 0.004 100);
-    --muted: oklch(0.29 0.005 100);
-    --muted-foreground: oklch(0.7 0.008 100);
-    --border: oklch(0.34 0.006 100);
-    --accent: oklch(0.72 0.11 255);
+    --background: oklch(0.195 0.01 75);
+    --card: oklch(0.235 0.011 75);
+    --muted: oklch(0.28 0.012 75);
+    --border: oklch(0.33 0.013 75);
+    --foreground: oklch(0.92 0.01 85);
+    --muted-foreground: oklch(0.69 0.014 80);
+    --accent: oklch(0.78 0.1 200);
+    --status-good: oklch(0.76 0.155 150);
+    --status-warning: oklch(0.8 0.13 85);
+    --status-serious: oklch(0.74 0.135 45);
+    --status-critical: oklch(0.7 0.165 25);
+    --lift:
+      0 1px 2px oklch(0 0 0 / 0.25),
+      0 2px 10px -4px oklch(0 0 0 / 0.35);
   }
 }
 
 @theme inline {
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', monospace;
+  /* One extra step below text-xs: overline labels and dense metadata. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
+  --color-card-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-border: var(--border);
   --color-accent: var(--accent);
-  --color-status-good: #0ca30c;
-  --color-status-warning: #fab219;
-  --color-status-serious: #ec835a;
-  --color-status-critical: #d03b3b;
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --shadow-lift: var(--lift);
 }
 
 body {
   @apply bg-background text-foreground antialiased;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/*
+ * Motion is quiet and opt-out: a one-beat rise for newly mounted rows and
+ * a single ping when a poll lands. Under prefers-reduced-motion both
+ * resolve to their static end state.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .animate-enter {
+    animation: rise-in 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+  .animate-tick {
+    animation: tick-ping 0.9s cubic-bezier(0, 0.6, 0.4, 1) both;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+}
+
+@keyframes tick-ping {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 55%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 7px transparent;
+  }
 }

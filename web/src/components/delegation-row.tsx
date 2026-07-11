@@ -1,6 +1,7 @@
 import type { DelegationView } from '../api';
 import { ago, durationSince } from '../lib/time';
 import { Badge } from './ui/badge';
+import { listRow } from './ui/row';
 
 /** `repo#84` as a GitHub link when the registry could derive one, plain text otherwise. */
 export function IssueRef({ delegation }: { delegation: DelegationView }) {
@@ -16,28 +17,31 @@ export function IssueRef({ delegation }: { delegation: DelegationView }) {
       href={delegation.issueUrl}
       target="_blank"
       rel="noreferrer"
-      className="font-medium text-accent underline-offset-2 hover:underline"
+      className="rounded-xs font-medium text-accent underline-offset-2 hover:underline"
     >
       {label}
     </a>
   );
 }
 
-/** One in-flight delegation inside a session card. */
+/**
+ * One in-flight delegation inside a session card. Scans left to right:
+ * identity, then status, then liveness metadata pinned to the right edge.
+ */
 export function DelegationRow({ delegation, asOf }: { delegation: DelegationView; asOf: string }) {
   return (
-    <li className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-border py-2 text-sm first:border-t-0">
+    <li className={listRow}>
       <IssueRef delegation={delegation} />
       {delegation.agent !== null && <Badge variant="accent">{delegation.agent}</Badge>}
       {delegation.worktreeName !== null && (
-        <span className="font-mono text-xs text-muted-foreground">{delegation.worktreeName}</span>
+        <span className="font-mono text-2xs text-muted-foreground">{delegation.worktreeName}</span>
       )}
       {delegation.title !== null && (
         <span className="min-w-0 flex-1 truncate text-muted-foreground" title={delegation.title}>
           {delegation.title}
         </span>
       )}
-      <span className="ml-auto text-xs text-muted-foreground">
+      <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
         in flight {durationSince(delegation.dispatchedAt, asOf)}
         {' · '}
         {delegation.lastBusAt === null
