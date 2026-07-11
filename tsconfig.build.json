@@ -13,5 +13,7 @@
     "inlineSources": true,
     "rewriteRelativeImportExtensions": true
   },
-  "exclude": ["src/**/*.test.ts"]
+  // demo-state/seed-demo are dev-only (issue #94): dist/ ships the product,
+  // never the demo-state fabricator the frontend dev loop seeds with.
+  "exclude": ["src/**/*.test.ts", "src/dashboard/demo-state.ts", "src/dashboard/seed-demo.ts"]
 }

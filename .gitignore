@@ -8,6 +8,10 @@
 # convenience (ORCHESTRATOR_ROUTING_HINTS_PATH); the repo ships only the example.
 routing-hints.json
 
+# Demo state (issue #94) — the git-ignored dev path `npm run seed:demo`
+# writes the demo database into.
+.dev/
+
 node_modules/
 
 # Build output — emitted by `npm run build` (tsconfig.build.json), shipped in the npm tarball only.

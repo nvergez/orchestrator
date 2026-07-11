@@ -32,6 +32,15 @@ already know and writes nothing. How an operator exposes it beyond the
 machine (Tailscale, SSH tunnel) is their business, not the project's.
 _Avoid_: visualizer, viz, status page, UI
 
+**Demo state**:
+A fabricated orchestrator database written through the real stores so the
+dashboard has something representative to render — sessions, in-flight and
+failed delegations, gates, a stall — with events placed relative to now.
+Reachable only by an explicit command, never by accident: the dashboard's
+contract is "what the daemon actually did", so demo state must announce
+itself by the command that created it.
+_Avoid_: fixtures (in this sense), mock data, fake db
+
 ### Releasing
 
 **Release**:

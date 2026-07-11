@@ -3,21 +3,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from '../daemon/db.ts';
-import { DelegationStore } from '../delegation/delegations.ts';
+import { CHANNEL, seedDemoState, THREAD, THREAD_CLOSED, THREAD_ORPHAN, USER } from './demo-state.ts';
 import { startDashboard, type DashboardHandle } from './server.ts';
 import { readSnapshot, type SnapshotDeps, type StateSnapshot } from './snapshot.ts';
 
 /**
  * The one new seam of issue #87: what an HTTP client of the sidecar sees.
- * The temp SQLite file is populated through the real daemon stores —
- * SessionStore and DelegationStore — exactly like their own suites do, so
- * these tests pin the /api/state contract the frontend consumes without
- * ever asserting on internal queries.
+ * The temp SQLite file is populated through the real daemon stores — the
+ * shared demo state (demo-state.ts) writes via SessionStore and
+ * DelegationStore exactly like their own suites do — so these tests pin
+ * the /api/state contract the frontend consumes without ever asserting on
+ * internal queries.
  */
-
-const THREAD = '1751970000.000100';
-const CHANNEL = 'C0EXAMPLE123';
-const USER = 'U0EXAMPLE456';
 
 const NOW = '2026-07-10T12:00:00.000Z';
 
@@ -100,159 +97,14 @@ describe('GET /api/state — the snapshot contract', () => {
   });
 });
 
-const THREAD_CLOSED = '1751970001.000200';
-const THREAD_ANCIENT = '1751970002.000300';
-const THREAD_ORPHAN = '1751970003.000400';
-
 /**
- * A database as the daemon leaves it, written through the real stores with
- * an injected clock. NOW is 2026-07-10T12:00Z, so the ~48h recently-closed
- * window opens at 2026-07-08T12:00Z.
+ * A database as the daemon leaves it — the shared demo state (issue #94)
+ * pinned to NOW, so the ~48h recently-closed window opens at
+ * 2026-07-08T12:00Z and every asserted timestamp below stays exact.
  */
 const populatedDb = (): string => {
   const dbPath = join(tempDir(), 'orchestrator.db');
-  let clock = '2026-07-09T09:00:00.000Z';
-  const sessions = new SessionStore(dbPath, () => clock);
-  const delegations = new DelegationStore(dbPath, () => clock);
-
-  // The live session: two turns, accumulated cost.
-  sessions.register(THREAD, CHANNEL, USER);
-  clock = '2026-07-09T09:30:00.000Z';
-  sessions.recordTurn(THREAD, CHANNEL, 0.5);
-  clock = '2026-07-10T08:00:00.000Z';
-  sessions.recordTurn(THREAD, CHANNEL, 1.0);
-
-  // A dormant session the sweep closed inside the window — its last
-  // activity predates the window, the CLOSE is what's recent — and one
-  // closed long before it.
-  clock = '2026-07-05T10:00:00.000Z';
-  sessions.register(THREAD_CLOSED, CHANNEL, USER);
-  clock = '2026-07-09T10:00:00.000Z';
-  sessions.closeSession(THREAD_CLOSED, CHANNEL);
-  clock = '2026-06-25T00:00:00.000Z';
-  sessions.register(THREAD_ANCIENT, CHANNEL, USER);
-  clock = '2026-07-01T00:00:00.000Z';
-  sessions.closeSession(THREAD_ANCIENT, CHANNEL);
-
-  const dispatch = {
-    taskId: 'task_live',
-    dispatchId: 'ctx_live',
-    worktreeId: '444c::/home/op/webapp::workspace:98',
-    worktreeName: 'webapp-84-dashboard',
-    worktreePath: '/home/op/webapp',
-    repo: 'webapp',
-    issueNumber: 84,
-    agent: 'claude',
-    workerHandle: 'term_live',
-    threadTs: THREAD,
-    channelId: CHANNEL,
-    cardTs: '1751970010.000100',
-    title: 'Dashboard read-only web view',
-  };
-
-  // In flight on the live session, with a later bus heartbeat.
-  clock = '2026-07-10T09:00:00.000Z';
-  delegations.recordDispatch(dispatch);
-  clock = '2026-07-10T11:58:00.000Z';
-  delegations.recordBusActivity('ctx_live');
-
-  // Closed inside the window: one completed, one failed (with a stall that
-  // the close settles). One completed before the window — must not appear.
-  clock = '2026-07-09T15:00:00.000Z';
-  delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_done', taskId: 'task_done', workerHandle: 'term_done' });
-  clock = '2026-07-09T18:00:00.000Z';
-  delegations.closeDelegation('ctx_done', 'completed');
-  clock = '2026-07-09T19:00:00.000Z';
-  delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_fail', taskId: 'task_fail', workerHandle: 'term_fail' });
-  delegations.recordStall({
-    dispatchId: 'ctx_fail',
-    threadTs: THREAD,
-    workerHandle: 'term_fail',
-    worktreeName: 'webapp-84-dashboard',
-    lastOutput: 'error: worktree dirty',
-    fingerprint: 'fp-fail',
-    relayTs: '1751970011.000200',
-  });
-  clock = '2026-07-09T20:00:00.000Z';
-  delegations.closeDelegation('ctx_fail', 'failed');
-  clock = '2026-07-06T00:00:00.000Z';
-  delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_old', taskId: 'task_old', workerHandle: 'term_old' });
-  clock = '2026-07-07T00:00:00.000Z';
-  delegations.closeDelegation('ctx_old', 'completed');
-
-  // In flight on a thread with no session row — must not hide.
-  clock = '2026-07-10T10:00:00.000Z';
-  delegations.recordDispatch({
-    ...dispatch,
-    dispatchId: 'ctx_orphan',
-    taskId: 'task_orphan',
-    workerHandle: 'term_orphan',
-    threadTs: THREAD_ORPHAN,
-    worktreeName: 'sandbox-21-bench',
-    worktreePath: '/home/op/sandbox',
-    repo: 'sandbox',
-    issueNumber: 21,
-    agent: 'codex',
-    title: 'bench harness',
-  });
-
-  // Gates: a pending decision gate, a pending escalation, an answered one.
-  clock = '2026-07-10T10:00:00.000Z';
-  delegations.recordGate({
-    msgId: 'msg_answered',
-    threadTs: THREAD,
-    taskId: null,
-    dispatchId: null,
-    workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
-    kind: 'decision_gate',
-    question: 'Keep the old route alive?',
-    options: ['yes', 'no'],
-    relayTs: '1751970012.000300',
-  });
-  clock = '2026-07-10T10:05:00.000Z';
-  delegations.answerGate('msg_answered');
-  clock = '2026-07-10T11:00:00.000Z';
-  delegations.recordGate({
-    msgId: 'msg_gate',
-    threadTs: THREAD,
-    taskId: 'task_live',
-    dispatchId: 'ctx_live',
-    workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
-    kind: 'decision_gate',
-    question: 'Migrations diverge — rebase or merge?',
-    options: ['rebase', 'merge'],
-    relayTs: '1751970013.000400',
-  });
-  clock = '2026-07-10T11:30:00.000Z';
-  delegations.recordGate({
-    msgId: 'msg_escalation',
-    threadTs: THREAD,
-    taskId: 'task_live',
-    dispatchId: 'ctx_live',
-    workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
-    kind: 'escalation',
-    question: 'CI is red on main — halt the merge?',
-    options: [],
-    relayTs: '1751970014.000500',
-  });
-
-  // The live worker's pending stall alert.
-  clock = '2026-07-10T11:45:00.000Z';
-  delegations.recordStall({
-    dispatchId: 'ctx_live',
-    threadTs: THREAD,
-    workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
-    lastOutput: '… waiting at a permissions prompt',
-    fingerprint: 'fp-live',
-    relayTs: '1751970015.000600',
-  });
-
-  sessions.close();
-  delegations.close();
+  seedDemoState(dbPath, new Date(NOW));
   return dbPath;
 };
 
