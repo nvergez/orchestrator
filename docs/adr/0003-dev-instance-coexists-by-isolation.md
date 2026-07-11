@@ -19,5 +19,7 @@ refuses the boot with the remediation in the message. Provable collisions
 only — an unreachable user bus or unreadable env file fails open, because
 ignorance must never block dev on a machine running no service. The
 sidecar needs no guard: it is read-only and a port clash fails loudly on
-its own. ADR 0002's line survives verbatim — a dev instance binds nothing
-past loopback either.
+its own. ADR 0002's line survives — by default a dev instance binds
+nothing past loopback either; the one exception is `WEB_DEV_HOST` (#95),
+which opts the Vite dev server onto a named interface per-invocation and
+is never a committed default.
