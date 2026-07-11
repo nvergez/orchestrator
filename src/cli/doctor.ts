@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
 import { ConfigError, loadConfig, resolveDashboardAddress } from '../kernel/config.ts';
+import { parseEnvFile } from '../kernel/env-file.ts';
 import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { probeOrca } from '../kernel/orca-health.ts';
 import { readPackageMeta } from './pkg.ts';
@@ -86,32 +87,6 @@ export function nearestAncestorWritable(dir: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Minimal KEY=VALUE parser for the canonical env file: blank lines and `#`
- * comments skipped, an optional `export ` prefix and one layer of matching
- * quotes stripped — enough for the `orc init` template and the shell-sourcing
- * style the operations guide suggests. Doctor-only: the daemon itself stays
- * dotenv-free (spec §10 — systemd's EnvironmentFile materializes the file).
- */
-export function parseEnvFile(content: string): Record<string, string> {
-  const vars: Record<string, string> = {};
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim().replace(/^export\s+/, '');
-    if (key === '') continue;
-    let value = line.slice(eq + 1).trim();
-    const quote = value[0];
-    if ((quote === '"' || quote === "'") && value.length >= 2 && value.endsWith(quote)) {
-      value = value.slice(1, -1);
-    }
-    vars[key] = value;
-  }
-  return vars;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseEnvFile, runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
+import { runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
 import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
@@ -367,20 +367,6 @@ describe('runDoctorChecks', () => {
     expect(checks.find((check) => check.label === 'linger')?.detail).toContain(
       'sudo loginctl enable-linger op',
     );
-  });
-});
-
-describe('parseEnvFile', () => {
-  it('keeps an empty value empty, so `KEY=` still reads as missing', () => {
-    expect(parseEnvFile('SLACK_BOT_TOKEN=\n')).toEqual({ SLACK_BOT_TOKEN: '' });
-  });
-
-  it('ignores lines without an equals sign', () => {
-    expect(parseEnvFile('garbage line\nKEY=value\n')).toEqual({ KEY: 'value' });
-  });
-
-  it('does not strip mismatched quotes', () => {
-    expect(parseEnvFile(`KEY="value'`)).toEqual({ KEY: `"value'` });
   });
 });
 

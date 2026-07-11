@@ -42,6 +42,13 @@ contract is "what the daemon actually did", so demo state must announce
 itself by the command that created it.
 _Avoid_: fixtures (in this sense), mock data, fake db
 
+**Dev instance**:
+A daemon/sidecar/frontend stack run from a checkout, coexisting with the
+installed service on the same machine by owning its own Slack app, database
+and ports. Coexistence is by isolation, not sharing: a dev instance that
+would collide with the service's Slack app or database must refuse to start.
+_Avoid_: dev mode, local instance
+
 ### Releasing
 
 **Release**:

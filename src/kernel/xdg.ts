@@ -35,8 +35,9 @@ export function resolveRoutingHintsPath(env: Record<string, string | undefined>)
 
 /**
  * The canonical env file — scaffolded by `orc init`, loaded by the unit's
- * `EnvironmentFile`. The daemon never reads it (env vars stay the only
- * boot-config channel); doctor consults it to diagnose a bare shell.
+ * `EnvironmentFile`. Nothing loads boot config from it (env vars stay the
+ * only boot-config channel); doctor consults it to diagnose a bare shell,
+ * the daemon's collision guard compares against it (ADR 0003).
  */
 export function resolveEnvFilePath(env: Record<string, string | undefined>): string {
   return join(resolveConfigDir(env), 'env');
