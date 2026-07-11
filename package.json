@@ -38,6 +38,7 @@
     "start": "node src/index.ts",
     "dev": "node --env-file=.env src/index.ts",
     "dev:web": "npm run dev --workspace web",
+    "seed:demo": "node src/dashboard/seed-demo.ts",
     "build": "tsc -p tsconfig.build.json",
     "build:web": "npm run build --workspace web",
     "prepack": "npm run build && npm run build:web",

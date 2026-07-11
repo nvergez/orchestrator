@@ -47,11 +47,12 @@ export default tseslint.config(
   },
   // The dashboard sidecar reads the SQLite file the stores maintain, never
   // the store clusters themselves (ADR 0002: read-only, its own process).
-  // Its HTTP-seam suite alone constructs the real stores, to populate the
-  // temp database the way the daemon would.
+  // Two exemptions construct the real stores to populate a database the
+  // way the daemon would: the HTTP-seam suite, and the demo-state builder
+  // it shares — dev-only code the published build excludes.
   {
     files: ['src/dashboard/**/*.ts'],
-    ignores: ['src/dashboard/server.test.ts'],
+    ignores: ['src/dashboard/server.test.ts', 'src/dashboard/demo-state.ts'],
     rules: {
       '@typescript-eslint/no-restricted-imports': [
         'error',
@@ -60,7 +61,7 @@ export default tseslint.config(
             {
               group: ['../daemon/*', '../delegation/*'],
               allowTypeImports: true,
-              message: 'dashboard/ reads the database file directly — only its HTTP-seam tests construct the real stores.',
+              message: 'dashboard/ reads the database file directly — only the HTTP-seam tests and the demo-state builder construct the real stores.',
             },
             { group: ['../cli/*'], message: 'dashboard/ must not import cli/.' },
           ],
