@@ -37,7 +37,7 @@ export interface SessionGateway {
 /** The slice of the gate relay the reply path decorates turns through (#21). */
 export interface ReplyDecorator {
   /** Prepends the thread's relayed-gates registry; a no-op without gates. */
-  decorateReply(threadTs: string, text: string, channelId?: string): string;
+  decorateReply(threadTs: string, text: string, channelId: string): string;
 }
 
 const REPLY_LOG_LINES: Record<ReplyResult, string> = {
@@ -73,7 +73,7 @@ export function registerHandlers(
     const incoming = event as IncomingEvent;
     const decision = classifyEvent(incoming, guard);
     const channelId = incoming.channel;
-    const allowedUserIds = guard.allowedUserIds ?? (guard.allowedUserId === undefined ? [] : [guard.allowedUserId]);
+    const allowedUserIds = guard.allowedUserIds;
 
     switch (decision.action) {
       case 'ignore':
@@ -88,7 +88,7 @@ export function registerHandlers(
         await app.client.chat.postMessage({
           channel: channelId,
           thread_ts: decision.threadTs,
-          text: refusalLine(allowedUserIds),
+          text: refusalLine(),
         });
         return;
       case 'open':

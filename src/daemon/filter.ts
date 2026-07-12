@@ -54,11 +54,8 @@ export function humanText(event: IncomingEvent): string {
 
 /** The identities the filter guards with, straight from config + auth.test. */
 export interface Guard {
-  channelIds?: readonly string[];
-  allowedUserIds?: readonly string[];
-  /** Legacy single-value construction retained for embedders during config migration. */
-  channelId?: string;
-  allowedUserId?: string;
+  channelIds: readonly string[];
+  allowedUserIds: readonly string[];
   botUserId: string;
 }
 
@@ -85,9 +82,7 @@ export type Decision =
   | { action: 'ignore'; reason: IgnoreReason };
 
 export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
-  const channelIds = guard.channelIds ?? (guard.channelId === undefined ? [] : [guard.channelId]);
-  const allowedUserIds = guard.allowedUserIds ?? (guard.allowedUserId === undefined ? [] : [guard.allowedUserId]);
-  if (event.channel === undefined || !channelIds.includes(event.channel)) {
+  if (event.channel === undefined || !guard.channelIds.includes(event.channel)) {
     return { action: 'ignore', reason: 'wrong_channel' };
   }
   if (event.subtype !== undefined) {
@@ -118,7 +113,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       // no session.
       return { action: 'ignore', reason: 'not_a_mention' };
     }
-    if (!allowedUserIds.includes(event.user)) {
+    if (!guard.allowedUserIds.includes(event.user)) {
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
     const replyText = spokenText.trim();
@@ -133,7 +128,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   }
 
   // app_mention from here on.
-  if (!allowedUserIds.includes(event.user)) {
+  if (!guard.allowedUserIds.includes(event.user)) {
     if (event.thread_ts !== undefined) {
       // The polite refusal is for *root* mentions only (UX mock G1). Anything
       // a third party posts inside a thread is silence, per spec §7 — never

@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { slackThreadKey } from '../kernel/thread.ts';
 
 /**
  * The dashboard read model (issue #87, ADR 0002): one snapshot of live
@@ -70,6 +71,7 @@ export interface StallView {
 export interface ClosedSessionView {
   threadTs: string;
   channelId: string;
+  rootUser: string;
   createdAt: string;
   lastActivityAt: string;
   /** What the ~48h window keys on — a sweep-closed dormant session closed
@@ -222,7 +224,7 @@ function toDelegationView(row: Record<string, unknown>): DelegationView {
 function sessionCards(db: DatabaseSync, inFlight: DelegationView[]): SessionCard[] {
   const byThread = new Map<string, DelegationView[]>();
   for (const delegation of inFlight) {
-    const key = threadKey(delegation.threadTs, delegation.channelId);
+    const key = slackThreadKey(delegation.threadTs, delegation.channelId);
     const rows = byThread.get(key) ?? [];
     rows.push(delegation);
     byThread.set(key, rows);
@@ -234,7 +236,7 @@ function sessionCards(db: DatabaseSync, inFlight: DelegationView[]): SessionCard
       .prepare(`SELECT * FROM sessions WHERE status = 'open' ORDER BY last_activity_at DESC`)
       .all() as unknown as RawSessionRow[];
     for (const row of open) {
-      const key = threadKey(row.thread_ts, row.channel_id);
+      const key = slackThreadKey(row.thread_ts, row.channel_id);
       cards.push({
         threadTs: row.thread_ts,
         channelId: row.channel_id,
@@ -325,10 +327,6 @@ function readPendingStalls(db: DatabaseSync): StallView[] {
   }));
 }
 
-function threadKey(threadTs: string, channelId: string): string {
-  return `${channelId}:${threadTs}`;
-}
-
 function readRecentlyClosedSessions(db: DatabaseSync, cutoff: string): ClosedSessionView[] {
   if (!hasTable(db, 'sessions') || !hasColumn(db, 'sessions', 'closed_at')) return [];
   const rows = db
@@ -341,6 +339,7 @@ function readRecentlyClosedSessions(db: DatabaseSync, cutoff: string): ClosedSes
   return rows.map((row) => ({
     threadTs: row.thread_ts,
     channelId: row.channel_id,
+    rootUser: row.root_user,
     createdAt: row.created_at,
     lastActivityAt: row.last_activity_at,
     closedAt: row.closed_at,

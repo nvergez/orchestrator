@@ -52,13 +52,13 @@ export interface GateRelayOptions {
 
 /** The slice canUseTool consults before a command runs (issue #21). */
 export interface RelayPolicy {
-  sanctionsSend(threadTs: string, command: string, channelId?: string): boolean;
-  prepare(threadTs: string, command: string, channelId?: string): PrepareVerdict;
+  sanctionsSend(threadTs: string, command: string, channelId: string): boolean;
+  prepare(threadTs: string, command: string, channelId: string): PrepareVerdict;
 }
 
 /** The slice the PostToolUse hooks feed after a command ran. */
 export interface RelayObserver {
-  observe(threadTs: string, command: string, stdout: string, channelId?: string): Promise<void>;
+  observe(threadTs: string, command: string, stdout: string, channelId: string): Promise<void>;
 }
 
 /** What a session process holds — both seams together. */

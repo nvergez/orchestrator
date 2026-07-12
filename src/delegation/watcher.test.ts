@@ -168,7 +168,7 @@ const makeWatcher = (options: HarnessOptions = {}) => {
 
 const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
   vi.waitFor(() => {
-    expect(watcher.isArmed(threadTs)).toBe(false);
+    expect(watcher.isArmed(threadTs, CHANNEL)).toBe(false);
   });
 
 describe('worker_done — the happy path', () => {
@@ -272,7 +272,7 @@ describe('worker_done — the happy path', () => {
     // Never ✅ with work still out — the registries settle the honest state.
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
     // The second window parked on the still-armed watcher.
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
     expect(checkRunner.calls).toHaveLength(2);
   });
 
@@ -500,7 +500,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     expect(wakes).toHaveLength(0);
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(slotsFreed()).toBe(0);
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('relays an escalation 🚨 from its body, without options or a number tail', async () => {
@@ -847,7 +847,7 @@ describe('arming and stopping', () => {
     await vi.waitFor(() => {
       expect(checkRunner.calls).toHaveLength(1);
     });
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('re-arms for a dispatch landing right after a stop — un-arm is atomic with the stop', async () => {
@@ -883,7 +883,7 @@ describe('arming and stopping', () => {
     await vi.waitFor(() => {
       expect(checkRunner.calls).toHaveLength(2);
     });
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('stops when the mailbox is missing instead of spinning', async () => {
@@ -940,8 +940,8 @@ describe('boot re-arm', () => {
       expect(checkRunner.calls).toHaveLength(1);
     });
     expect(checkRunner.calls[0]).toContain(MAILBOX);
-    expect(watcher.isArmed(THREAD)).toBe(true);
-    expect(watcher.isArmed(THREAD_B)).toBe(false);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
+    expect(watcher.isArmed(THREAD_B, CHANNEL)).toBe(false);
   });
 
   it('a completion sent while the daemon was down lands after the re-arm', async () => {
@@ -1063,7 +1063,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     watcher.arm(THREAD);
     // The next (dry) window parks — give the handled message a beat to land.
     await vi.waitFor(() => {
-      expect(watcher.isArmed(THREAD)).toBe(true);
+      expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
     });
 
     expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();

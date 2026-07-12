@@ -374,6 +374,7 @@ describe('DelegationStore — composite Slack thread identity (#93)', () => {
     expect(store.getMailbox(THREAD, otherChannel)).toBe('term_b');
     expect(store.listPendingGates(THREAD, CHANNEL).map((row) => row.msgId)).toEqual(['msg_a']);
     expect(store.listPendingGates(THREAD, otherChannel).map((row) => row.msgId)).toEqual(['msg_b']);
+    expect(() => store.listPendingGates(THREAD)).toThrow(/channelId is required/);
   });
 
   it('migrates the single-channel thread tables in place and permits collisions afterward', () => {

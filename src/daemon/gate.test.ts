@@ -14,7 +14,7 @@ interface Harness {
 const makeHarness = (post?: (threadTs: string, text: string) => Promise<void>): Harness => {
   const posted: Array<{ threadTs: string; text: string }> = [];
   const gates = new GateKeeper({
-    allowedUserId: USER,
+    allowedUserIds: [USER],
     post:
       post ??
       ((threadTs, text) => {
@@ -178,6 +178,17 @@ describe('GateKeeper multi-channel isolation (#93)', () => {
     await expect(second).resolves.toEqual({ approved: true, reply: 'go' });
     expect(gates.tryResolve(THREAD, USER, 'no', 'C0FIRST')).toBe(true);
     await expect(first).resolves.toEqual({ approved: false, reply: 'no' });
+  });
+
+  it('lets any configured operator answer a gate', async () => {
+    const gates = new GateKeeper({
+      allowedUserIds: [USER, 'U0SECOND'],
+      post: () => Promise.resolve(),
+      logger: createLogger('silent'),
+    });
+    const verdict = gates.request(THREAD, 'shared gate?', undefined, 'C0FIRST');
+    expect(gates.tryResolve(THREAD, 'U0SECOND', 'go', 'C0FIRST')).toBe(true);
+    await expect(verdict).resolves.toEqual({ approved: true, reply: 'go' });
   });
 });
 

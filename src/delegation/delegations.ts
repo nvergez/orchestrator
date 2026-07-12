@@ -518,33 +518,29 @@ export class DelegationStore {
   /** The thread's newest in-flight row for a task — thread-scoped, so the
    * runtime-global bus can never close another thread's delegation. */
   private inFlightByTaskId(threadTs: string, channelId: string | undefined, taskId: string): DelegationRow | undefined {
-    const row = (channelId === undefined || channelId === ''
-      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND task_id = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, taskId)
-      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, taskId)) as Record<string, unknown> | undefined;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const row = this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, scopedChannel, taskId) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest in-flight row for an asking terminal (issue #21). */
   private inFlightByWorkerHandle(threadTs: string, channelId: string | undefined, workerHandle: string): DelegationRow | undefined {
-    const row = (channelId === undefined || channelId === ''
-      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, workerHandle)
-      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND worker_handle = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, workerHandle)) as Record<string, unknown> | undefined;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const row = this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND worker_handle = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, scopedChannel, workerHandle) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest row for a task, ANY status (issue #25). */
   private latestByTaskId(threadTs: string, channelId: string | undefined, taskId: string): DelegationRow | undefined {
-    const row = (channelId === undefined || channelId === ''
-      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND task_id = ? ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, taskId)
-      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, taskId)) as Record<string, unknown> | undefined;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const row = this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, scopedChannel, taskId) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
   listInFlightForThread(threadTs: string, channelId?: string): DelegationRow[] {
-    const rows = (channelId === undefined || channelId === ''
-      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND status = 'dispatched' ORDER BY dispatched_at`).all(threadTs)
-      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND status = 'dispatched' ORDER BY dispatched_at`).all(threadTs, channelId)) as Array<Record<string, unknown>>;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const rows = this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND status = 'dispatched' ORDER BY dispatched_at`).all(threadTs, scopedChannel) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
@@ -578,17 +574,15 @@ export class DelegationStore {
 
   /** All of a thread's delegations, oldest first — the 🔚 summary's ledger. */
   listForThread(threadTs: string, channelId?: string): DelegationRow[] {
-    const rows = (channelId === undefined || channelId === ''
-      ? this.db.prepare('SELECT * FROM delegations WHERE thread_ts = ? ORDER BY dispatched_at').all(threadTs)
-      : this.db.prepare('SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? ORDER BY dispatched_at').all(threadTs, channelId)) as Array<Record<string, unknown>>;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const rows = this.db.prepare('SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? ORDER BY dispatched_at').all(threadTs, scopedChannel) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
   /** The thread's mailbox terminal handle, if one was ever created (issue #9). */
   getMailbox(threadTs: string, channelId?: string): string | undefined {
-    const row = (channelId === undefined || channelId === ''
-      ? this.db.prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1').get(threadTs)
-      : this.db.prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? AND channel_id = ?').get(threadTs, channelId)) as { handle: string } | undefined;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const row = this.db.prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? AND channel_id = ?').get(threadTs, scopedChannel) as { handle: string } | undefined;
     return row?.handle;
   }
 
@@ -609,20 +603,20 @@ export class DelegationStore {
    * post no second ⚠️ line.
    */
   getReconcileFingerprint(threadTs: string, channelId?: string): string | undefined {
-    const row = (channelId === undefined || channelId === ''
-      ? this.db.prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? ORDER BY posted_at DESC LIMIT 1').get(threadTs)
-      : this.db.prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? AND channel_id = ?').get(threadTs, channelId)) as { fingerprint: string } | undefined;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const row = this.db.prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? AND channel_id = ?').get(threadTs, scopedChannel) as { fingerprint: string } | undefined;
     return row?.fingerprint;
   }
 
   /** Remembers what the thread's ⚠️ line last reported (issue #25). */
   setReconcileFingerprint(threadTs: string, fingerprint: string, channelId = ''): void {
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
     this.db
       .prepare(
         `INSERT OR REPLACE INTO reconciliations (thread_ts, channel_id, fingerprint, posted_at)
          VALUES (?, ?, ?, ?)`,
       )
-      .run(threadTs, channelId, fingerprint, this.now());
+      .run(threadTs, scopedChannel, fingerprint, this.now());
   }
 
   /**
@@ -710,9 +704,8 @@ export class DelegationStore {
 
   /** All of a thread's relayed gates, oldest first. */
   private listGatesForThread(threadTs: string, channelId?: string): PendingGateRow[] {
-    const rows = (channelId === undefined || channelId === ''
-      ? this.db.prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id').all(threadTs)
-      : this.db.prepare('SELECT * FROM pending_gates WHERE thread_ts = ? AND channel_id = ? ORDER BY relayed_at, msg_id').all(threadTs, channelId)) as Array<Record<string, unknown>>;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const rows = this.db.prepare('SELECT * FROM pending_gates WHERE thread_ts = ? AND channel_id = ? ORDER BY relayed_at, msg_id').all(threadTs, scopedChannel) as Array<Record<string, unknown>>;
     return rows.map(toPendingGateRow);
   }
 
@@ -823,9 +816,8 @@ export class DelegationStore {
 
   /** All of a thread's stall alerts, oldest first. */
   private listStallsForThread(threadTs: string, channelId?: string): StallAlertRow[] {
-    const rows = (channelId === undefined || channelId === ''
-      ? this.db.prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id').all(threadTs)
-      : this.db.prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? AND channel_id = ? ORDER BY alerted_at, dispatch_id').all(threadTs, channelId)) as Array<Record<string, unknown>>;
+    const scopedChannel = this.scopedChannel(threadTs, channelId);
+    const rows = this.db.prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? AND channel_id = ? ORDER BY alerted_at, dispatch_id').all(threadTs, scopedChannel) as Array<Record<string, unknown>>;
     return rows.map(toStallAlertRow);
   }
 
@@ -849,15 +841,31 @@ export class DelegationStore {
     return Number(changes) > 0;
   }
 
+  /** Legacy callers may omit the channel only while a timestamp is provably
+   * unambiguous. A collision fails closed instead of merging two threads. */
+  private scopedChannel(threadTs: string, channelId?: string): string {
+    if (channelId !== undefined && channelId !== '') return channelId;
+    const rows = this.db
+      .prepare(
+        `SELECT channel_id FROM delegations WHERE thread_ts = ?
+         UNION SELECT channel_id FROM mailboxes WHERE thread_ts = ?
+         UNION SELECT channel_id FROM reconciliations WHERE thread_ts = ?
+         UNION SELECT channel_id FROM pending_gates WHERE thread_ts = ?
+         UNION SELECT channel_id FROM stall_alerts WHERE thread_ts = ?`,
+      )
+      .all(threadTs, threadTs, threadTs, threadTs, threadTs) as Array<{ channel_id: string }>;
+    if (rows.length > 1) {
+      throw new Error(`channelId is required: thread timestamp ${threadTs} exists in several channels`);
+    }
+    return rows[0]?.channel_id ?? '';
+  }
+
   private channelForThread(threadTs: string, dispatchId: string | null): string {
     if (dispatchId !== null) {
       const delegation = this.getByDispatchId(dispatchId);
       if (delegation !== undefined) return delegation.channelId;
     }
-    const mailbox = this.db
-      .prepare('SELECT channel_id FROM mailboxes WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1')
-      .get(threadTs) as { channel_id: string } | undefined;
-    return mailbox?.channel_id ?? '';
+    return this.scopedChannel(threadTs);
   }
 
   close(): void {

@@ -105,6 +105,7 @@ const makeCanUseTool = (
 ) =>
   buildCanUseTool({
     threadTs: THREAD,
+    channelId: 'C0EXAMPLE123',
     gates,
     allowList,
     delegations,
@@ -342,7 +343,13 @@ describe('buildCanUseTool — the gate relay seam (issue #21)', () => {
 
 describe('guardrailHooks', () => {
   const makeHooks = (delegations = new FakeDelegations(), relay = new FakeRelay()) =>
-    guardrailHooks({ threadTs: THREAD, delegations, relay, logger: createLogger('silent') });
+    guardrailHooks({
+      threadTs: THREAD,
+      channelId: 'C0EXAMPLE123',
+      delegations,
+      relay,
+      logger: createLogger('silent'),
+    });
 
   const baseHookFields = {
     session_id: 's1',

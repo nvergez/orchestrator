@@ -24,16 +24,8 @@ import {
 } from './messages.ts';
 
 describe('refusalLine', () => {
-  it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
-    expect(refusalLine('U0EXAMPLE456')).toBe(
-      'v1: only <@U0EXAMPLE456> can drive me.',
-    );
-  });
-
-  it('names all configured operators when the allow-list has several users', () => {
-    expect(refusalLine(['U0EXAMPLE456', 'U0EXAMPLE999'])).toBe(
-      'Only authorized operators (<@U0EXAMPLE456>, <@U0EXAMPLE999>) can drive me.',
-    );
+  it('refuses generically without exposing the operator allow-list', () => {
+    expect(refusalLine()).toBe('Only authorized operators can drive me.');
   });
 });
 

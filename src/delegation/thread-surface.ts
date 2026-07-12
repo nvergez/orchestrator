@@ -21,13 +21,13 @@ import type { Logger } from '../kernel/logger.ts';
  * over the Web API. `ts === threadTs` addresses the root message. */
 export interface Surface {
   /** chat.postMessage into the thread; resolves with the message ts. */
-  post(threadTs: string, text: string, channelId?: string): Promise<string>;
+  post(threadTs: string, text: string, channelId: string): Promise<string>;
   /** chat.update on an earlier message. */
-  update(ts: string, text: string, channelId?: string): Promise<void>;
+  update(ts: string, text: string, channelId: string): Promise<void>;
   /** reactions.add on a message. */
-  react(ts: string, name: string, channelId?: string): Promise<void>;
+  react(ts: string, name: string, channelId: string): Promise<void>;
   /** reactions.remove on a message. */
-  unreact(ts: string, name: string, channelId?: string): Promise<void>;
+  unreact(ts: string, name: string, channelId: string): Promise<void>;
 }
 
 /** The registry slice the root-reaction rules read — the thread's in-flight
@@ -92,12 +92,12 @@ export class ThreadSurface {
 
   /** chat.postMessage into the thread; resolves with the message ts. Throws
    * on a Slack failure — callers own their fallbacks. */
-  post(threadTs: string, text: string, channelId?: string): Promise<string> {
+  post(threadTs: string, text: string, channelId: string): Promise<string> {
     return this.surface.post(threadTs, text, channelId);
   }
 
   /** chat.update on an earlier message. Throws on a Slack failure. */
-  update(ts: string, text: string, channelId?: string): Promise<void> {
+  update(ts: string, text: string, channelId: string): Promise<void> {
     return this.surface.update(ts, text, channelId);
   }
 

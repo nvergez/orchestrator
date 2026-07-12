@@ -109,6 +109,15 @@ export class GateWatcher {
 
   /** Starts the thread's watch loop; a no-op while one is already running. */
   arm(threadTs: string, channelId = ''): void {
+    if (channelId === '') {
+      const matches = this.store
+        .threadsWithInFlight()
+        .filter((thread) => thread.threadTs === threadTs);
+      if (matches.length > 1) {
+        throw new Error(`channelId is required: thread timestamp ${threadTs} exists in several channels`);
+      }
+      channelId = matches[0]?.channelId ?? '';
+    }
     const key = slackThreadKey(threadTs, channelId);
     if (this.loops.has(key)) return;
     const token = {};
@@ -125,9 +134,8 @@ export class GateWatcher {
       });
   }
 
-  isArmed(threadTs: string, channelId = ''): boolean {
-    if (channelId !== '') return this.loops.has(slackThreadKey(threadTs, channelId));
-    return [...this.loops.keys()].some((key) => key.endsWith(`:${threadTs}`));
+  isArmed(threadTs: string, channelId: string): boolean {
+    return this.loops.has(slackThreadKey(threadTs, channelId));
   }
 
   /** Boot re-arm (spec §6): one watcher per thread the ledger shows in flight. */

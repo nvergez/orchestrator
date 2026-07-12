@@ -55,6 +55,7 @@ export interface StallView {
 export interface ClosedSessionView {
   threadTs: string;
   channelId: string;
+  rootUser: string;
   createdAt: string;
   lastActivityAt: string;
   closedAt: string;

@@ -78,8 +78,8 @@ export async function runDaemon(): Promise<void> {
       throw new Error('auth.test returned no user_id — cannot build the event filter');
     }
     const guard = {
-      channelIds: config.slackChannelIds ?? (config.slackChannelId === undefined ? [] : [config.slackChannelId]),
-      allowedUserIds: config.slackAllowedUserIds ?? (config.slackAllowedUserId === undefined ? [] : [config.slackAllowedUserId]),
+      channelIds: config.slackChannelIds,
+      allowedUserIds: config.slackAllowedUserIds,
       botUserId: auth.user_id,
     };
 

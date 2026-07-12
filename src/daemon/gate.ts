@@ -24,19 +24,19 @@ export interface GateRequester {
   request(
     threadTs: string,
     gateText: string,
-    signal?: AbortSignal,
-    channelId?: string,
+    signal: AbortSignal | undefined,
+    channelId: string,
   ): Promise<GateVerdict>;
 }
 
 /** The slice the Slack event path resolves gates through. */
 export interface GateResolver {
-  tryResolve(threadTs: string, userId: string, text: string, channelId?: string): boolean;
+  tryResolve(threadTs: string, userId: string, text: string, channelId: string): boolean;
 }
 
 /** The slice a session process holds: suspend on gates, release them at death. */
 export interface SessionGates extends GateRequester {
-  cancelThread(threadTs: string, channelId?: string): void;
+  cancelThread(threadTs: string, channelId: string): void;
 }
 
 /**
@@ -93,23 +93,21 @@ interface PendingGate {
 }
 
 export interface GateKeeperOptions {
-  allowedUserIds?: readonly string[];
-  /** Legacy single-user constructor option; plural callers should use allowedUserIds. */
-  allowedUserId?: string;
+  allowedUserIds: readonly string[];
   /** chat.postMessage into the thread — how the 🚦 line reaches the human. */
-  post: (threadTs: string, text: string, channelId?: string) => Promise<unknown>;
+  post: (threadTs: string, text: string, channelId: string) => Promise<unknown>;
   logger: Logger;
 }
 
 export class GateKeeper implements SessionGates, GateResolver {
   private readonly allowedUserIds: readonly string[];
-  private readonly post: (threadTs: string, text: string, channelId?: string) => Promise<unknown>;
+  private readonly post: (threadTs: string, text: string, channelId: string) => Promise<unknown>;
   private readonly logger: Logger;
   /** FIFO of unanswered gates per thread — one reply resolves one gate. */
   private readonly pending = new Map<string, PendingGate[]>();
 
   constructor(options: GateKeeperOptions) {
-    this.allowedUserIds = options.allowedUserIds ?? (options.allowedUserId === undefined ? [] : [options.allowedUserId]);
+    this.allowedUserIds = options.allowedUserIds;
     this.post = options.post;
     this.logger = options.logger;
   }
@@ -167,9 +165,7 @@ export class GateKeeper implements SessionGates, GateResolver {
    * behind the source filter (spec §7).
    */
   tryResolve(threadTs: string, userId: string, text: string, channelId = ''): boolean {
-    const queue =
-      this.pending.get(slackThreadKey(threadTs, channelId)) ??
-      (channelId === '' ? undefined : this.pending.get(slackThreadKey(threadTs, '')));
+    const queue = this.pending.get(slackThreadKey(threadTs, channelId));
     const gate = queue?.[0];
     if (gate === undefined) return false;
     if (!this.allowedUserIds.includes(userId)) {

@@ -117,6 +117,7 @@ describe('deriveOverviewStats', () => {
             {
               threadTs: '1751970001.000200',
               channelId: 'C0EXAMPLE123',
+              rootUser: 'U0EXAMPLE456',
               createdAt: '2026-07-06T10:00:00.000Z',
               lastActivityAt: '2026-07-10T10:00:00.000Z',
               closedAt: '2026-07-10T11:00:00.000Z',
@@ -126,6 +127,7 @@ describe('deriveOverviewStats', () => {
             {
               threadTs: '1751970002.000300',
               channelId: 'C0EXAMPLE123',
+              rootUser: 'U0EXAMPLE456',
               createdAt: '2026-07-06T10:00:00.000Z',
               lastActivityAt: '2026-07-09T10:00:00.000Z',
               closedAt: '2026-07-09T11:00:00.000Z',
@@ -150,6 +152,7 @@ describe('deriveOverviewStats', () => {
     const closedSession = {
       threadTs: '1751970001.000200',
       channelId: 'C0EXAMPLE123',
+      rootUser: 'U0EXAMPLE456',
       createdAt: '2026-07-06T10:00:00.000Z',
       lastActivityAt: '2026-07-10T10:00:00.000Z',
       closedAt: '2026-07-10T11:00:00.000Z',

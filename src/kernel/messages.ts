@@ -4,10 +4,8 @@
  */
 
 /** Scenario G1 — root @mention by a third party. */
-export function refusalLine(allowedUserIds: string | readonly string[]): string {
-  const ids = typeof allowedUserIds === 'string' ? [allowedUserIds] : allowedUserIds;
-  if (ids.length === 1) return `v1: only <@${ids[0]}> can drive me.`;
-  return `Only authorized operators (${ids.map((id) => `<@${id}>`).join(', ')}) can drive me.`;
+export function refusalLine(): string {
+  return 'Only authorized operators can drive me.';
 }
 
 /**

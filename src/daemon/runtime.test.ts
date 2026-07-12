@@ -35,8 +35,8 @@ const HINTS: RepoHint[] = [
 const CONFIG: Config = {
   slackBotToken: 'xoxb-test',
   slackAppToken: 'xapp-test',
-  slackChannelId: CHANNEL,
-  slackAllowedUserId: USER,
+  slackChannelIds: [CHANNEL],
+  slackAllowedUserIds: [USER],
   claudeCodeOauthToken: 'token',
   logLevel: 'silent',
   dbPath: ':memory:',
@@ -166,6 +166,7 @@ const makeRuntime = (
 const canUseToolFor = (seams: ProcessSeams) =>
   buildCanUseTool({
     threadTs: THREAD,
+    channelId: CHANNEL,
     gates: seams.gates,
     allowList: seams.allowList,
     delegations: seams.delegations,
@@ -437,8 +438,8 @@ describe('buildRuntime — the boot sequence', () => {
     expect(runner.calls).toContain('worktree rm --worktree id:wt-a --json');
 
     // Re-arm saw the reconciled ledger: no watcher for the closed thread.
-    expect(runtime.watcher.isArmed(THREAD)).toBe(false);
-    expect(runtime.watcher.isArmed(THREAD_B)).toBe(true);
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(false);
+    expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(true);
     const waits = runner.calls.filter((call) => call.startsWith('orchestration check --wait'));
     expect(waits).toHaveLength(1);
     expect(waits[0]).toContain('term_mb_b');
@@ -504,7 +505,7 @@ describe('buildRuntime — the boot sequence', () => {
     });
     // Nothing left in flight: the watcher loop wound itself down.
     await vi.waitFor(() => {
-      expect(runtime.watcher.isArmed(THREAD_B)).toBe(false);
+      expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(false);
     });
   });
 });

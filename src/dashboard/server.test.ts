@@ -283,6 +283,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           {
             threadTs: THREAD_CLOSED,
             channelId: CHANNEL,
+            rootUser: USER,
             createdAt: '2026-07-05T10:00:00.000Z',
             lastActivityAt: '2026-07-05T10:00:00.000Z',
             closedAt: '2026-07-09T10:00:00.000Z',

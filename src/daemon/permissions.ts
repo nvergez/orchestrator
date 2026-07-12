@@ -32,14 +32,14 @@ export interface DelegationPolicy {
  */
 export function buildCanUseTool(opts: {
   threadTs: string;
-  channelId?: string;
+  channelId: string;
   gates: GateRequester;
   allowList: DelegationPolicy;
   delegations: DispatchPreparer;
   relay: RelayPolicy;
   logger: Logger;
 }): CanUseTool {
-  const { threadTs, channelId = '', gates, allowList, delegations, relay, logger } = opts;
+  const { threadTs, channelId, gates, allowList, delegations, relay, logger } = opts;
   return async (toolName, input, { signal }) => {
     // The session's base tool set is Bash-only, but fail closed anyway: the
     // orchestrator routes/delegates/supervises, it never codes (spec §7).
@@ -166,12 +166,12 @@ const FORCE_ASK: HookJSONOutput = {
  */
 export function guardrailHooks(opts: {
   threadTs: string;
-  channelId?: string;
+  channelId: string;
   delegations: DispatchObserver;
   relay: RelayObserver;
   logger: Logger;
 }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
-  const { threadTs, channelId = '', delegations, relay, logger } = opts;
+  const { threadTs, channelId, delegations, relay, logger } = opts;
   const observe = async (input: HookInput): Promise<HookJSONOutput> => {
     if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
       const command = (input.tool_input as { command?: unknown } | null)?.command;

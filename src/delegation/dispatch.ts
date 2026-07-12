@@ -43,13 +43,13 @@ export type PrepareVerdict =
 
 /** The slice canUseTool drives right before allowing a Bash command. */
 export interface DispatchPreparer {
-  prepare(threadTs: string, command: string, signal?: AbortSignal, channelId?: string): Promise<PrepareVerdict>;
+  prepare(threadTs: string, command: string, signal: AbortSignal | undefined, channelId: string): Promise<PrepareVerdict>;
 }
 
 /** The slice the PostToolUse hook feeds and the process lifecycle clears. */
 export interface DispatchObserver {
-  observe(threadTs: string, command: string, stdout: string, channelId?: string): Promise<void>;
-  abandonThread(threadTs: string, channelId?: string): void;
+  observe(threadTs: string, command: string, stdout: string, channelId: string): Promise<void>;
+  abandonThread(threadTs: string, channelId: string): void;
 }
 
 export interface DelegationCoordinatorOptions {
@@ -240,7 +240,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   }
 
   /**
-   * The thread's mailbox terminal (`slack-<thread_ts>`, issue #9): reused
+   * The thread's mailbox terminal (`slack-<channel_id>-<thread_ts>`, #9/#93): reused
    * from SQLite when the handle is still live, lazily (re)created otherwise.
    * Throws when Orca is unreachable — the caller turns that into the ⚠️ line.
    */

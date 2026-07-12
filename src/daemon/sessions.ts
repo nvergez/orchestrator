@@ -9,6 +9,7 @@ import {
   queuedLine,
   type ClosingDelegation,
 } from '../kernel/messages.ts';
+import { slackThreadKey } from '../kernel/thread.ts';
 
 /**
  * The session manager — one Claude Code session per Slack thread (spec §3).
@@ -54,7 +55,7 @@ export interface VoiceHandle {
 export type VoiceFactory = (threadTs: string, channelId: string) => VoiceHandle;
 
 /** Posts a standalone message to a thread — 💸 warnings "post the event" (spec §8). */
-export type Notifier = (threadTs: string, text: string, channelId?: string) => Promise<void>;
+export type Notifier = (threadTs: string, text: string, channelId: string) => Promise<void>;
 
 /** A thread's FIFO carries turns and, terminally, the close command (spec §3). */
 type QueueItem = { kind: 'turn'; text: string } | { kind: 'close' };
@@ -215,7 +216,7 @@ export class SessionManager {
       const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
       let closed = 0;
       for (const row of this.store.openSessionsInactiveSince(cutoff)) {
-        const state = this.threads.get(threadKey(row.threadTs, row.channelId));
+        const state = this.threads.get(slackThreadKey(row.threadTs, row.channelId));
         if (
           state !== undefined &&
           (state.running || state.proc !== null || state.queue.length > 0)
@@ -278,7 +279,7 @@ export class SessionManager {
   }
 
   private enqueue(threadTs: string, channelId: string, item: QueueItem): void {
-    const key = threadKey(threadTs, channelId);
+    const key = slackThreadKey(threadTs, channelId);
     let state = this.threads.get(key);
     if (state === undefined) {
       state = {
@@ -576,8 +577,4 @@ export class SessionManager {
       this.logger.warn({ err: error, threadTs: state.threadTs }, 'process end failed');
     }
   }
-}
-
-function threadKey(threadTs: string, channelId: string): string {
-  return `${channelId}:${threadTs}`;
 }

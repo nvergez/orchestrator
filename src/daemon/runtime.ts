@@ -106,7 +106,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   // 🚦 gates post as their own thread messages (spec §8: anything requiring
   // the human is a new message, never an edit of the streaming voice).
   const gates = new GateKeeper({
-    allowedUserIds: config.slackAllowedUserIds ?? (config.slackAllowedUserId === undefined ? [] : [config.slackAllowedUserId]),
+    allowedUserIds: config.slackAllowedUserIds,
     post: (threadTs, text, channelId) => slack.post(threadTs, text, channelId),
     logger,
   });

@@ -95,7 +95,7 @@ The brief travels via **`dispatch --inject`** (never `--prompt` at create time �
 
 Decision [#9](https://github.com/nvergez/orchestrator/issues/9). Architecture: **the daemon listens, the session thinks.**
 
-- After a dispatch the session **ends its turn** and may doze; the **daemon** holds one child `orca orchestration check --wait --terminal <mailbox> --types worker_done,escalation,decision_gate` per thread with in-flight work (rolling windows). The mailbox is a lightweight terminal `slack-<thread_ts>`, lazily created at first dispatch, remembered in SQLite, passed as `--from` at dispatch.
+- After a dispatch the session **ends its turn** and may doze; the **daemon** holds one child `orca orchestration check --wait --terminal <mailbox> --types worker_done,escalation,decision_gate` per thread with in-flight work (rolling windows). The mailbox is a lightweight terminal `slack-<channel_id>-<thread_ts>`, lazily created at first dispatch, remembered in SQLite, passed as `--from` at dispatch.
 - An event **wakes the session exactly like a human message**. Wakes are uniform: human message, orchestration event, watchdog alert — three inputs, one pipe. At boot the daemon re-arms all watchers from SQLite.
 - **Relay up** (new message, never an edit): worktree name + issue link, the worker's question **verbatim** (blockquote, never paraphrased), numbered options if any, "reply in this thread". `escalation` = same, marked 🚨. Watchdog = same mold + last terminal output. One exception ([#46](https://github.com/nvergez/orchestrator/issues/46)): a worker re-asking the same question after an `ask` timeout **edits** the existing relay in place — one notification per logical question; the stale gate flips to `superseded`, forwarding to the re-ask.
 - **Route back down** — the LLM routes the human reply, anchored on the SQLite `pending_gates` registry:
@@ -130,7 +130,7 @@ Guiding principle: **"edit the status, post the event."** Anything requiring the
 - **Root reactions** = coarse state readable from the channel: 👀 in progress · ❓ blocked on the human · 🚨 attention · ✅ delivered · ❌ failed (stale one removed).
 - **One card per delegation**, posted at dispatch and edited at **milestones** only (worktree created, brief handed over, heartbeats, done) + a liveness line at most every 2 min — never a token stream. The conversational **voice** streams via post-then-edit (~1 edit/s, Tier-3 throttle).
 - **Done**: the card flips to ✅ and becomes the durable home for links (PR, issue, worktree path, duration) **and** a short summary goes out as a new message.
-- **Reference verbatims** (fixed by the mock): autonomy gate `🚦 <command> on <worktree> — go?`; worker gate = verbatim question + numbered options + "Reply in this thread"; queue `⏳ Queued (5 active sessions)…`; close 🔚 summary; cost `💸 This thread has cost $5.03…`; third party "v1: only <@U0EXAMPLE456> can drive me."; reboot `⚠️ Restarted — <repo>#<n> was in flight: <state>. Reply to resume supervision.`
+- **Reference verbatims** (fixed by the mock): autonomy gate `🚦 <command> on <worktree> — go?`; worker gate = verbatim question + numbered options + "Reply in this thread"; queue `⏳ Queued (5 active sessions)…`; close 🔚 summary; cost `💸 This thread has cost $5.03…`; third party "Only authorized operators can drive me."; reboot `⚠️ Restarted — <repo>#<n> was in flight: <state>. Reply to resume supervision.`
 - **No welcome message** — no per-thread pin, no channel pin/canvas.
 
 ## 9. Data model (SQLite)

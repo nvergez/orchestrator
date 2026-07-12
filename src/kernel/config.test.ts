@@ -67,7 +67,9 @@ describe('loadConfig', () => {
   });
 
   it('accepts the legacy singular Slack ID variables when plural variables are absent', () => {
-    const { SLACK_CHANNEL_IDS: _channels, SLACK_ALLOWED_USER_IDS: _users, ...base } = validEnv;
+    const base: Record<string, string> = { ...validEnv };
+    delete base.SLACK_CHANNEL_IDS;
+    delete base.SLACK_ALLOWED_USER_IDS;
     const config = loadConfig({
       ...base,
       SLACK_CHANNEL_ID: 'C0LEGACY',

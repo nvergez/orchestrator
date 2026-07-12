@@ -8,11 +8,8 @@ import { resolveDefaultDbPath } from './xdg.ts';
 export interface Config {
   slackBotToken: string;
   slackAppToken: string;
-  slackChannelIds?: string[];
-  slackAllowedUserIds?: string[];
-  /** Legacy programmatic shape accepted by buildRuntime tests/embedders. */
-  slackChannelId?: string;
-  slackAllowedUserId?: string;
+  slackChannelIds: string[];
+  slackAllowedUserIds: string[];
   /** Daemon auth from `claude setup-token` — subscription-billed (spec §10). */
   claudeCodeOauthToken: string;
   logLevel: string;
