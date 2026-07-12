@@ -227,7 +227,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       text: '🚦 `git push --force-with-lease` — go?',
     });
 
-    expect(runtime.gates.tryResolve(THREAD, USER, 'no, rebase first')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, USER, 'no, rebase first', CHANNEL)).toBe(true);
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
     expect((result as { message: string }).message).toContain('no, rebase first');
@@ -245,7 +245,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
-    expect(runtime.gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, USER, 'go', CHANNEL)).toBe(true);
     expect(await verdict).toEqual({ behavior: 'allow', updatedInput: input });
   });
 
@@ -283,7 +283,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, USER, 'no', CHANNEL);
     expect(await verdict).toMatchObject({ behavior: 'deny' });
   });
 
@@ -299,7 +299,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, USER, 'no', CHANNEL);
 
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
