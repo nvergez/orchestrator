@@ -131,17 +131,21 @@ export class BootReconciler {
         'Orca runtime unavailable — restart notices will say state unknown',
       );
     }
-    for (const { threadTs } of threads) {
+    for (const { threadTs, channelId } of threads) {
       try {
-        await this.reconcileThread(threadTs, observed);
+        await this.reconcileThread(threadTs, channelId, observed);
       } catch (error) {
         this.logger.error({ err: error, threadTs }, 'thread reconciliation failed');
       }
     }
   }
 
-  private async reconcileThread(threadTs: string, observed: Observations | undefined): Promise<void> {
-    const rows = this.store.listInFlightForThread(threadTs);
+  private async reconcileThread(
+    threadTs: string,
+    channelId: string,
+    observed: Observations | undefined,
+  ): Promise<void> {
+    const rows = this.store.listInFlightForThread(threadTs, channelId);
     if (rows.length === 0) return;
     const items =
       observed === undefined
@@ -152,7 +156,7 @@ export class BootReconciler {
               state: 'state unknown (Orca runtime unavailable)',
             }),
           )
-        : await this.classifyThread(threadTs, rows, observed);
+        : await this.classifyThread(threadTs, channelId, rows, observed);
 
     // Close what actually ended — ledger first (the truth), card second (the
     // cosmetics). Closed rows never arm a watcher, so no wake follows.
@@ -170,7 +174,7 @@ export class BootReconciler {
         await this.surface.cleanupDeliveredWorktree(item.row);
       }
     }
-    await this.surface.settleReconciled(threadTs, closed.map((item) => item.kind));
+    await this.surface.settleReconciled(channelId, threadTs, closed.map((item) => item.kind));
 
     // Idempotence: the fingerprint captures what stays open and how it
     // looked. A closure always posts (it is new truth, and the closed row
@@ -181,19 +185,22 @@ export class BootReconciler {
       .map((item) => `${item.row.dispatchId}=${item.kind}`)
       .sort()
       .join('|');
-    if (closed.length === 0 && this.store.getReconcileFingerprint(threadTs) === fingerprint) {
+    if (
+      closed.length === 0 &&
+      this.store.getReconcileFingerprint(threadTs, channelId) === fingerprint
+    ) {
       this.logger.info({ threadTs }, 'state unchanged since the last restart — no ⚠️ re-post');
       return;
     }
     const notice = restartNotice(items.map((item) => ({ ref: noticeRef(item.row), state: item.state })));
     try {
-      await this.surface.post(threadTs, notice);
+      await this.surface.post(channelId, threadTs, notice);
     } catch (error) {
       // Fingerprint deliberately not saved: the next restart tries again.
       this.logger.error({ err: error, threadTs }, 'restart ⚠️ post failed — will retry next boot');
       return;
     }
-    this.store.setReconcileFingerprint(threadTs, fingerprint);
+    this.store.setReconcileFingerprint(threadTs, channelId, fingerprint);
     this.logger.info(
       { threadTs, delegations: items.length, closed: closed.length },
       'restart ⚠️ posted',
@@ -204,6 +211,7 @@ export class BootReconciler {
 
   private async classifyThread(
     threadTs: string,
+    channelId: string,
     rows: DelegationRow[],
     observed: Observations,
   ): Promise<Reconciled[]> {
@@ -212,8 +220,8 @@ export class BootReconciler {
     // covers payloads naming no dispatch at all — a report whose ids point
     // elsewhere never closes anything here. First report per delegation wins.
     const reportFor = new Map<string, OrchestrationMessage>();
-    for (const message of await this.peekWorkerDones(threadTs)) {
-      const row = this.store.resolveWorkerEvent(threadTs, {
+    for (const message of await this.peekWorkerDones(threadTs, channelId)) {
+      const row = this.store.resolveWorkerEvent(threadTs, channelId, {
         dispatchId: message.payload.dispatchId,
         taskId: message.payload.taskId,
       });
@@ -311,8 +319,11 @@ export class BootReconciler {
    * a watcher that died before closing the row). Filtered to worker_done
    * client-side belt-and-braces.
    */
-  private async peekWorkerDones(threadTs: string): Promise<OrchestrationMessage[]> {
-    const mailbox = this.store.getMailbox(threadTs);
+  private async peekWorkerDones(
+    threadTs: string,
+    channelId: string,
+  ): Promise<OrchestrationMessage[]> {
+    const mailbox = this.store.getMailbox(threadTs, channelId);
     if (mailbox === undefined) return [];
     try {
       const { stdout } = await this.run('orca', [

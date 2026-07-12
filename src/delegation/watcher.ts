@@ -89,8 +89,9 @@ export class GateWatcher {
   private readonly runCheck: CommandRunner;
   private readonly run: CommandRunner;
   private readonly now: () => Date;
-  /** One live loop per thread, keyed by its own token so a crash-path
-   * cleanup can never clobber a successor loop armed in the meantime. */
+  /** One live loop per thread (keyed `channelId:threadTs`, issue #93), each
+   * under its own token so a crash-path cleanup can never clobber a
+   * successor loop armed in the meantime. */
   private readonly loops = new Map<string, object>();
 
   constructor(options: GateWatcherOptions) {
@@ -107,11 +108,12 @@ export class GateWatcher {
   }
 
   /** Starts the thread's watch loop; a no-op while one is already running. */
-  arm(threadTs: string): void {
-    if (this.loops.has(threadTs)) return;
+  arm(threadTs: string, channelId: string): void {
+    const key = loopKey(threadTs, channelId);
+    if (this.loops.has(key)) return;
     const token = {};
-    this.loops.set(threadTs, token);
-    void this.watch(threadTs)
+    this.loops.set(key, token);
+    void this.watch(threadTs, channelId)
       .catch((error: unknown) => {
         this.logger.error({ err: error, threadTs }, 'gate watcher loop crashed');
       })
@@ -119,39 +121,40 @@ export class GateWatcher {
         // Clean exits already un-armed themselves, synchronously with their
         // stop decision — this only mops up after a crash, and never a
         // successor loop that armed while this callback sat in the queue.
-        if (this.loops.get(threadTs) === token) this.loops.delete(threadTs);
+        if (this.loops.get(key) === token) this.loops.delete(key);
       });
   }
 
-  isArmed(threadTs: string): boolean {
-    return this.loops.has(threadTs);
+  isArmed(threadTs: string, channelId: string): boolean {
+    return this.loops.has(loopKey(threadTs, channelId));
   }
 
   /** Boot re-arm (spec §6): one watcher per thread the ledger shows in flight. */
   rearmFromStore(): number {
     const threads = this.store.threadsWithInFlight();
-    for (const { threadTs } of threads) this.arm(threadTs);
+    for (const { threadTs, channelId } of threads) this.arm(threadTs, channelId);
     return threads.length;
   }
 
   // ── the rolling-window loop ────────────────────────────────────────────────
 
-  private async watch(threadTs: string): Promise<void> {
-    this.logger.info({ threadTs }, 'gate watcher armed');
+  private async watch(threadTs: string, channelId: string): Promise<void> {
+    const key = loopKey(threadTs, channelId);
+    this.logger.info({ threadTs, channelId }, 'gate watcher armed');
     while (true) {
-      if (this.store.listInFlightForThread(threadTs).length === 0) {
+      if (this.store.listInFlightForThread(threadTs, channelId).length === 0) {
         // Un-arm in the same synchronous block as the stop decision: a
         // dispatch interleaving after this line finds the thread un-armed
         // and starts a fresh loop instead of no-opping into a lost watcher.
-        this.loops.delete(threadTs);
+        this.loops.delete(key);
         this.logger.info({ threadTs }, 'no in-flight delegations left — gate watcher stops');
         return;
       }
-      const mailbox = this.store.getMailbox(threadTs);
+      const mailbox = this.store.getMailbox(threadTs, channelId);
       if (mailbox === undefined) {
         // Unreachable on the normal path — a dispatch cannot happen without
         // the mailbox — but a hand-edited ledger must not spin this loop.
-        this.loops.delete(threadTs);
+        this.loops.delete(key);
         this.logger.warn(
           { threadTs },
           'in-flight delegations but no mailbox terminal — gate watcher stops',
@@ -172,7 +175,7 @@ export class GateWatcher {
       // An empty result is the window's timeout — a checkpoint, not a
       // failure (issue #4): fall through and roll the next window.
       for (const message of messages) {
-        await this.handleMessage(threadTs, message);
+        await this.handleMessage(threadTs, channelId, message);
       }
     }
   }
@@ -204,17 +207,21 @@ export class GateWatcher {
 
   // ── event handling ─────────────────────────────────────────────────────────
 
-  private async handleMessage(threadTs: string, message: OrchestrationMessage): Promise<void> {
+  private async handleMessage(
+    threadTs: string,
+    channelId: string,
+    message: OrchestrationMessage,
+  ): Promise<void> {
     this.logger.info(
       { threadTs, msgId: message.id, type: message.type, subject: message.subject },
       'orchestration event received',
     );
     if (message.type === 'worker_done') {
-      await this.handleWorkerDone(threadTs, message);
+      await this.handleWorkerDone(threadTs, channelId, message);
     } else if (message.type === 'decision_gate' || message.type === 'escalation') {
-      await this.handleGateOrEscalation(threadTs, message.type, message);
+      await this.handleGateOrEscalation(threadTs, channelId, message.type, message);
     } else if (message.type === 'heartbeat' || message.type === 'status') {
-      await this.handleWorkerLiveness(threadTs, message);
+      await this.handleWorkerLiveness(threadTs, channelId, message);
     } else {
       this.logger.warn({ threadTs, type: message.type }, 'unwatched event type slipped through');
     }
@@ -231,9 +238,10 @@ export class GateWatcher {
    */
   private async handleWorkerLiveness(
     threadTs: string,
+    channelId: string,
     message: OrchestrationMessage,
   ): Promise<void> {
-    const row = this.findRow(threadTs, message);
+    const row = this.findRow(threadTs, channelId, message);
     if (row === undefined) {
       this.logger.debug(
         { threadTs, msgId: message.id, payload: message.payload },
@@ -247,7 +255,7 @@ export class GateWatcher {
         { threadTs: row.threadTs, dispatchId: row.dispatchId },
         'pending watchdog alert settled — the worker spoke on the bus',
       );
-      await this.surface.settleRoot(row.threadTs);
+      await this.surface.settleRoot(row.channelId, row.threadTs);
     }
   }
 
@@ -258,8 +266,12 @@ export class GateWatcher {
    * worker_done — the preamble fixes the subject shape ("Failed: <reason>"),
    * which is all the signal there is.
    */
-  private async handleWorkerDone(threadTs: string, message: OrchestrationMessage): Promise<void> {
-    const row = this.findRow(threadTs, message);
+  private async handleWorkerDone(
+    threadTs: string,
+    channelId: string,
+    message: OrchestrationMessage,
+  ): Promise<void> {
+    const row = this.findRow(threadTs, channelId, message);
     if (row === undefined) {
       // Never lose a completion: unmatched still lands in the thread, raw.
       this.logger.warn(
@@ -268,6 +280,7 @@ export class GateWatcher {
       );
       await this.postSafe(
         threadTs,
+        channelId,
         `⚠️ A worker reported done but matches no delegation I know:\n> ${message.subject}\n> ${message.body}`,
       );
       return;
@@ -289,7 +302,7 @@ export class GateWatcher {
     // Card first (the summary's "details in the card ⤴" must already be
     // true), then the root reaction, then the wake.
     await this.finishCard(row, message, failed);
-    await this.surface.settleWorkerDone(row.threadTs, failed);
+    await this.surface.settleWorkerDone(row.channelId, row.threadTs, failed);
     const outcome = this.wake(
       row.threadTs,
       row.channelId,
@@ -302,7 +315,11 @@ export class GateWatcher {
         { threadTs: row.threadTs, dispatchId: row.dispatchId },
         'no session took the worker_done wake — posting the fallback summary',
       );
-      await this.postSafe(row.threadTs, workerDoneFallbackLine(message.subject, failed));
+      await this.postSafe(
+        row.threadTs,
+        row.channelId,
+        workerDoneFallbackLine(message.subject, failed),
+      );
     }
     // Janitorial last — the human-facing card, reaction and wake never wait
     // on it. A failure keeps its worktree as the debugging evidence.
@@ -327,6 +344,7 @@ export class GateWatcher {
    */
   private async handleGateOrEscalation(
     threadTs: string,
+    channelId: string,
     kind: 'decision_gate' | 'escalation',
     message: OrchestrationMessage,
   ): Promise<void> {
@@ -337,7 +355,7 @@ export class GateWatcher {
       );
       return;
     }
-    const row = this.findRow(threadTs, message);
+    const row = this.findRow(threadTs, channelId, message);
     // The ask itself is bus liveness (issue #48): stamp the clock, and
     // settle any pending ⚠️ — the gate relayed below owns the thread's
     // attention from here (the settle at the end recomputes the root).
@@ -347,6 +365,7 @@ export class GateWatcher {
     }
     // The row's thread owns the delegation — the human answers there.
     const gateThread = row?.threadTs ?? threadTs;
+    const gateChannel = row?.channelId ?? channelId;
     // The payload's question is canonical for an `ask`; body/subject cover
     // escalations and any bus producer that skipped the payload.
     const question = firstNonEmpty(message.payload.question, message.body, message.subject);
@@ -358,7 +377,7 @@ export class GateWatcher {
     // ask, a pre-#46 row) must not shield a duplicate from the dedup. The
     // self-exclusion is belt-and-braces: the replay guard above already
     // filtered this msg_id, and a row must never forward to itself.
-    const reasked = this.store.listPendingGates(gateThread).find(
+    const reasked = this.store.listPendingGates(gateThread, gateChannel).find(
       (gate) =>
         gate.msgId !== message.id &&
         gate.kind === kind &&
@@ -386,7 +405,7 @@ export class GateWatcher {
       // verbatim wording and keep anchoring the registry on that message.
       relayTs = reasked.relayTs;
       try {
-        await this.surface.update(reasked.relayTs, text);
+        await this.surface.update(gateChannel, reasked.relayTs, text);
       } catch (error) {
         this.logger.warn(
           { err: error, threadTs: gateThread, msgId: message.id, relayTs },
@@ -395,7 +414,7 @@ export class GateWatcher {
       }
     } else {
       try {
-        relayTs = await this.surface.post(gateThread, text);
+        relayTs = await this.surface.post(gateChannel, gateThread, text);
       } catch (error) {
         this.logger.error(
           { err: error, threadTs: gateThread, msgId: message.id, kind, question },
@@ -406,6 +425,7 @@ export class GateWatcher {
     this.store.recordGate({
       msgId: message.id,
       threadTs: gateThread,
+      channelId: gateChannel,
       taskId,
       dispatchId: message.payload.dispatchId ?? row?.dispatchId ?? null,
       workerHandle,
@@ -427,7 +447,7 @@ export class GateWatcher {
     // A pending escalation or stall alert outranks a plain question on the
     // root (spec §8): a ❓ arriving while a 🚨 waits must not soften the
     // coarse state. The just-recorded gate is part of the settled set.
-    await this.surface.settleRoot(gateThread);
+    await this.surface.settleRoot(gateChannel, gateThread);
   }
 
   /**
@@ -436,13 +456,17 @@ export class GateWatcher {
    * issue #20/#21/#25); this only adds the arrival log: a row living in
    * another thread is handled in the ROW's thread, not the mailbox's.
    */
-  private findRow(threadTs: string, message: OrchestrationMessage): DelegationRow | undefined {
-    const row = this.store.resolveWorkerEvent(threadTs, {
+  private findRow(
+    threadTs: string,
+    channelId: string,
+    message: OrchestrationMessage,
+  ): DelegationRow | undefined {
+    const row = this.store.resolveWorkerEvent(threadTs, channelId, {
       dispatchId: message.payload.dispatchId,
       taskId: message.payload.taskId,
       workerHandle: message.fromHandle,
     });
-    if (row !== undefined && row.threadTs !== threadTs) {
+    if (row !== undefined && (row.threadTs !== threadTs || row.channelId !== channelId)) {
       this.logger.warn(
         { threadTs, rowThreadTs: row.threadTs, dispatchId: row.dispatchId },
         'event arrived on another thread’s mailbox — handling it in the row’s thread',
@@ -465,15 +489,20 @@ export class GateWatcher {
     });
   }
 
-  private async postSafe(threadTs: string, text: string): Promise<boolean> {
+  private async postSafe(threadTs: string, channelId: string, text: string): Promise<boolean> {
     try {
-      await this.surface.post(threadTs, text);
+      await this.surface.post(channelId, threadTs, text);
       return true;
     } catch (error) {
       this.logger.warn({ err: error, threadTs }, 'watcher thread post failed');
       return false;
     }
   }
+}
+
+/** The (channel, thread) pair flattened for the loop map (issue #93). */
+function loopKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
 }
 
 // ── wake texts — what the daemon feeds the session's input pipe ─────────────

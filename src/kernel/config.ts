@@ -8,8 +8,12 @@ import { resolveDefaultDbPath } from './xdg.ts';
 export interface Config {
   slackBotToken: string;
   slackAppToken: string;
-  slackChannelId: string;
-  slackAllowedUserId: string;
+  /** The channels the daemon serves (issue #93) — `SLACK_CHANNEL_IDS` CSV,
+   * or the legacy single-channel `SLACK_CHANNEL_ID`. */
+  slackChannelIds: string[];
+  /** The authorized humans (issue #93) — `SLACK_ALLOWED_USER_IDS` CSV, or
+   * the legacy single-user `SLACK_ALLOWED_USER_ID`. */
+  slackAllowedUserIds: string[];
   /** Daemon auth from `claude setup-token` — subscription-billed (spec §10). */
   claudeCodeOauthToken: string;
   logLevel: string;
@@ -107,6 +111,34 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     return value;
   };
 
+  /**
+   * A CSV id list (issue #93): the plural key wins when set; the legacy
+   * singular key stays accepted so a pre-#93 install boots unchanged after
+   * an update. Every entry is prefix-checked exactly as the singular var
+   * was, and duplicates are rejected — a repeated id is a typo, not intent.
+   */
+  const idList = (pluralKey: string, singularKey: string, prefix: string): string[] => {
+    const source = env[pluralKey] !== undefined ? pluralKey : singularKey;
+    const raw = env[pluralKey] ?? env[singularKey];
+    const ids = (raw ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value !== '');
+    if (ids.length === 0) {
+      problems.push(`${pluralKey} is missing (or the single-value ${singularKey})`);
+      return [];
+    }
+    if (ids.some((id) => !id.startsWith(prefix))) {
+      problems.push(`every ${source} entry must start with "${prefix}"`);
+      return [];
+    }
+    if (new Set(ids).size !== ids.length) {
+      problems.push(`${source} must not repeat ids`);
+      return [];
+    }
+    return ids;
+  };
+
   const positiveNumber = (key: string, fallback: number, unit: string): number => {
     const value = Number(env[key] ?? fallback);
     if (!Number.isFinite(value) || value <= 0) {
@@ -183,8 +215,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const config: Config = {
     slackBotToken: required('SLACK_BOT_TOKEN', 'xoxb-'),
     slackAppToken: required('SLACK_APP_TOKEN', 'xapp-'),
-    slackChannelId: required('SLACK_CHANNEL_ID', 'C'),
-    slackAllowedUserId: required('SLACK_ALLOWED_USER_ID', 'U'),
+    slackChannelIds: idList('SLACK_CHANNEL_IDS', 'SLACK_CHANNEL_ID', 'C'),
+    slackAllowedUserIds: idList('SLACK_ALLOWED_USER_IDS', 'SLACK_ALLOWED_USER_ID', 'U'),
     claudeCodeOauthToken: required('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-'),
     logLevel: env.LOG_LEVEL ?? 'info',
     dbPath: env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(env),

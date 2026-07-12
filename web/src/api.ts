@@ -7,6 +7,7 @@
 export interface DelegationView {
   dispatchId: string;
   threadTs: string;
+  channelId: string;
   repo: string | null;
   issueNumber: number | null;
   agent: string | null;
@@ -22,6 +23,7 @@ export interface DelegationView {
 export interface SessionCardView {
   threadTs: string;
   channelId: string | null;
+  rootUser: string | null;
   status: 'open' | 'closed' | 'unknown';
   createdAt: string | null;
   lastActivityAt: string | null;

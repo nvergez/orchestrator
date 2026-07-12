@@ -114,7 +114,11 @@ export default function App() {
                 </p>
               ) : (
                 data.sessions.map((session) => (
-                  <SessionCard key={session.threadTs} session={session} asOf={data.asOf} />
+                  <SessionCard
+                    key={`${session.channelId ?? ''}:${session.threadTs}`}
+                    session={session}
+                    asOf={data.asOf}
+                  />
                 ))
               )}
             </section>

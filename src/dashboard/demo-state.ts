@@ -90,6 +90,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
   delegations.recordStall({
     dispatchId: 'ctx_fail',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_fail',
     worktreeName: 'webapp-84-dashboard',
     lastOutput: 'error: worktree dirty',
@@ -124,6 +125,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
   delegations.recordGate({
     msgId: 'msg_answered',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: null,
     dispatchId: null,
     workerHandle: 'term_live',
@@ -139,6 +141,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
   delegations.recordGate({
     msgId: 'msg_gate',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_live',
     dispatchId: 'ctx_live',
     workerHandle: 'term_live',
@@ -152,6 +155,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
   delegations.recordGate({
     msgId: 'msg_escalation',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_live',
     dispatchId: 'ctx_live',
     workerHandle: 'term_live',
@@ -167,6 +171,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
   delegations.recordStall({
     dispatchId: 'ctx_live',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_live',
     worktreeName: 'webapp-84-dashboard',
     lastOutput: '… waiting at a permissions prompt',

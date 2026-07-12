@@ -51,13 +51,13 @@ export interface GateRelayOptions {
 
 /** The slice canUseTool consults before a command runs (issue #21). */
 export interface RelayPolicy {
-  sanctionsSend(threadTs: string, command: string): boolean;
-  prepare(threadTs: string, command: string): PrepareVerdict;
+  sanctionsSend(threadTs: string, channelId: string, command: string): boolean;
+  prepare(threadTs: string, channelId: string, command: string): PrepareVerdict;
 }
 
 /** The slice the PostToolUse hooks feed after a command ran. */
 export interface RelayObserver {
-  observe(threadTs: string, command: string, stdout: string): Promise<void>;
+  observe(threadTs: string, channelId: string, command: string, stdout: string): Promise<void>;
 }
 
 /** What a session process holds — both seams together. */
@@ -68,12 +68,13 @@ export class GateRelay implements SessionRelay {
   private readonly surface: ThreadSurface;
   private readonly logger: Logger;
   /**
-   * The last reply attempt per thread — how the follow-up `terminal send`
-   * is attributed to a gate. A FAILED reply's send is the fallback and
-   * answers exactly that gate; a send after an answered-gate denial is a
-   * late correction and flips nothing. Runtime-only state: the send follows
-   * its reply within the same turn, and losing it merely degrades the
-   * attribution to the unambiguous-single-pending heuristic below.
+   * The last reply attempt per thread (keyed `channelId:threadTs`, issue
+   * #93) — how the follow-up `terminal send` is attributed to a gate. A
+   * FAILED reply's send is the fallback and answers exactly that gate; a
+   * send after an answered-gate denial is a late correction and flips
+   * nothing. Runtime-only state: the send follows its reply within the same
+   * turn, and losing it merely degrades the attribution to the
+   * unambiguous-single-pending heuristic below.
    */
   private readonly lastReply = new Map<string, { msgId: string; outcome: 'failed' | 'correction' }>();
 
@@ -92,8 +93,8 @@ export class GateRelay implements SessionRelay {
    * flattens it into the LLM's context lines. A thread that never relayed
    * anything passes through untouched.
    */
-  decorateReply(threadTs: string, text: string): string {
-    const { gates, stalls } = this.store.turnContextFor(threadTs);
+  decorateReply(threadTs: string, channelId: string, text: string): string {
+    const { gates, stalls } = this.store.turnContextFor(threadTs, channelId);
     if (gates.length === 0 && stalls.length === 0) return text;
     return [
       '[relayed worker gates & watchdog stall alerts — daemon context, not part of the human message]',
@@ -117,7 +118,7 @@ export class GateRelay implements SessionRelay {
    * keeps its CONFIRM tier: a worker whose gates and stalls are long
    * answered must not stay a silent AUTO target forever.
    */
-  sanctionsSend(threadTs: string, command: string): boolean {
+  sanctionsSend(threadTs: string, channelId: string, command: string): boolean {
     const segments = commandSegments(command);
     if (segments.length !== 1) return false;
     const tokens = segments[0] as string[];
@@ -125,25 +126,29 @@ export class GateRelay implements SessionRelay {
     if (!hasFlag(tokens, '--json')) return false;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return false;
-    const last = this.lastReply.get(threadTs);
+    const last = this.lastReply.get(threadKey(threadTs, channelId));
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
       return true;
     }
     return (
-      this.store.listPendingGates(threadTs).some((gate) => gate.workerHandle === handle) ||
+      this.store
+        .listPendingGates(threadTs, channelId)
+        .some((gate) => gate.workerHandle === handle) ||
       // The stall nudge must land as an ANSWER: keystrokes plus enter (spec
       // §6) — a send without --enter would leave the prompt sitting, so it
       // keeps its 🚦 instead of riding the stall's sanction.
       (hasFlag(tokens, '--enter') &&
-        this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle))
+        this.store
+          .listPendingStalls(threadTs, channelId)
+          .some((stall) => stall.workerHandle === handle))
     );
   }
 
   /** Registry enforcement on `orchestration reply` — non-reply commands pass. */
-  prepare(threadTs: string, command: string): PrepareVerdict {
+  prepare(threadTs: string, channelId: string, command: string): PrepareVerdict {
     const segments = commandSegments(command);
     const replies = segments.filter((tokens) => isOrcaCommand(tokens, 'orchestration', 'reply'));
-    if (replies.length === 0) return this.prepareSend(threadTs, command, segments);
+    if (replies.length === 0) return this.prepareSend(threadTs, channelId, command, segments);
     // One reply per command, alone: the observer maps one --json envelope to
     // one gate flip, and the fidelity rewrite must know what it rebuilds.
     if (segments.length > 1) {
@@ -158,9 +163,15 @@ export class GateRelay implements SessionRelay {
       return deny('the reply must target a gate: --id <msg_id> from the relayed-gates context');
     }
     let gate = this.store.getGate(msgId);
-    if (gate === undefined || gate.threadTs !== threadTs) {
+    if (
+      gate === undefined ||
+      gate.threadTs !== threadTs ||
+      (gate.channelId !== null && gate.channelId !== channelId)
+    ) {
       // Cross-thread routing is impossible by construction (issue #9): a
-      // reply in this thread can only reach this thread's own gates.
+      // reply in this thread can only reach this thread's own gates. A
+      // NULL-channel gate is a pre-#93 row and belongs to whichever channel
+      // its thread now speaks from.
       return deny(
         `\`${msgId}\` is not a gate relayed in this thread — replies only route back ` +
           "to this thread's own relayed gates (spec §6)",
@@ -196,7 +207,10 @@ export class GateRelay implements SessionRelay {
     if (gate.status === 'answered') {
       // Remember the denial: it sanctions the correction send that follows,
       // and tells observeSend that send answers nothing new.
-      this.lastReply.set(threadTs, { msgId: gate.msgId, outcome: 'correction' });
+      this.lastReply.set(threadKey(threadTs, channelId), {
+        msgId: gate.msgId,
+        outcome: 'correction',
+      });
       const handle = gate.workerHandle ?? '<worker handle>';
       return deny(
         'that gate was already answered — an answered gate never re-routes (spec §6). ' +
@@ -241,7 +255,12 @@ export class GateRelay implements SessionRelay {
    * and every send the registry cannot attribute to an options-carrying
    * gate — passes through untouched.
    */
-  private prepareSend(threadTs: string, command: string, segments: string[][]): PrepareVerdict {
+  private prepareSend(
+    threadTs: string,
+    channelId: string,
+    command: string,
+    segments: string[][],
+  ): PrepareVerdict {
     const untouched: PrepareVerdict = { action: 'proceed', command };
     // Only a lone send can be rebuilt from tokens — a chained one keeps its
     // CONFIRM tier anyway (sanctionsSend refuses multi-segment commands).
@@ -251,7 +270,7 @@ export class GateRelay implements SessionRelay {
     const handle = flagValue(tokens, '--terminal');
     const text = flagValue(tokens, '--text');
     if (handle === undefined || text === undefined) return untouched;
-    const gate = this.sendGate(threadTs, handle);
+    const gate = this.sendGate(threadTs, channelId, handle);
     if (gate === undefined) return untouched;
     const choice = optionChoice(gate, text);
     if (choice === null) return untouched;
@@ -274,8 +293,12 @@ export class GateRelay implements SessionRelay {
    * whatever prompt the terminal shows (issue #22) — only the explicit
    * last-reply attribution outranks a stall.
    */
-  private sendGate(threadTs: string, handle: string): PendingGateRow | undefined {
-    const last = this.lastReply.get(threadTs);
+  private sendGate(
+    threadTs: string,
+    channelId: string,
+    handle: string,
+  ): PendingGateRow | undefined {
+    const last = this.lastReply.get(threadKey(threadTs, channelId));
     if (last !== undefined) {
       const named = this.store.getGate(last.msgId);
       if (named !== undefined && named.workerHandle === handle) {
@@ -286,11 +309,15 @@ export class GateRelay implements SessionRelay {
         return live?.status === 'closed' ? undefined : live;
       }
     }
-    if (this.store.listPendingStalls(threadTs).some((stall) => stall.workerHandle === handle)) {
+    if (
+      this.store
+        .listPendingStalls(threadTs, channelId)
+        .some((stall) => stall.workerHandle === handle)
+    ) {
       return undefined;
     }
     const pending = this.store
-      .listPendingGates(threadTs)
+      .listPendingGates(threadTs, channelId)
       .filter((gate) => gate.workerHandle === handle);
     return pending.length === 1 ? pending[0] : undefined;
   }
@@ -298,13 +325,13 @@ export class GateRelay implements SessionRelay {
   // ── observe: the PostToolUse seam ────────────────────────────────────────
 
   /** Reads a finished command's output. Never throws — hooks must not crash a turn. */
-  async observe(threadTs: string, command: string, stdout: string): Promise<void> {
+  async observe(threadTs: string, channelId: string, command: string, stdout: string): Promise<void> {
     try {
       for (const tokens of commandSegments(command)) {
         if (isOrcaCommand(tokens, 'orchestration', 'reply')) {
-          await this.observeReply(threadTs, tokens, stdout);
+          await this.observeReply(threadTs, channelId, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'terminal', 'send')) {
-          await this.observeSend(threadTs, tokens, stdout);
+          await this.observeSend(threadTs, channelId, tokens, stdout);
         }
       }
     } catch (error) {
@@ -313,25 +340,32 @@ export class GateRelay implements SessionRelay {
   }
 
   /** A reply that reached the bus answers its gate — pending → answered. */
-  private async observeReply(threadTs: string, tokens: string[], stdout: string): Promise<void> {
+  private async observeReply(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+    stdout: string,
+  ): Promise<void> {
     const msgId = flagValue(tokens, '--id');
     if (msgId === undefined) return;
     if (parseOrcaEnvelope(stdout) === null) {
       // The reply failed (the ask likely hit its timeout): the gate stays
       // pending, and the fallback send that follows answers THIS gate.
       if (this.store.getGate(msgId)?.status === 'pending') {
-        this.lastReply.set(threadTs, { msgId, outcome: 'failed' });
+        this.lastReply.set(threadKey(threadTs, channelId), { msgId, outcome: 'failed' });
       }
       return;
     }
     const gate = this.store.getGate(msgId);
     if (gate === undefined || !this.store.answerGate(msgId)) return;
-    this.lastReply.delete(threadTs);
+    this.lastReply.delete(threadKey(threadTs, channelId));
     this.logger.info(
       { threadTs: gate.threadTs, msgId, workerHandle: gate.workerHandle },
       'gate answered — human reply relayed down',
     );
-    await this.surface.settleRoot(gate.threadTs);
+    // prepare pinned the gate to this thread, so the context channel is the
+    // gate's — the one honest channel even for a pre-#93 NULL-channel row.
+    await this.surface.settleRoot(channelId, gate.threadTs);
   }
 
   /**
@@ -342,7 +376,12 @@ export class GateRelay implements SessionRelay {
    * send answered could mark the wrong question answered and get its real
    * answer refused later.
    */
-  private async observeSend(threadTs: string, tokens: string[], stdout: string): Promise<void> {
+  private async observeSend(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+    stdout: string,
+  ): Promise<void> {
     if (parseOrcaEnvelope(stdout) === null) return;
     const handle = flagValue(tokens, '--terminal');
     if (handle === undefined) return;
@@ -352,7 +391,7 @@ export class GateRelay implements SessionRelay {
     // sitting, so the alert stays pending.
     if (hasFlag(tokens, '--enter')) {
       let nudged = false;
-      for (const stall of this.store.listPendingStalls(threadTs)) {
+      for (const stall of this.store.listPendingStalls(threadTs, channelId)) {
         if (stall.workerHandle !== handle || !this.store.answerStall(stall.dispatchId)) continue;
         nudged = true;
         this.logger.info(
@@ -360,11 +399,11 @@ export class GateRelay implements SessionRelay {
           'stall alert answered — the nudge reached the worker terminal',
         );
       }
-      if (nudged) await this.surface.settleRoot(threadTs);
+      if (nudged) await this.surface.settleRoot(channelId, threadTs);
     }
-    const last = this.lastReply.get(threadTs);
+    const last = this.lastReply.get(threadKey(threadTs, channelId));
     if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
-      this.lastReply.delete(threadTs);
+      this.lastReply.delete(threadKey(threadTs, channelId));
       if (last.outcome === 'correction') {
         this.logger.info(
           { threadTs, msgId: last.msgId, workerHandle: handle },
@@ -372,11 +411,11 @@ export class GateRelay implements SessionRelay {
         );
         return;
       }
-      await this.answerBySend(threadTs, last.msgId, handle);
+      await this.answerBySend(threadTs, channelId, last.msgId, handle);
       return;
     }
     const pending = this.store
-      .listPendingGates(threadTs)
+      .listPendingGates(threadTs, channelId)
       .filter((gate) => gate.workerHandle === handle);
     if (pending.length !== 1) {
       if (pending.length > 1) {
@@ -387,17 +426,27 @@ export class GateRelay implements SessionRelay {
       }
       return;
     }
-    await this.answerBySend(threadTs, (pending[0] as PendingGateRow).msgId, handle);
+    await this.answerBySend(threadTs, channelId, (pending[0] as PendingGateRow).msgId, handle);
   }
 
-  private async answerBySend(threadTs: string, msgId: string, handle: string): Promise<void> {
+  private async answerBySend(
+    threadTs: string,
+    channelId: string,
+    msgId: string,
+    handle: string,
+  ): Promise<void> {
     if (!this.store.answerGate(msgId)) return;
     this.logger.info(
       { threadTs, msgId, workerHandle: handle },
       'gate answered via the terminal send fallback',
     );
-    await this.surface.settleRoot(threadTs);
+    await this.surface.settleRoot(channelId, threadTs);
   }
+}
+
+/** The (channel, thread) pair flattened for the lastReply map (issue #93). */
+function threadKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
 }
 
 const deny = (message: string): PrepareVerdict => ({ action: 'deny', message });

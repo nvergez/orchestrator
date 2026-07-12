@@ -36,6 +36,10 @@ export interface PendingGateRow {
   /** The bus message id (`msg_…`) — what `orchestration reply --id` targets. */
   msgId: string;
   threadTs: string;
+  /** The thread's channel (issue #93). Null only on rows written before the
+   * multi-channel migration — necessarily single-channel-era rows, which
+   * every thread-scoped query therefore matches under ANY channel. */
+  channelId: string | null;
   taskId: string | null;
   /** The owning delegation (`ctx_…`), when the relay could resolve one —
    * what invalidate-on-close matches first (issue #46). */
@@ -66,6 +70,9 @@ export interface StallAlertRow {
   /** The delegation the stall belongs to — also the row key. */
   dispatchId: string;
   threadTs: string;
+  /** The thread's channel (issue #93); null only on pre-migration rows,
+   * matched under any channel like legacy gates. */
+  channelId: string | null;
   /** The stalled worker's terminal — where the reply lands as keystrokes. */
   workerHandle: string | null;
   worktreeName: string | null;
@@ -132,6 +139,7 @@ export interface TurnContextStall {
 const PENDING_GATES_COLUMNS = `(
         msg_id        TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
+        channel_id    TEXT,
         task_id       TEXT,
         dispatch_id   TEXT,
         worker_handle TEXT,
@@ -146,6 +154,30 @@ const PENDING_GATES_COLUMNS = `(
         superseded_by TEXT,
         relayed_at    TEXT NOT NULL,
         answered_at   TEXT
+      ) STRICT`;
+
+/**
+ * The mailboxes columns — shared by the fresh CREATE and the issue #93
+ * re-key rebuild (thread_ts alone → the pair), so the two shapes never drift.
+ */
+const MAILBOXES_COLUMNS = `(
+        thread_ts  TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        handle     TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_ts, channel_id)
+      ) STRICT`;
+
+/**
+ * The reconciliations columns — shared by the fresh CREATE and the issue
+ * #93 re-key rebuild for the same no-drift reason.
+ */
+const RECONCILIATIONS_COLUMNS = `(
+        thread_ts   TEXT NOT NULL,
+        channel_id  TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        posted_at   TEXT NOT NULL,
+        PRIMARY KEY (thread_ts, channel_id)
       ) STRICT`;
 
 /**
@@ -165,10 +197,12 @@ const PENDING_GATES_COLUMNS = `(
  * (`liveGateFor`), and what a session's turn context must list
  * (`turnContextFor`).
  *
- * Unlike `sessions`, the tables key on `thread_ts` alone — deliberate: the
- * daemon serves the single pinned channel (spec §2), and the coordinator
- * side only ever sees a thread ts. `channel_id` is stored so the rows stay
- * self-describing, not to disambiguate.
+ * Like `sessions`, every thread-scoped table and query keys on the
+ * `(thread_ts, channel_id)` pair (issue #93): the daemon serves several
+ * channels, and a thread ts is only unique within its channel. Gate and
+ * stall rows written before the multi-channel migration carry a NULL
+ * channel — necessarily single-channel-era rows — so thread-scoped queries
+ * match them under any channel rather than wedging a legacy question.
  */
 export class DelegationStore {
   private readonly db: DatabaseSync;
@@ -204,21 +238,13 @@ export class DelegationStore {
         last_bus_at   TEXT,
         closed_at     TEXT
       ) STRICT;
-      CREATE TABLE IF NOT EXISTS mailboxes (
-        thread_ts  TEXT PRIMARY KEY,
-        channel_id TEXT NOT NULL,
-        handle     TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS reconciliations (
-        thread_ts   TEXT PRIMARY KEY,
-        fingerprint TEXT NOT NULL,
-        posted_at   TEXT NOT NULL
-      ) STRICT;
+      CREATE TABLE IF NOT EXISTS mailboxes ${MAILBOXES_COLUMNS};
+      CREATE TABLE IF NOT EXISTS reconciliations ${RECONCILIATIONS_COLUMNS};
       CREATE TABLE IF NOT EXISTS pending_gates ${PENDING_GATES_COLUMNS};
       CREATE TABLE IF NOT EXISTS stall_alerts (
         dispatch_id   TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
+        channel_id    TEXT,
         worker_handle TEXT,
         worktree_name TEXT,
         last_output   TEXT NOT NULL,
@@ -232,6 +258,9 @@ export class DelegationStore {
     `);
     this.migratePendingGates();
     this.migrateDelegations();
+    this.migrateStallAlerts();
+    this.migrateMailboxes();
+    this.migrateReconciliations();
   }
 
   /**
@@ -248,30 +277,105 @@ export class DelegationStore {
   }
 
   /**
+   * Adds the issue #93 `channel_id` column to a pre-#93 stall_alerts table.
+   * A plain nullable add — existing rows read null (the single-channel era),
+   * and every thread-scoped query matches them under any channel.
+   */
+  private migrateStallAlerts(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stall_alerts'`)
+      .get() as { sql?: unknown } | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes('channel_id')) return;
+    this.db.exec(`ALTER TABLE stall_alerts ADD COLUMN channel_id TEXT`);
+  }
+
+  /**
+   * Re-keys a pre-#93 mailboxes table from `thread_ts` alone to the
+   * `(thread_ts, channel_id)` pair. A primary-key change needs the
+   * copy-and-rename dance; rows always carried their channel_id and ride
+   * across unchanged.
+   */
+  private migrateMailboxes(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mailboxes'`)
+      .get() as { sql?: unknown } | undefined;
+    if (
+      typeof schema?.sql !== 'string' ||
+      schema.sql.includes('PRIMARY KEY (thread_ts, channel_id)')
+    ) {
+      return;
+    }
+    this.db.exec(`
+      BEGIN;
+      CREATE TABLE mailboxes_next ${MAILBOXES_COLUMNS};
+      INSERT INTO mailboxes_next (thread_ts, channel_id, handle, created_at)
+        SELECT thread_ts, channel_id, handle, created_at FROM mailboxes;
+      DROP TABLE mailboxes;
+      ALTER TABLE mailboxes_next RENAME TO mailboxes;
+      COMMIT;
+    `);
+  }
+
+  /**
+   * Re-keys a pre-#93 reconciliations table to the pair, backfilling each
+   * row's channel from the thread's delegations (a fingerprint only ever
+   * exists for a thread that dispatched). A row the backfill cannot
+   * attribute is dropped — the worst case is one repeated ⚠️ restart
+   * notice, which the next fingerprint write settles.
+   */
+  private migrateReconciliations(): void {
+    const schema = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'reconciliations'`)
+      .get() as { sql?: unknown } | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes('channel_id')) return;
+    this.db.exec(`
+      BEGIN;
+      CREATE TABLE reconciliations_next ${RECONCILIATIONS_COLUMNS};
+      INSERT INTO reconciliations_next (thread_ts, channel_id, fingerprint, posted_at)
+        SELECT r.thread_ts,
+               (SELECT d.channel_id FROM delegations d WHERE d.thread_ts = r.thread_ts LIMIT 1),
+               r.fingerprint, r.posted_at
+          FROM reconciliations r
+         WHERE EXISTS (SELECT 1 FROM delegations d WHERE d.thread_ts = r.thread_ts);
+      DROP TABLE reconciliations;
+      ALTER TABLE reconciliations_next RENAME TO reconciliations;
+      COMMIT;
+    `);
+  }
+
+  /**
    * Rebuilds a pre-#46 pending_gates table into the current shape (new
    * `dispatch_id`/`superseded_by` columns, two extra statuses). SQLite bakes
    * CHECK constraints into the table, so widening the status set needs the
    * copy-and-rename dance; existing rows ride across with the new columns
-   * null. A table already carrying `superseded` is current — no-op.
+   * null. A second, independent step adds the issue #93 `channel_id` to a
+   * post-#46 pre-#93 table (a plain nullable add, like stall_alerts) — the
+   * rebuild target already carries it, so at most one step runs per boot.
    */
   private migratePendingGates(): void {
     const schema = this.db
       .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pending_gates'`)
       .get() as { sql?: unknown } | undefined;
-    if (typeof schema?.sql !== 'string' || schema.sql.includes('superseded')) return;
-    this.db.exec(`
-      BEGIN;
-      CREATE TABLE pending_gates_next ${PENDING_GATES_COLUMNS};
-      INSERT INTO pending_gates_next
-        (msg_id, thread_ts, task_id, worker_handle, worktree_name,
-         kind, question, options, relay_ts, status, relayed_at, answered_at)
-        SELECT msg_id, thread_ts, task_id, worker_handle, worktree_name,
-               kind, question, options, relay_ts, status, relayed_at, answered_at
-        FROM pending_gates;
-      DROP TABLE pending_gates;
-      ALTER TABLE pending_gates_next RENAME TO pending_gates;
-      COMMIT;
-    `);
+    if (typeof schema?.sql !== 'string') return;
+    if (!schema.sql.includes('superseded')) {
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE pending_gates_next ${PENDING_GATES_COLUMNS};
+        INSERT INTO pending_gates_next
+          (msg_id, thread_ts, task_id, worker_handle, worktree_name,
+           kind, question, options, relay_ts, status, relayed_at, answered_at)
+          SELECT msg_id, thread_ts, task_id, worker_handle, worktree_name,
+                 kind, question, options, relay_ts, status, relayed_at, answered_at
+          FROM pending_gates;
+        DROP TABLE pending_gates;
+        ALTER TABLE pending_gates_next RENAME TO pending_gates;
+        COMMIT;
+      `);
+      return;
+    }
+    if (!schema.sql.includes('channel_id')) {
+      this.db.exec(`ALTER TABLE pending_gates ADD COLUMN channel_id TEXT`);
+    }
   }
 
   /**
@@ -362,11 +466,12 @@ export class DelegationStore {
     this.db
       .prepare(
         `UPDATE pending_gates SET status = 'closed'
-         WHERE thread_ts = ? AND status = 'pending'
+         WHERE thread_ts = ? AND (channel_id = ? OR channel_id IS NULL)
+           AND status = 'pending'
            AND (dispatch_id = ?
                 OR (dispatch_id IS NULL AND (task_id = ? OR worker_handle = ?)))`,
       )
-      .run(row.threadTs, dispatchId, row.taskId, row.workerHandle);
+      .run(row.threadTs, row.channelId, dispatchId, row.taskId, row.workerHandle);
   }
 
   getByDispatchId(dispatchId: string): DelegationRow | undefined {
@@ -395,65 +500,82 @@ export class DelegationStore {
    *   carries no ids at all): the thread's newest in-flight row for that
    *   handle.
    */
-  resolveWorkerEvent(threadTs: string, event: WorkerEventKeys): DelegationRow | undefined {
+  resolveWorkerEvent(
+    threadTs: string,
+    channelId: string,
+    event: WorkerEventKeys,
+  ): DelegationRow | undefined {
     if (event.dispatchId !== undefined) return this.getByDispatchId(event.dispatchId);
     if (event.taskId !== undefined) {
       return (
-        this.inFlightByTaskId(threadTs, event.taskId) ??
-        this.latestByTaskId(threadTs, event.taskId)
+        this.inFlightByTaskId(threadTs, channelId, event.taskId) ??
+        this.latestByTaskId(threadTs, channelId, event.taskId)
       );
     }
     if (event.workerHandle !== undefined) {
-      return this.inFlightByWorkerHandle(threadTs, event.workerHandle);
+      return this.inFlightByWorkerHandle(threadTs, channelId, event.workerHandle);
     }
     return undefined;
   }
 
   /** The thread's newest in-flight row for a task — thread-scoped, so the
    * runtime-global bus can never close another thread's delegation. */
-  private inFlightByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+  private inFlightByTaskId(
+    threadTs: string,
+    channelId: string,
+    taskId: string,
+  ): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
-         WHERE thread_ts = ? AND task_id = ? AND status = 'dispatched'
+         WHERE thread_ts = ? AND channel_id = ? AND task_id = ? AND status = 'dispatched'
          ORDER BY dispatched_at DESC LIMIT 1`,
       )
-      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+      .get(threadTs, channelId, taskId) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest in-flight row for an asking terminal (issue #21). */
-  private inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
+  private inFlightByWorkerHandle(
+    threadTs: string,
+    channelId: string,
+    workerHandle: string,
+  ): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
-         WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched'
+         WHERE thread_ts = ? AND channel_id = ? AND worker_handle = ? AND status = 'dispatched'
          ORDER BY dispatched_at DESC LIMIT 1`,
       )
-      .get(threadTs, workerHandle) as Record<string, unknown> | undefined;
+      .get(threadTs, channelId, workerHandle) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest row for a task, ANY status (issue #25). */
-  private latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
+  private latestByTaskId(
+    threadTs: string,
+    channelId: string,
+    taskId: string,
+  ): DelegationRow | undefined {
     const row = this.db
       .prepare(
         `SELECT * FROM delegations
-         WHERE thread_ts = ? AND task_id = ?
+         WHERE thread_ts = ? AND channel_id = ? AND task_id = ?
          ORDER BY dispatched_at DESC LIMIT 1`,
       )
-      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+      .get(threadTs, channelId, taskId) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
-  listInFlightForThread(threadTs: string): DelegationRow[] {
+  listInFlightForThread(threadTs: string, channelId: string): DelegationRow[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM delegations
-         WHERE thread_ts = ? AND status = 'dispatched' ORDER BY dispatched_at`,
+         WHERE thread_ts = ? AND channel_id = ? AND status = 'dispatched'
+         ORDER BY dispatched_at`,
       )
-      .all(threadTs) as Array<Record<string, unknown>>;
+      .all(threadTs, channelId) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
@@ -486,18 +608,21 @@ export class DelegationStore {
   }
 
   /** All of a thread's delegations, oldest first — the 🔚 summary's ledger. */
-  listForThread(threadTs: string): DelegationRow[] {
+  listForThread(threadTs: string, channelId: string): DelegationRow[] {
     const rows = this.db
-      .prepare('SELECT * FROM delegations WHERE thread_ts = ? ORDER BY dispatched_at')
-      .all(threadTs) as Array<Record<string, unknown>>;
+      .prepare(
+        `SELECT * FROM delegations
+         WHERE thread_ts = ? AND channel_id = ? ORDER BY dispatched_at`,
+      )
+      .all(threadTs, channelId) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
   /** The thread's mailbox terminal handle, if one was ever created (issue #9). */
-  getMailbox(threadTs: string): string | undefined {
+  getMailbox(threadTs: string, channelId: string): string | undefined {
     const row = this.db
-      .prepare('SELECT handle FROM mailboxes WHERE thread_ts = ?')
-      .get(threadTs) as { handle: string } | undefined;
+      .prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? AND channel_id = ?')
+      .get(threadTs, channelId) as { handle: string } | undefined;
     return row?.handle;
   }
 
@@ -517,21 +642,21 @@ export class DelegationStore {
    * classes. Repeated restarts with unchanged state compare equal here and
    * post no second ⚠️ line.
    */
-  getReconcileFingerprint(threadTs: string): string | undefined {
+  getReconcileFingerprint(threadTs: string, channelId: string): string | undefined {
     const row = this.db
-      .prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ?')
-      .get(threadTs) as { fingerprint: string } | undefined;
+      .prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? AND channel_id = ?')
+      .get(threadTs, channelId) as { fingerprint: string } | undefined;
     return row?.fingerprint;
   }
 
   /** Remembers what the thread's ⚠️ line last reported (issue #25). */
-  setReconcileFingerprint(threadTs: string, fingerprint: string): void {
+  setReconcileFingerprint(threadTs: string, channelId: string, fingerprint: string): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO reconciliations (thread_ts, fingerprint, posted_at)
-         VALUES (?, ?, ?)`,
+        `INSERT OR REPLACE INTO reconciliations (thread_ts, channel_id, fingerprint, posted_at)
+         VALUES (?, ?, ?, ?)`,
       )
-      .run(threadTs, fingerprint, this.now());
+      .run(threadTs, channelId, fingerprint, this.now());
   }
 
   /**
@@ -546,13 +671,14 @@ export class DelegationStore {
     const { changes } = this.db
       .prepare(
         `INSERT OR IGNORE INTO pending_gates
-           (msg_id, thread_ts, task_id, dispatch_id, worker_handle, worktree_name,
+           (msg_id, thread_ts, channel_id, task_id, dispatch_id, worker_handle, worktree_name,
             kind, question, options, relay_ts, status, relayed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         row.msgId,
         row.threadTs,
+        row.channelId,
         row.taskId,
         row.dispatchId,
         row.workerHandle,
@@ -596,33 +722,46 @@ export class DelegationStore {
    * still listens on. A gate that was never superseded answers itself.
    * Undefined on an unknown msg id, a dangling pointer, a cycle or a
    * cross-thread hop (a hand-edited registry) — refuse rather than guess.
+   * A cross-channel hop refuses the same way; a NULL on either side is a
+   * pre-#93 row and never a mismatch.
    */
   liveGateFor(msgId: string): PendingGateRow | undefined {
     let current = this.getGate(msgId);
     if (current === undefined) return undefined;
     const threadTs = current.threadTs;
+    const channelId = current.channelId;
     const seen = new Set<string>([current.msgId]);
     while (current.status === 'superseded') {
       if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
       seen.add(current.supersededBy);
       const next = this.getGate(current.supersededBy);
       if (next === undefined || next.threadTs !== threadTs) return undefined;
+      if (channelId !== null && next.channelId !== null && next.channelId !== channelId) {
+        return undefined;
+      }
       current = next;
     }
     return current;
   }
 
-  /** All of a thread's relayed gates, oldest first. */
-  private listGatesForThread(threadTs: string): PendingGateRow[] {
+  /** All of a thread's relayed gates, oldest first. A NULL channel is a
+   * pre-#93 row from the single-channel era — it matches any channel. */
+  private listGatesForThread(threadTs: string, channelId: string): PendingGateRow[] {
     const rows = this.db
-      .prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id')
-      .all(threadTs) as Array<Record<string, unknown>>;
+      .prepare(
+        `SELECT * FROM pending_gates
+         WHERE thread_ts = ? AND (channel_id = ? OR channel_id IS NULL)
+         ORDER BY relayed_at, msg_id`,
+      )
+      .all(threadTs, channelId) as Array<Record<string, unknown>>;
     return rows.map(toPendingGateRow);
   }
 
   /** The thread's unanswered gates — what the root reaction and routing read. */
-  listPendingGates(threadTs: string): PendingGateRow[] {
-    return this.listGatesForThread(threadTs).filter((gate) => gate.status === 'pending');
+  listPendingGates(threadTs: string, channelId: string): PendingGateRow[] {
+    return this.listGatesForThread(threadTs, channelId).filter(
+      (gate) => gate.status === 'pending',
+    );
   }
 
   /**
@@ -634,8 +773,11 @@ export class DelegationStore {
    * from an open one (issue #46). Superseded rows stay out: their question
    * lives on in the re-ask successor.
    */
-  turnContextFor(threadTs: string): { gates: TurnContextGate[]; stalls: TurnContextStall[] } {
-    const gates = this.listGatesForThread(threadTs)
+  turnContextFor(
+    threadTs: string,
+    channelId: string,
+  ): { gates: TurnContextGate[]; stalls: TurnContextStall[] } {
+    const gates = this.listGatesForThread(threadTs, channelId)
       .filter(
         (gate): gate is PendingGateRow & { status: TurnContextGate['status'] } =>
           gate.status !== 'superseded',
@@ -655,7 +797,7 @@ export class DelegationStore {
             gate.msgId,
         }),
       );
-    const stalls = this.listStallsForThread(threadTs).map(
+    const stalls = this.listStallsForThread(threadTs, channelId).map(
       (stall): TurnContextStall => ({
         dispatchId: stall.dispatchId,
         status: stall.status,
@@ -695,13 +837,14 @@ export class DelegationStore {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO stall_alerts
-           (dispatch_id, thread_ts, worker_handle, worktree_name,
+           (dispatch_id, thread_ts, channel_id, worker_handle, worktree_name,
             last_output, fingerprint, relay_ts, status, alerted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         row.dispatchId,
         row.threadTs,
+        row.channelId,
         row.workerHandle,
         row.worktreeName,
         row.lastOutput,
@@ -719,17 +862,24 @@ export class DelegationStore {
     return row === undefined ? undefined : toStallAlertRow(row);
   }
 
-  /** All of a thread's stall alerts, oldest first. */
-  private listStallsForThread(threadTs: string): StallAlertRow[] {
+  /** All of a thread's stall alerts, oldest first. A NULL channel is a
+   * pre-#93 row from the single-channel era — it matches any channel. */
+  private listStallsForThread(threadTs: string, channelId: string): StallAlertRow[] {
     const rows = this.db
-      .prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id')
-      .all(threadTs) as Array<Record<string, unknown>>;
+      .prepare(
+        `SELECT * FROM stall_alerts
+         WHERE thread_ts = ? AND (channel_id = ? OR channel_id IS NULL)
+         ORDER BY alerted_at, dispatch_id`,
+      )
+      .all(threadTs, channelId) as Array<Record<string, unknown>>;
     return rows.map(toStallAlertRow);
   }
 
   /** The thread's unanswered stall alerts — sanctioned send targets, 🚨 state. */
-  listPendingStalls(threadTs: string): StallAlertRow[] {
-    return this.listStallsForThread(threadTs).filter((stall) => stall.status === 'pending');
+  listPendingStalls(threadTs: string, channelId: string): StallAlertRow[] {
+    return this.listStallsForThread(threadTs, channelId).filter(
+      (stall) => stall.status === 'pending',
+    );
   }
 
   /**
@@ -756,6 +906,7 @@ function toStallAlertRow(row: Record<string, unknown>): StallAlertRow {
   return {
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
+    channelId: (row.channel_id ?? null) as string | null,
     workerHandle: row.worker_handle as string | null,
     worktreeName: row.worktree_name as string | null,
     lastOutput: row.last_output as string,
@@ -771,6 +922,7 @@ function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {
   return {
     msgId: row.msg_id as string,
     threadTs: row.thread_ts as string,
+    channelId: (row.channel_id ?? null) as string | null,
     taskId: row.task_id as string | null,
     dispatchId: row.dispatch_id as string | null,
     workerHandle: row.worker_handle as string | null,

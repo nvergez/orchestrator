@@ -54,8 +54,10 @@ export function humanText(event: IncomingEvent): string {
 
 /** The identities the filter guards with, straight from config + auth.test. */
 export interface Guard {
-  channelId: string;
-  allowedUserId: string;
+  /** The channels the daemon serves (issue #93) — anything else is noise. */
+  channelIds: readonly string[];
+  /** The authorized humans (issue #93) — one shared allow-list, no tiers. */
+  allowedUserIds: readonly string[];
   botUserId: string;
 }
 
@@ -71,20 +73,21 @@ export type IgnoreReason =
   | 'empty_text';
 
 export type Decision =
-  /** Root @mention by the authorized user — register the thread, first turn. */
-  | { action: 'open'; threadTs: string; text: string }
-  /** Authorized-user message inside a thread — a turn iff the thread is registered. */
-  | { action: 'reply'; threadTs: string; text: string }
+  /** Root @mention by an allowed user — register the thread, first turn. */
+  | { action: 'open'; threadTs: string; channelId: string; userId: string; text: string }
+  /** Allowed-user message inside a thread — a turn iff the thread is registered. */
+  | { action: 'reply'; threadTs: string; channelId: string; text: string }
   /** `@orchestrator close` inside a thread — the explicit close command (spec §3). */
-  | { action: 'close'; threadTs: string }
+  | { action: 'close'; threadTs: string; channelId: string }
   /** Root @mention by a third party — one polite fixed line (UX mock G1). */
-  | { action: 'refuse'; threadTs: string }
+  | { action: 'refuse'; threadTs: string; channelId: string }
   | { action: 'ignore'; reason: IgnoreReason };
 
 export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
-  if (event.channel !== guard.channelId) {
+  if (event.channel === undefined || !guard.channelIds.includes(event.channel)) {
     return { action: 'ignore', reason: 'wrong_channel' };
   }
+  const channelId = event.channel;
   if (event.subtype !== undefined) {
     return { action: 'ignore', reason: 'subtype' };
   }
@@ -113,7 +116,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       // no session.
       return { action: 'ignore', reason: 'not_a_mention' };
     }
-    if (event.user !== guard.allowedUserId) {
+    if (!guard.allowedUserIds.includes(event.user)) {
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
     const replyText = spokenText.trim();
@@ -122,20 +125,20 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       return { action: 'ignore', reason: 'empty_text' };
     }
     if (isCloseCommand(replyText)) {
-      return { action: 'close', threadTs: event.thread_ts };
+      return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, text: replyText };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText };
   }
 
   // app_mention from here on.
-  if (event.user !== guard.allowedUserId) {
+  if (!guard.allowedUserIds.includes(event.user)) {
     if (event.thread_ts !== undefined) {
       // The polite refusal is for *root* mentions only (UX mock G1). Anything
       // a third party posts inside a thread is silence, per spec §7 — never
       // injected, and no "I'm ignoring you" polluting the thread.
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
-    return { action: 'refuse', threadTs: event.ts };
+    return { action: 'refuse', threadTs: event.ts, channelId };
   }
 
   const text = spokenText.replaceAll(botTag, '').trim();
@@ -144,13 +147,19 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       return { action: 'ignore', reason: 'empty_text' };
     }
     if (isCloseCommand(text)) {
-      return { action: 'close', threadTs: event.thread_ts };
+      return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, text };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text };
   }
   // A bare root mention is still an Open (spec §3: a root @mention is the one
   // and only opener) — substitute a fixed prompt rather than an empty turn.
-  return { action: 'open', threadTs: event.ts, text: text === '' ? BARE_MENTION_PROMPT : text };
+  return {
+    action: 'open',
+    threadTs: event.ts,
+    channelId,
+    userId: event.user,
+    text: text === '' ? BARE_MENTION_PROMPT : text,
+  };
 }
 
 /**

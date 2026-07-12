@@ -32,13 +32,14 @@ export interface DelegationPolicy {
  */
 export function buildCanUseTool(opts: {
   threadTs: string;
+  channelId: string;
   gates: GateRequester;
   allowList: DelegationPolicy;
   delegations: DispatchPreparer;
   relay: RelayPolicy;
   logger: Logger;
 }): CanUseTool {
-  const { threadTs, gates, allowList, delegations, relay, logger } = opts;
+  const { threadTs, channelId, gates, allowList, delegations, relay, logger } = opts;
   return async (toolName, input, { signal }) => {
     // The session's base tool set is Bash-only, but fail closed anyway: the
     // orchestrator routes/delegates/supervises, it never codes (spec §7).
@@ -97,7 +98,7 @@ export function buildCanUseTool(opts: {
         // A `terminal send` carrying a human answer down to a worker this
         // thread relayed a gate for is AUTO (spec §7) — the pending-gates
         // registry is the provenance the tier classifier cannot see.
-        if (relay.sanctionsSend(threadTs, command)) {
+        if (relay.sanctionsSend(threadTs, channelId, command)) {
           logger.info(
             { threadTs, command },
             'terminal send sanctioned by the pending-gates registry — runs without a 🚦',
@@ -105,7 +106,12 @@ export function buildCanUseTool(opts: {
           break;
         }
         const gate = describeGate(command);
-        const answer = await gates.request(threadTs, gateLine(gate.command, gate.worktree), signal);
+        const answer = await gates.request(
+          threadTs,
+          channelId,
+          gateLine(gate.command, gate.worktree),
+          signal,
+        );
         if (!answer.approved) {
           return {
             behavior: 'deny',
@@ -121,7 +127,7 @@ export function buildCanUseTool(opts: {
     // The coordinator seams run last, on an already-classified-and-approved
     // command: a wave wait must not start for a command a gate then refuses.
     // Relay first — a reply the registry refuses must never reach a worker.
-    const relayed = relay.prepare(threadTs, command);
+    const relayed = relay.prepare(threadTs, channelId, command);
     if (relayed.action === 'deny') {
       logger.warn(
         { threadTs, command, reason: relayed.message },
@@ -129,7 +135,7 @@ export function buildCanUseTool(opts: {
       );
       return { behavior: 'deny', message: `Relay refused: ${relayed.message}.` };
     }
-    const prepared = await delegations.prepare(threadTs, relayed.command, signal);
+    const prepared = await delegations.prepare(threadTs, channelId, relayed.command, signal);
     if (prepared.action === 'deny') {
       logger.warn(
         { threadTs, command, reason: prepared.message },
@@ -165,11 +171,12 @@ const FORCE_ASK: HookJSONOutput = {
  */
 export function guardrailHooks(opts: {
   threadTs: string;
+  channelId: string;
   delegations: DispatchObserver;
   relay: RelayObserver;
   logger: Logger;
 }): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
-  const { threadTs, delegations, relay, logger } = opts;
+  const { threadTs, channelId, delegations, relay, logger } = opts;
   const observe = async (input: HookInput): Promise<HookJSONOutput> => {
     if (input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') {
       const command = (input.tool_input as { command?: unknown } | null)?.command;
@@ -177,10 +184,10 @@ export function guardrailHooks(opts: {
         const stdout =
           input.hook_event_name === 'PostToolUse' ? bashStdout(input.tool_response) : '';
         // observers never throw; a hook rejection would fail the whole turn.
-        await delegations.observe(threadTs, command, stdout).catch((error: unknown) => {
+        await delegations.observe(threadTs, channelId, command, stdout).catch((error: unknown) => {
           logger.warn({ err: error, threadTs }, 'delegation observer hook failed');
         });
-        await relay.observe(threadTs, command, stdout).catch((error: unknown) => {
+        await relay.observe(threadTs, channelId, command, stdout).catch((error: unknown) => {
           logger.warn({ err: error, threadTs }, 'relay observer hook failed');
         });
       }

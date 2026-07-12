@@ -18,24 +18,25 @@ import type { Logger } from '../kernel/logger.ts';
  */
 
 /** The Slack adapter under the thread surface — what daemon.ts implements
- * over the Web API. `ts === threadTs` addresses the root message. */
+ * over the Web API. Channel-addressed like the API itself (issue #93: the
+ * daemon serves several channels); `ts === threadTs` addresses the root. */
 export interface Surface {
   /** chat.postMessage into the thread; resolves with the message ts. */
-  post(threadTs: string, text: string): Promise<string>;
+  post(channelId: string, threadTs: string, text: string): Promise<string>;
   /** chat.update on an earlier message. */
-  update(ts: string, text: string): Promise<void>;
+  update(channelId: string, ts: string, text: string): Promise<void>;
   /** reactions.add on a message. */
-  react(ts: string, name: string): Promise<void>;
+  react(channelId: string, ts: string, name: string): Promise<void>;
   /** reactions.remove on a message. */
-  unreact(ts: string, name: string): Promise<void>;
+  unreact(channelId: string, ts: string, name: string): Promise<void>;
 }
 
 /** The registry slice the root-reaction rules read — the thread's in-flight
  * work and its pending gates and stall alerts. */
 export interface ThreadStateStore {
-  listPendingGates(threadTs: string): PendingGateRow[];
-  listPendingStalls(threadTs: string): StallAlertRow[];
-  listInFlightForThread(threadTs: string): DelegationRow[];
+  listPendingGates(threadTs: string, channelId: string): PendingGateRow[];
+  listPendingStalls(threadTs: string, channelId: string): StallAlertRow[];
+  listInFlightForThread(threadTs: string, channelId: string): DelegationRow[];
 }
 
 /**
@@ -92,13 +93,13 @@ export class ThreadSurface {
 
   /** chat.postMessage into the thread; resolves with the message ts. Throws
    * on a Slack failure — callers own their fallbacks. */
-  post(threadTs: string, text: string): Promise<string> {
-    return this.surface.post(threadTs, text);
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
+    return this.surface.post(channelId, threadTs, text);
   }
 
   /** chat.update on an earlier message. Throws on a Slack failure. */
-  update(ts: string, text: string): Promise<void> {
-    return this.surface.update(ts, text);
+  update(channelId: string, ts: string, text: string): Promise<void> {
+    return this.surface.update(channelId, ts, text);
   }
 
   // ── root reactions ─────────────────────────────────────────────────────────
@@ -111,9 +112,9 @@ export class ThreadSurface {
    * or an earlier ✅/❌ stays put next to the 👀. The usual failure is
    * Slack's already_reacted, when the 👀 is simply on.
    */
-  async ackWorking(threadTs: string): Promise<void> {
+  async ackWorking(channelId: string, threadTs: string): Promise<void> {
     try {
-      await this.surface.react(threadTs, 'eyes');
+      await this.surface.react(channelId, threadTs, 'eyes');
     } catch (error) {
       this.logger.debug({ err: error, threadTs }, 'working 👀 add failed (may already be set)');
     }
@@ -128,6 +129,7 @@ export class ThreadSurface {
    * earlier delegation survives as the thread's durable outcome.
    */
   async settleTurnEnd(
+    channelId: string,
     threadTs: string,
     /** Work the registries cannot see: a created-but-not-yet-dispatched
      * worktree (the coordinator's create→dispatch window) has a 👀-backed
@@ -136,14 +138,14 @@ export class ThreadSurface {
   ): Promise<void> {
     if (
       hasUndispatchedWork ||
-      this.store.listInFlightForThread(threadTs).length > 0 ||
-      this.store.listPendingGates(threadTs).length > 0 ||
-      this.store.listPendingStalls(threadTs).length > 0
+      this.store.listInFlightForThread(threadTs, channelId).length > 0 ||
+      this.store.listPendingGates(threadTs, channelId).length > 0 ||
+      this.store.listPendingStalls(threadTs, channelId).length > 0
     ) {
       return;
     }
     try {
-      await this.surface.unreact(threadTs, 'eyes');
+      await this.surface.unreact(channelId, threadTs, 'eyes');
     } catch (error) {
       // Usually Slack's no_reaction — a flip already took the 👀 off.
       this.logger.debug({ err: error, threadTs }, 'turn-end 👀 removal skipped');
@@ -157,13 +159,13 @@ export class ThreadSurface {
    * The settle for every path where a pending set changed — a gate relayed or
    * answered, a stall alerted or nudged, a sibling done.
    */
-  async settleRoot(threadTs: string): Promise<void> {
-    const gates = this.store.listPendingGates(threadTs);
+  async settleRoot(channelId: string, threadTs: string): Promise<void> {
+    const gates = this.store.listPendingGates(threadTs, channelId);
     const alarmed =
       gates.some((gate) => gate.kind === 'escalation') ||
-      this.store.listPendingStalls(threadTs).length > 0;
+      this.store.listPendingStalls(threadTs, channelId).length > 0;
     const name: RootReaction = alarmed ? 'rotating_light' : gates.length > 0 ? 'question' : 'eyes';
-    await this.apply(threadTs, name);
+    await this.apply(channelId, threadTs, name);
   }
 
   /**
@@ -176,16 +178,16 @@ export class ThreadSurface {
    * replace the ❌ — the failure keeps its ❌ card and its summary message
    * in the thread, which are the log; the root is not.
    */
-  async settleWorkerDone(threadTs: string, failed: boolean): Promise<void> {
+  async settleWorkerDone(channelId: string, threadTs: string, failed: boolean): Promise<void> {
     if (failed) {
-      await this.apply(threadTs, 'x');
+      await this.apply(channelId, threadTs, 'x');
       return;
     }
-    if (this.store.listInFlightForThread(threadTs).length > 0) {
-      await this.settleRoot(threadTs);
+    if (this.store.listInFlightForThread(threadTs, channelId).length > 0) {
+      await this.settleRoot(channelId, threadTs);
       return;
     }
-    await this.apply(threadTs, 'white_check_mark');
+    await this.apply(channelId, threadTs, 'white_check_mark');
   }
 
   /**
@@ -196,13 +198,17 @@ export class ThreadSurface {
    * and whatever state the thread showed stays until live events move it.
    */
   async settleReconciled(
+    channelId: string,
     threadTs: string,
     closed: Array<'completed' | 'failed'>,
   ): Promise<void> {
     if (closed.includes('failed')) {
-      await this.apply(threadTs, 'x');
-    } else if (closed.length > 0 && this.store.listInFlightForThread(threadTs).length === 0) {
-      await this.apply(threadTs, 'white_check_mark');
+      await this.apply(channelId, threadTs, 'x');
+    } else if (
+      closed.length > 0 &&
+      this.store.listInFlightForThread(threadTs, channelId).length === 0
+    ) {
+      await this.apply(channelId, threadTs, 'white_check_mark');
     }
   }
 
@@ -212,16 +218,16 @@ export class ThreadSurface {
    * an add usually fails as already_reacted, a removal as no_reaction (the
    * stale one simply wasn't set).
    */
-  private async apply(threadTs: string, name: RootReaction): Promise<void> {
+  private async apply(channelId: string, threadTs: string, name: RootReaction): Promise<void> {
     try {
-      await this.surface.react(threadTs, name);
+      await this.surface.react(channelId, threadTs, name);
     } catch (error) {
       this.logger.debug({ err: error, threadTs, name }, 'root reaction add failed');
     }
     for (const stale of ROOT_REACTIONS) {
       if (stale === name) continue;
       try {
-        await this.surface.unreact(threadTs, stale);
+        await this.surface.unreact(channelId, threadTs, stale);
       } catch (error) {
         this.logger.debug({ err: error, threadTs, stale }, 'stale reaction removal skipped');
       }
@@ -258,9 +264,9 @@ export class ThreadSurface {
     });
     try {
       if (row.cardTs === null) {
-        await this.surface.post(row.threadTs, text);
+        await this.surface.post(row.channelId, row.threadTs, text);
       } else {
-        await this.surface.update(row.cardTs, text);
+        await this.surface.update(row.channelId, row.cardTs, text);
       }
     } catch (error) {
       this.logger.warn(
@@ -303,6 +309,7 @@ export class ThreadSurface {
       );
       try {
         await this.surface.post(
+          row.channelId,
           row.threadTs,
           worktreeKeptLine(
             row.worktreeName ?? row.worktreeId,

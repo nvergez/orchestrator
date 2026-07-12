@@ -3,9 +3,11 @@
  * docs/prototypes/slack-ux/conversations.md).
  */
 
-/** Scenario G1 — root @mention by a third party. */
-export function refusalLine(allowedUserId: string): string {
-  return `v1: only <@${allowedUserId}> can drive me.`;
+/** Scenario G1 — root @mention by a third party. The mock's single-user
+ * line, generalized to the issue #93 allow-list. */
+export function refusalLine(allowedUserIds: readonly string[]): string {
+  const mentions = allowedUserIds.map((id) => `<@${id}>`).join(', ');
+  return `v1: only ${mentions} can drive me.`;
 }
 
 /**
