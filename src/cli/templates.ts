@@ -36,11 +36,11 @@ SLACK_BOT_TOKEN=
 # App-Level Token — starts with xapp- (Slack: Socket Mode, connections:write scope)
 SLACK_APP_TOKEN=
 
-# ID of the dedicated orchestrator channel — starts with C
-SLACK_CHANNEL_ID=
+# Comma-separated IDs of channels the bot serves — each starts with C
+SLACK_CHANNEL_IDS=
 
-# Authorized Slack user ID (single-user allow-list) — starts with U
-SLACK_ALLOWED_USER_ID=
+# Comma-separated authorized Slack user IDs — each starts with U
+SLACK_ALLOWED_USER_IDS=
 
 # Claude Code OAuth token — starts with sk-ant- (run \`claude setup-token\`)
 CLAUDE_CODE_OAUTH_TOKEN=

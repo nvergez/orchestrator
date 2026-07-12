@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from '../daemon/db.ts';
+import { DelegationStore } from '../delegation/delegations.ts';
 import { CHANNEL, seedDemoState, THREAD, THREAD_CLOSED, THREAD_ORPHAN, USER } from './demo-state.ts';
 import { startDashboard, type DashboardHandle } from './server.ts';
 import { readSnapshot, type SnapshotDeps, type StateSnapshot } from './snapshot.ts';
@@ -109,6 +110,47 @@ const populatedDb = (): string => {
 };
 
 describe('GET /api/state — live state off a daemon-written database', () => {
+  it('keeps equal timestamps in different channels as separate session cards', async () => {
+    const dbPath = join(tempDir(), 'orchestrator.db');
+    const sessions = new SessionStore(dbPath, () => '2026-07-10T10:00:00.000Z');
+    sessions.register(THREAD, 'C0FIRST', 'U0FIRST');
+    sessions.register(THREAD, 'C0SECOND', 'U0SECOND');
+    sessions.close();
+    const delegations = new DelegationStore(dbPath, () => '2026-07-10T10:01:00.000Z');
+    for (const [dispatchId, channelId] of [
+      ['ctx_first', 'C0FIRST'],
+      ['ctx_second', 'C0SECOND'],
+    ] as const) {
+      delegations.recordDispatch({
+        dispatchId,
+        taskId: `task_${dispatchId}`,
+        worktreeId: null,
+        worktreeName: null,
+        worktreePath: null,
+        repo: null,
+        issueNumber: null,
+        agent: null,
+        workerHandle: null,
+        threadTs: THREAD,
+        channelId,
+        cardTs: null,
+        title: null,
+      });
+    }
+    delegations.close();
+
+    const state = await readSnapshot(snapshotDeps(dbPath));
+    const cards = [...state.sessions].sort((a, b) => (a.channelId ?? '').localeCompare(b.channelId ?? ''));
+    expect(cards.map((session) => [session.channelId, session.rootUser])).toEqual([
+      ['C0FIRST', 'U0FIRST'],
+      ['C0SECOND', 'U0SECOND'],
+    ]);
+    expect(cards.map((session) => session.delegations[0]?.dispatchId)).toEqual([
+      'ctx_first',
+      'ctx_second',
+    ]);
+  });
+
   it('snapshots sessions, in-flight delegations, gates verbatim, stalls and the 48h window', async () => {
     const { baseUrl } = await serve(snapshotDeps(populatedDb()));
 
@@ -123,6 +165,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           threadTs: THREAD,
           channelId: CHANNEL,
+          rootUser: USER,
           status: 'open',
           createdAt: '2026-07-09T09:00:00.000Z',
           lastActivityAt: '2026-07-10T08:00:00.000Z',
@@ -132,6 +175,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
             {
               dispatchId: 'ctx_live',
               threadTs: THREAD,
+              channelId: CHANNEL,
               repo: 'webapp',
               issueNumber: 84,
               agent: 'claude',
@@ -148,6 +192,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           threadTs: THREAD_ORPHAN,
           channelId: CHANNEL,
+          rootUser: null,
           status: 'unknown',
           createdAt: null,
           lastActivityAt: null,
@@ -157,6 +202,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
             {
               dispatchId: 'ctx_orphan',
               threadTs: THREAD_ORPHAN,
+              channelId: CHANNEL,
               repo: 'sandbox',
               issueNumber: 21,
               agent: 'codex',
@@ -174,6 +220,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           msgId: 'msg_gate',
           threadTs: THREAD,
+          channelId: CHANNEL,
           kind: 'decision_gate',
           question: 'Migrations diverge — rebase or merge?',
           options: ['rebase', 'merge'],
@@ -183,6 +230,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           msgId: 'msg_escalation',
           threadTs: THREAD,
+          channelId: CHANNEL,
           kind: 'escalation',
           question: 'CI is red on main — halt the merge?',
           options: [],
@@ -194,6 +242,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           dispatchId: 'ctx_live',
           threadTs: THREAD,
+          channelId: CHANNEL,
           worktreeName: 'webapp-84-dashboard',
           lastOutput: '… waiting at a permissions prompt',
           alertedAt: '2026-07-10T11:45:00.000Z',
@@ -204,6 +253,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           {
             dispatchId: 'ctx_fail',
             threadTs: THREAD,
+            channelId: CHANNEL,
             repo: 'webapp',
             issueNumber: 84,
             agent: 'claude',
@@ -217,6 +267,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           {
             dispatchId: 'ctx_done',
             threadTs: THREAD,
+            channelId: CHANNEL,
             repo: 'webapp',
             issueNumber: 84,
             agent: 'claude',

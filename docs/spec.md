@@ -21,7 +21,7 @@ Slack (#orchestrator, Socket Mode)
 ┌──────────────────────────────────────────────────────────────┐
 │  orchestrator daemon (Node/TS, systemd user unit)            │
 │                                                              │
-│  Slack Bolt (Socket Mode) ── event filter (single user)      │
+│  Slack Bolt (Socket Mode) ── channel + user allow-lists      │
 │  Session manager ── Claude Agent SDK, 1 session / thread     │
 │  Gate watchers ── `orca orchestration check --wait` children │
 │  Watchdog sweep ── `worktree ps` / `tui-idle`                │
@@ -41,10 +41,10 @@ Stack decision ([#3](https://github.com/nvergez/orchestrator/issues/3), research
 ## 2. Slack surface
 
 Provisioned ([#2](https://github.com/nvergez/orchestrator/issues/2)) on the operator's Slack workspace — to provision your own app, see [`docs/setup-slack.md`](setup-slack.md). IDs below are placeholders for the instance's real values:
-- App `@orchestrator` (bot user `U0EXAMPLEBOT`), Socket Mode ON; the single channel is `C0EXAMPLE123` — a **private** channel in this deployment (bot is a member); authorized user `U0EXAMPLE456`.
+- App `@orchestrator` (bot user `U0EXAMPLEBOT`), Socket Mode ON; configured channels may be public or private (the bot is a member of each); authorized operators are configured explicitly.
 - Bot scopes (6): `chat:write, app_mentions:read, channels:history, groups:history, reactions:write, users:read`. Events: `app_mention`, **`message.groups`** (+ `message.channels`).
   - The channel's **privacy decides the message event**: Slack emits `message.groups` for private channels and `message.channels` for public ones — `groups:history` is load-bearing, not incidental. Subscribing to only `message.channels` on a private channel silently delivers **no message event at all**, so plain thread replies never reach the daemon while `app_mention` keeps working ([#38](https://github.com/nvergez/orchestrator/issues/38)). Both subscriptions arrive as `type: "message"` (private ones carry `channel_type: "group"`), so one listener handles either; a mention fires the `message` copy *and* `app_mention`, deduped by the filter.
-- `channels:read` is **not granted and not needed in v1** (single pinned channel + single-user allow-list; no `conversations.info/members`).
+- `channels:read` is **not granted and not needed** (channel IDs and user IDs are configured directly; no `conversations.info/members`).
 - Secrets in the daemon's env file (chmod 600, outside git; template `.env.example`).
 
 ## 3. Session model — thread ↔ Claude Code session
@@ -117,7 +117,7 @@ Decision [#8](https://github.com/nvergez/orchestrator/issues/8). Enforcement = t
 
 - **Repo allow-list = the routing hints file**: no entry ⇒ not delegable, even if registered in Orca (treated as zero-match). Adding a repo = one edit to the hints file. Example set: `webapp`, `tooling`, `sandbox`, `orchestrator`.
 - **Cost: measure-only in v1.** SQLite ledger (per-session `turn_count`, `cost_usd_total` from `ResultMessage`); threshold warnings in the thread at **$5 then $10** (env-configurable); nothing ever blocks; no time cap. Known limitation: delegated workers' own token usage is not measured.
-- **User allow-list (env)**: v1 = the single `SLACK_ALLOWED_USER_ID` (placeholder `U0EXAMPLE456`), filtered at the source. Third-party @mention → one-line polite refusal, no session. Third-party reply inside an active thread → **silently ignored, never injected** (anti-injection: resumption needs no re-mention).
+- **User allow-list (env)**: `SLACK_ALLOWED_USER_IDS` is a comma-separated shared-operator allow-list, filtered at the source. Any allowed operator may open, reply to, answer a gate in, or close any managed thread; `root_user` records attribution, not ownership. Third-party @mention → one-line polite refusal, no session. Third-party reply inside an active thread → **silently ignored, never injected** (anti-injection: resumption needs no re-mention).
 - **Crash recovery: reconcile + notify, resume on demand.** Workers are independent processes — never killed at boot. At boot: re-read `delegations` with `status=dispatched`, reconcile against `task-list` + `worktree ps`, post one ⚠️ status line per affected thread **without waking sessions**; the next human message resumes supervision. Nothing is lost: results stay reachable via the linked GitHub issue and `task-list`.
 
 ## 8. Slack UX
@@ -138,8 +138,8 @@ Guiding principle: **"edit the status, post the event."** Anything requiring the
 One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTRATOR_DB_PATH`). Survives any git operation on the checkout; never in the repo.
 
 - **`sessions`** — key `thread_ts` (+ `channel_id`): `session_id`, `root_user`, `status ∈ {open, closed}`, `created_at`, `last_activity_at`, `turn_count`, `cost_usd_total`. (#5)
-- **`delegations`** — `task_id`, `dispatch_id`, `worktree_id`, `issue#`, `repo`, `thread_ts`, `status`; written at dispatch, closed on `worker_done`; drives boot reconciliation. (#8)
-- **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `dispatch_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered, superseded, closed}` + `superseded_by`; written by the daemon at relay time; anchors answer routing — which only ever considers `pending` rows: a re-ask supersedes its stale gate, and a closing delegation closes its unanswered ones. (#9, #46)
+- **`delegations`** — `task_id`, `dispatch_id`, `worktree_id`, `issue#`, `repo`, `thread_ts`, `channel_id`, `status`; written at dispatch, closed on `worker_done`; drives boot reconciliation. (#8/#93)
+- **`pending_gates`** — `msg_id`, `thread_ts`, `channel_id`, `task_id`, `dispatch_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered, superseded, closed}` + `superseded_by`; written by the daemon at relay time; anchors answer routing — which only ever considers `pending` rows in the same `(channel_id, thread_ts)`: a re-ask supersedes its stale gate, and a closing delegation closes its unanswered ones. (#9, #46, #93)
 - Mailbox terminal handles per thread are also remembered here (#9).
 - Pure runtime state (process handles, throttle buffers, warm flags) is **not** persisted — lost harmlessly on restart.
 
@@ -160,8 +160,8 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runboo
 |---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-…` bot token (#2) |
 | `SLACK_APP_TOKEN` | `xapp-…` app-level token, `connections:write` (#2) |
-| `SLACK_CHANNEL_ID` | `C…` — the single pinned channel (#2) |
-| `SLACK_ALLOWED_USER_ID` | `U…` — single-user allow-list (#2/#8) |
+| `SLACK_CHANNEL_IDS` | Comma-separated `C…` channel IDs served by this bot (#93) |
+| `SLACK_ALLOWED_USER_IDS` | Comma-separated `U…` shared-operator allow-list (#93) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | daemon auth, from `claude setup-token` (#6) |
 | `LOG_LEVEL` | pino level, default `info` (#6) |
 | `ORCHESTRATOR_DB_PATH` | optional SQLite override (#6) |
@@ -173,7 +173,7 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runboo
 - Delegated workers' token usage isn't metered — the ledger sees only the orchestrator session (#8).
 - No cost/time hard caps — warnings only, to be calibrated from ledger data in v2 (#8).
 - `closed` is final — no thread reopening (#5).
-- `channels:read` not granted — fine for the single-channel design; grant + reinstall if channel metadata is ever needed (#2/#6).
+- `channels:read` not granted — configured IDs are sufficient; grant + reinstall only if channel metadata is ever needed (#2/#6/#93).
 
 ## 13. References
 

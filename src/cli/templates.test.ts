@@ -28,8 +28,8 @@ describe('ENV_TEMPLATE', () => {
     for (const key of [
       'SLACK_BOT_TOKEN',
       'SLACK_APP_TOKEN',
-      'SLACK_CHANNEL_ID',
-      'SLACK_ALLOWED_USER_ID',
+      'SLACK_CHANNEL_IDS',
+      'SLACK_ALLOWED_USER_IDS',
       'CLAUDE_CODE_OAUTH_TOKEN',
     ]) {
       expect(ENV_TEMPLATE).toMatch(new RegExp(`^${key}=$`, 'm'));

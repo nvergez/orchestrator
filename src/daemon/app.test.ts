@@ -149,6 +149,7 @@ describe('registerHandlers — gate-eats-reply', () => {
     store.recordGate({
       msgId: 'msg_1',
       threadTs: THREAD,
+      channelId: CHANNEL,
       taskId: 'task_1',
       dispatchId: 'ctx_1',
       workerHandle: 'term_w1',

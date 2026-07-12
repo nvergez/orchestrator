@@ -77,10 +77,12 @@ class ClaudeProcess {
   private readonly gates: SessionGates;
   private readonly delegations: SessionDelegations;
   private readonly threadTs: string;
+  private readonly channelId: string;
 
   constructor(opts: {
     resumeSessionId: string | null;
     threadTs: string;
+    channelId: string;
     cwd: string;
     gates: SessionGates;
     allowList: DelegationPolicy;
@@ -93,6 +95,7 @@ class ClaudeProcess {
     this.gates = opts.gates;
     this.delegations = opts.delegations;
     this.threadTs = opts.threadTs;
+    this.channelId = opts.channelId;
     this.session = query({
       prompt: this.input,
       options: {
@@ -118,6 +121,7 @@ class ClaudeProcess {
         permissionMode: 'default',
         canUseTool: buildCanUseTool({
           threadTs: opts.threadTs,
+          channelId: opts.channelId,
           gates: opts.gates,
           allowList: opts.allowList,
           delegations: opts.delegations,
@@ -126,6 +130,7 @@ class ClaudeProcess {
         }),
         hooks: guardrailHooks({
           threadTs: opts.threadTs,
+          channelId: opts.channelId,
           delegations: opts.delegations,
           relay: opts.relay,
           logger: opts.logger,
@@ -204,8 +209,8 @@ class ClaudeProcess {
    * to the pool the same way (issue #19).
    */
   private releaseGates(): void {
-    this.gates.cancelThread(this.threadTs);
-    this.delegations.abandonThread(this.threadTs);
+    this.gates.cancelThread(this.threadTs, this.channelId);
+    this.delegations.abandonThread(this.threadTs, this.channelId);
   }
 
   async end(): Promise<void> {
@@ -241,10 +246,11 @@ export function createProcessFactory(opts: {
   systemPromptAppend: string;
   logger: Logger;
 }): ProcessFactory {
-  return ({ resumeSessionId, threadTs }) =>
+  return ({ resumeSessionId, threadTs, channelId }) =>
     new ClaudeProcess({
       resumeSessionId,
       threadTs,
+      channelId,
       cwd: opts.cwd,
       gates: opts.gates,
       allowList: opts.allowList,

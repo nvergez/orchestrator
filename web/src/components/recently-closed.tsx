@@ -49,9 +49,11 @@ export function RecentlyClosed({
           </li>
         ))}
         {sessions.map((session) => (
-          <li key={session.threadTs} className={`animate-enter ${listRow}`}>
+          <li key={`${session.channelId}:${session.threadTs}`} className={`animate-enter ${listRow}`}>
             <Badge>◌ session closed</Badge>
-            <span className="font-mono text-2xs">thread {session.threadTs}</span>
+            <span className="font-mono text-2xs">
+              channel {session.channelId} · thread {session.threadTs}
+            </span>
             <span className="ml-auto text-2xs tabular-nums">
               {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
               {' · '}${session.costUsdTotal.toFixed(2)}

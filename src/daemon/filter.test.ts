@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { classifyEvent } from './filter.ts';
 
 const guard = {
-  channelId: 'C0EXAMPLE123',
-  allowedUserId: 'U0EXAMPLE456',
+  channelIds: ['C0EXAMPLE123', 'C0EXAMPLE789'],
+  allowedUserIds: ['U0EXAMPLE456', 'U0EXAMPLE999'],
   botUserId: 'U0EXAMPLEBOT',
 };
 
@@ -31,6 +31,15 @@ describe('classifyEvent', () => {
       threadTs: '1751970000.000100',
       text: 'deploy the fix',
     });
+  });
+
+  it('accepts every configured channel and authorized user', () => {
+    expect(
+      classifyEvent(
+        { ...mention, channel: 'C0EXAMPLE789', user: 'U0EXAMPLE999' },
+        guard,
+      ).action,
+    ).toBe('open');
   });
 
   it('treats a mention inside a thread as a reply, not a new session (spec §3: open = root only)', () => {

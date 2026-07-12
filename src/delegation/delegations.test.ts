@@ -349,6 +349,107 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
   });
 });
 
+describe('DelegationStore — composite Slack thread identity (#93)', () => {
+  it('keeps identical thread timestamps isolated by channel', () => {
+    const store = openStore();
+    const otherChannel = 'C0OTHER';
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_a', taskId: 'task_same' }));
+    store.recordDispatch(
+      dispatchRow({ dispatchId: 'ctx_b', taskId: 'task_same', channelId: otherChannel }),
+    );
+    store.setMailbox(THREAD, CHANNEL, 'term_a');
+    store.setMailbox(THREAD, otherChannel, 'term_b');
+    store.recordGate(gateRow({ msgId: 'msg_a', dispatchId: 'ctx_a', channelId: CHANNEL }));
+    store.recordGate(
+      gateRow({ msgId: 'msg_b', dispatchId: 'ctx_b', channelId: otherChannel }),
+    );
+
+    expect(store.listInFlightForThread(THREAD, CHANNEL).map((row) => row.dispatchId)).toEqual([
+      'ctx_a',
+    ]);
+    expect(
+      store.resolveWorkerEvent(THREAD, { taskId: 'task_same' }, otherChannel)?.dispatchId,
+    ).toBe('ctx_b');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_a');
+    expect(store.getMailbox(THREAD, otherChannel)).toBe('term_b');
+    expect(store.listPendingGates(THREAD, CHANNEL).map((row) => row.msgId)).toEqual(['msg_a']);
+    expect(store.listPendingGates(THREAD, otherChannel).map((row) => row.msgId)).toEqual(['msg_b']);
+  });
+
+  it('migrates the single-channel thread tables in place and permits collisions afterward', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-multichannel-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE delegations (
+          dispatch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, worktree_id TEXT,
+          worktree_name TEXT, worktree_path TEXT, repo TEXT, issue_number INTEGER,
+          agent TEXT, worker_handle TEXT, thread_ts TEXT NOT NULL, channel_id TEXT NOT NULL,
+          card_ts TEXT, title TEXT, status TEXT NOT NULL DEFAULT 'dispatched'
+            CHECK (status IN ('dispatched', 'completed', 'failed')),
+          dispatched_at TEXT NOT NULL, last_bus_at TEXT, closed_at TEXT
+        ) STRICT;
+        CREATE TABLE mailboxes (
+          thread_ts TEXT PRIMARY KEY, channel_id TEXT NOT NULL, handle TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE reconciliations (
+          thread_ts TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, posted_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE pending_gates (
+          msg_id TEXT PRIMARY KEY, thread_ts TEXT NOT NULL, task_id TEXT, dispatch_id TEXT,
+          worker_handle TEXT, worktree_name TEXT, kind TEXT NOT NULL
+            CHECK (kind IN ('decision_gate', 'escalation')),
+          question TEXT NOT NULL, options TEXT NOT NULL, relay_ts TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'answered', 'superseded', 'closed')),
+          superseded_by TEXT, relayed_at TEXT NOT NULL, answered_at TEXT
+        ) STRICT;
+        CREATE TABLE stall_alerts (
+          dispatch_id TEXT PRIMARY KEY, thread_ts TEXT NOT NULL, worker_handle TEXT,
+          worktree_name TEXT, last_output TEXT NOT NULL, fingerprint TEXT NOT NULL,
+          relay_ts TEXT, status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending', 'answered')),
+          alerted_at TEXT NOT NULL, answered_at TEXT
+        ) STRICT;
+        INSERT INTO delegations
+          (dispatch_id, task_id, worker_handle, thread_ts, channel_id, status, dispatched_at)
+          VALUES ('ctx_old', 'task_old', 'term_old', '${THREAD}', '${CHANNEL}', 'dispatched',
+                  '2026-07-08T12:00:00.000Z');
+        INSERT INTO mailboxes VALUES ('${THREAD}', '${CHANNEL}', 'term_old_mb',
+                                      '2026-07-08T12:00:00.000Z');
+        INSERT INTO reconciliations VALUES ('${THREAD}', 'old-fingerprint',
+                                             '2026-07-08T12:00:00.000Z');
+        INSERT INTO pending_gates
+          (msg_id, thread_ts, task_id, dispatch_id, worker_handle, kind, question,
+           options, status, relayed_at)
+          VALUES ('msg_old', '${THREAD}', 'task_old', 'ctx_old', 'term_old',
+                  'decision_gate', 'continue?', '[]', 'pending',
+                  '2026-07-08T12:00:00.000Z');
+        INSERT INTO stall_alerts
+          (dispatch_id, thread_ts, worker_handle, last_output, fingerprint, status, alerted_at)
+          VALUES ('ctx_old', '${THREAD}', 'term_old', 'waiting', 'fp', 'pending',
+                  '2026-07-08T12:00:00.000Z');
+      `);
+      legacy.close();
+
+      const store = new DelegationStore(dbPath);
+      expect(store.getGate('msg_old')?.channelId).toBe(CHANNEL);
+      expect(store.getStall('ctx_old')?.channelId).toBe(CHANNEL);
+      expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('old-fingerprint');
+      store.setMailbox(THREAD, 'C0OTHER', 'term_other');
+      store.setReconcileFingerprint(THREAD, 'other-fingerprint', 'C0OTHER');
+      expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_old_mb');
+      expect(store.getMailbox(THREAD, 'C0OTHER')).toBe('term_other');
+      expect(store.getReconcileFingerprint(THREAD, 'C0OTHER')).toBe('other-fingerprint');
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('DelegationStore — mailboxes', () => {
   it('remembers a thread mailbox handle across lookups', () => {
     const store = openStore();
@@ -380,6 +481,7 @@ describe('DelegationStore — mailboxes', () => {
 const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
   msgId: 'msg_6a8c14d55c7d',
   threadTs: THREAD,
+  channelId: CHANNEL,
   taskId: 'task_13c700f151b3',
   dispatchId: 'ctx_8b685db09a47',
   workerHandle: 'term_300035ab',
@@ -456,6 +558,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
   const stallRow = (overrides: Partial<Parameters<DelegationStore['recordStall']>[0]> = {}) => ({
     dispatchId: 'ctx_8b685db09a47',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_300035ab',
     worktreeName: 'sandbox-21-bench',
     lastOutput: '? Overwrite existing bench.json? (y/N)',

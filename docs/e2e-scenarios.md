@@ -1,7 +1,7 @@
 # Live e2e scenarios — driving the deployed bot
 
 How to exercise the orchestrator end-to-end against the **deployed daemon** (no mocks): post to
-the pinned channel (your `SLACK_CHANNEL_ID`) as the allowed user, watch `journalctl --user -u orchestrator -f`,
+one configured channel (from `SLACK_CHANNEL_IDS`) as an allowed user, watch `journalctl --user -u orchestrator -f`,
 and verify worker side-effects on disk. First run: 2026-07-09 (findings became issues #45–#52,
 all fixed and redeployed the same day).
 
@@ -34,7 +34,7 @@ all fixed and redeployed the same day).
 | S7 | 🚦 gate replies | Trigger any CONFIRM command (e.g. ask it to `worktree rm` something) | `go — <comment>` **approves** (#47); a denial gets a visible "taking that as a no" ack, never a silent identical re-gate; denied read still answers best-effort |
 | S8 | Restart reconcile ("Daemon restart") | `systemctl --user restart orchestrator` with a delegation in flight | One ⚠️ line per affected thread, sessions not woken; next human message resumes supervision |
 
-Not drivable single-user: third-party filter (G1/G2), the ⏳ session-cap queue, $5/$10 cost warnings
+Not drivable without another account: third-party filter (G1/G2), the ⏳ session-cap queue, $5/$10 cost warnings
 (would need real spend). Covered by unit tests instead.
 
 ## Failure modes to watch (seen live on 2026-07-09)

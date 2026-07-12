@@ -6,8 +6,8 @@ import { ConfigError, loadConfig, resolveDashboardAddress } from './config.ts';
 const validEnv = {
   SLACK_BOT_TOKEN: 'xoxb-1111-2222-abc',
   SLACK_APP_TOKEN: 'xapp-1-A111-222-abc',
-  SLACK_CHANNEL_ID: 'C0EXAMPLE123',
-  SLACK_ALLOWED_USER_ID: 'U0EXAMPLE456',
+  SLACK_CHANNEL_IDS: 'C0EXAMPLE123, C0EXAMPLE789',
+  SLACK_ALLOWED_USER_IDS: 'U0EXAMPLE456, U0EXAMPLE999',
   CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-abc123',
 };
 
@@ -18,8 +18,8 @@ describe('loadConfig', () => {
     expect(config).toEqual({
       slackBotToken: 'xoxb-1111-2222-abc',
       slackAppToken: 'xapp-1-A111-222-abc',
-      slackChannelId: 'C0EXAMPLE123',
-      slackAllowedUserId: 'U0EXAMPLE456',
+      slackChannelIds: ['C0EXAMPLE123', 'C0EXAMPLE789'],
+      slackAllowedUserIds: ['U0EXAMPLE456', 'U0EXAMPLE999'],
       claudeCodeOauthToken: 'sk-ant-oat01-abc123',
       logLevel: 'info',
       dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
@@ -39,21 +39,51 @@ describe('loadConfig', () => {
   it('fails fast, naming every missing key at once', () => {
     expect(() => loadConfig({})).toThrowError(ConfigError);
     expect(() => loadConfig({})).toThrowError(
-      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_ID.*SLACK_ALLOWED_USER_ID.*CLAUDE_CODE_OAUTH_TOKEN/s,
+      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_IDS.*SLACK_ALLOWED_USER_IDS.*CLAUDE_CODE_OAUTH_TOKEN/s,
     );
   });
 
   it.each([
     ['SLACK_BOT_TOKEN', 'xapp-not-a-bot-token', 'xoxb-'],
     ['SLACK_APP_TOKEN', 'xoxb-not-an-app-token', 'xapp-'],
-    ['SLACK_CHANNEL_ID', 'U0EXAMPLE456', 'C'],
-    ['SLACK_ALLOWED_USER_ID', 'C0EXAMPLE123', 'U'],
+    ['SLACK_CHANNEL_IDS', 'C0EXAMPLE123,U0EXAMPLE456', 'C'],
+    ['SLACK_ALLOWED_USER_IDS', 'U0EXAMPLE456,C0EXAMPLE123', 'U'],
     ['CLAUDE_CODE_OAUTH_TOKEN', 'xoxb-not-an-oauth-token', 'sk-ant-'],
   ])('rejects a malformed %s (must start with %s)', (key, badValue) => {
     const env = { ...validEnv, [key]: badValue };
 
     expect(() => loadConfig(env)).toThrowError(ConfigError);
     expect(() => loadConfig(env)).toThrowError(new RegExp(key));
+  });
+
+  it('de-duplicates plural Slack IDs in declaration order', () => {
+    const config = loadConfig({
+      ...validEnv,
+      SLACK_CHANNEL_IDS: 'C1,C2,C1',
+      SLACK_ALLOWED_USER_IDS: 'U1,U2,U1',
+    });
+    expect(config.slackChannelIds).toEqual(['C1', 'C2']);
+    expect(config.slackAllowedUserIds).toEqual(['U1', 'U2']);
+  });
+
+  it('accepts the legacy singular Slack ID variables when plural variables are absent', () => {
+    const { SLACK_CHANNEL_IDS: _channels, SLACK_ALLOWED_USER_IDS: _users, ...base } = validEnv;
+    const config = loadConfig({
+      ...base,
+      SLACK_CHANNEL_ID: 'C0LEGACY',
+      SLACK_ALLOWED_USER_ID: 'U0LEGACY',
+    });
+    expect(config.slackChannelIds).toEqual(['C0LEGACY']);
+    expect(config.slackAllowedUserIds).toEqual(['U0LEGACY']);
+  });
+
+  it('rejects ambiguous singular and plural Slack ID variables', () => {
+    expect(() => loadConfig({ ...validEnv, SLACK_CHANNEL_ID: 'C0LEGACY' })).toThrowError(
+      /SLACK_CHANNEL_IDS.*SLACK_CHANNEL_ID/,
+    );
+    expect(() => loadConfig({ ...validEnv, SLACK_ALLOWED_USER_ID: 'U0LEGACY' })).toThrowError(
+      /SLACK_ALLOWED_USER_IDS.*SLACK_ALLOWED_USER_ID/,
+    );
   });
 
   it('honors LOG_LEVEL when provided', () => {

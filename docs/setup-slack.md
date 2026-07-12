@@ -3,7 +3,7 @@
 The orchestrator needs **its own Slack app** in your workspace — one app per
 install. Everything the app must *be* is pre-baked in the manifest below; what
 Slack cannot pre-configure, you do by hand in five short steps: mint two
-tokens, install the app, invite the bot into a channel, and copy four values
+tokens, install the app, invite the bot into each managed channel, and copy four values
 into your config.
 
 You end up with the four Slack values of `~/.config/orchestrator/env`
@@ -13,8 +13,8 @@ You end up with the four Slack values of `~/.config/orchestrator/env`
 |---|---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-` | Bot User OAuth Token — all Web API calls |
 | `SLACK_APP_TOKEN` | `xapp-` | App-level token — opens the Socket Mode WebSocket |
-| `SLACK_CHANNEL_ID` | `C` | The single channel the daemon listens to |
-| `SLACK_ALLOWED_USER_ID` | `U` | Your user ID — the only human the daemon obeys |
+| `SLACK_CHANNEL_IDS` | `C` | Comma-separated channel IDs the daemon listens to |
+| `SLACK_ALLOWED_USER_IDS` | `U` | Comma-separated users authorized to operate any managed thread |
 
 The app runs in **Socket Mode**: it connects outbound to Slack over a
 WebSocket, so your machine needs no public URL, reverse proxy, or open port.
@@ -103,26 +103,27 @@ authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
 
-## 4. Create or choose the channel and invite the bot
+## 4. Choose the channels and invite the bot
 
-The daemon listens to **one dedicated channel** — public or private, your
-choice — and ignores every other conversation. In that channel, run
+The daemon listens to the configured channels — public or private, your
+choice — and ignores every other conversation. In each channel, run
 `/invite @orchestrator` (or *Add apps* from the channel settings).
 
 Membership is not cosmetic: Slack only delivers events for conversations the
 bot is party to, and `chat:write` only lets it post where it is a member. No
 invite → no bot.
 
-## 5. Collect the two IDs
+## 5. Collect the channel and operator IDs
 
-- **Channel ID → `SLACK_CHANNEL_ID`.** Click the channel name to open its
+- **Channel IDs → `SLACK_CHANNEL_IDS`.** For each channel, click the channel name to open its
   details; the **Channel ID** is at the bottom of the *About* tab (with a
   copy button). It must start with `C` — modern private channels also use
   `C…` IDs.
-- **Your user ID → `SLACK_ALLOWED_USER_ID`.** Click your profile picture →
-  **Profile** → the **⋮** menu → **Copy member ID** — a `U…` value. This is
-  the single authorized user: root mentions by anyone else get one polite
-  refusal; thread replies by anyone else are silently ignored.
+- **Authorized user IDs → `SLACK_ALLOWED_USER_IDS`.** For each operator, open
+  their **Profile** → the **⋮** menu → **Copy member ID** — a `U…` value.
+  Any listed operator may open, reply to, answer gates in, or close any managed
+  thread. Root mentions by anyone else get one polite refusal; their thread
+  replies are silently ignored.
 
 ## 6. Fill the env file and smoke-test
 

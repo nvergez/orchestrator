@@ -168,6 +168,19 @@ describe('GateKeeper.cancelThread', () => {
   });
 });
 
+describe('GateKeeper multi-channel isolation (#93)', () => {
+  it('does not let an answer resolve the same timestamp in another channel', async () => {
+    const { gates } = makeHarness();
+    const first = gates.request(THREAD, 'first?', undefined, 'C0FIRST');
+    const second = gates.request(THREAD, 'second?', undefined, 'C0SECOND');
+
+    expect(gates.tryResolve(THREAD, USER, 'go', 'C0SECOND')).toBe(true);
+    await expect(second).resolves.toEqual({ approved: true, reply: 'go' });
+    expect(gates.tryResolve(THREAD, USER, 'no', 'C0FIRST')).toBe(true);
+    await expect(first).resolves.toEqual({ approved: false, reply: 'no' });
+  });
+});
+
 describe('isApproval', () => {
   it.each(['go', 'Go', 'GO', 'go!', 'go ahead', 'yes', 'y', 'yep', 'yeah', 'ok', 'okay', 'approve', 'approved', '👍', '✅'])(
     'approves %j',

@@ -36,6 +36,7 @@ export interface PendingGateRow {
   /** The bus message id (`msg_…`) — what `orchestration reply --id` targets. */
   msgId: string;
   threadTs: string;
+  channelId: string;
   taskId: string | null;
   /** The owning delegation (`ctx_…`), when the relay could resolve one —
    * what invalidate-on-close matches first (issue #46). */
@@ -66,6 +67,7 @@ export interface StallAlertRow {
   /** The delegation the stall belongs to — also the row key. */
   dispatchId: string;
   threadTs: string;
+  channelId: string;
   /** The stalled worker's terminal — where the reply lands as keystrokes. */
   workerHandle: string | null;
   worktreeName: string | null;
@@ -132,6 +134,7 @@ export interface TurnContextStall {
 const PENDING_GATES_COLUMNS = `(
         msg_id        TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
         task_id       TEXT,
         dispatch_id   TEXT,
         worker_handle TEXT,
@@ -165,10 +168,9 @@ const PENDING_GATES_COLUMNS = `(
  * (`liveGateFor`), and what a session's turn context must list
  * (`turnContextFor`).
  *
- * Unlike `sessions`, the tables key on `thread_ts` alone — deliberate: the
- * daemon serves the single pinned channel (spec §2), and the coordinator
- * side only ever sees a thread ts. `channel_id` is stored so the rows stay
- * self-describing, not to disambiguate.
+ * Slack thread identity is `(channel_id, thread_ts)` (#93). Runtime-issued
+ * dispatch/message ids stay globally unique, while every thread-scoped
+ * query and thread-owned table carries both dimensions.
  */
 export class DelegationStore {
   private readonly db: DatabaseSync;
@@ -205,20 +207,24 @@ export class DelegationStore {
         closed_at     TEXT
       ) STRICT;
       CREATE TABLE IF NOT EXISTS mailboxes (
-        thread_ts  TEXT PRIMARY KEY,
+        thread_ts  TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         handle     TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_ts, channel_id)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS reconciliations (
-        thread_ts   TEXT PRIMARY KEY,
+        thread_ts   TEXT NOT NULL,
+        channel_id  TEXT NOT NULL,
         fingerprint TEXT NOT NULL,
-        posted_at   TEXT NOT NULL
+        posted_at   TEXT NOT NULL,
+        PRIMARY KEY (thread_ts, channel_id)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS pending_gates ${PENDING_GATES_COLUMNS};
       CREATE TABLE IF NOT EXISTS stall_alerts (
         dispatch_id   TEXT PRIMARY KEY,
         thread_ts     TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
         worker_handle TEXT,
         worktree_name TEXT,
         last_output   TEXT NOT NULL,
@@ -232,6 +238,7 @@ export class DelegationStore {
     `);
     this.migratePendingGates();
     this.migrateDelegations();
+    this.migrateThreadTables();
   }
 
   /**
@@ -258,20 +265,115 @@ export class DelegationStore {
     const schema = this.db
       .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pending_gates'`)
       .get() as { sql?: unknown } | undefined;
-    if (typeof schema?.sql !== 'string' || schema.sql.includes('superseded')) return;
+    if (
+      typeof schema?.sql !== 'string' ||
+      (schema.sql.includes('superseded') && schema.sql.includes('channel_id'))
+    ) return;
+    const columns = new Set(
+      (this.db.prepare(`SELECT name FROM pragma_table_info('pending_gates')`).all() as Array<{ name: string }>).map(
+        (row) => row.name,
+      ),
+    );
+    const dispatchId = columns.has('dispatch_id') ? 'dispatch_id' : 'NULL';
+    const supersededBy = columns.has('superseded_by') ? 'superseded_by' : 'NULL';
+    const channelId = columns.has('channel_id')
+      ? 'channel_id'
+      : `COALESCE(
+          (SELECT d.channel_id FROM delegations d
+           WHERE (${columns.has('dispatch_id') ? 'd.dispatch_id = pending_gates.dispatch_id' : '0'})
+           LIMIT 1),
+          (SELECT d.channel_id FROM delegations d
+           WHERE d.thread_ts = pending_gates.thread_ts
+             AND (d.task_id = pending_gates.task_id OR d.worker_handle = pending_gates.worker_handle)
+           ORDER BY d.dispatched_at DESC LIMIT 1),
+          (SELECT m.channel_id FROM mailboxes m
+           WHERE m.thread_ts = pending_gates.thread_ts LIMIT 1),
+          '')`;
     this.db.exec(`
       BEGIN;
       CREATE TABLE pending_gates_next ${PENDING_GATES_COLUMNS};
       INSERT INTO pending_gates_next
-        (msg_id, thread_ts, task_id, worker_handle, worktree_name,
-         kind, question, options, relay_ts, status, relayed_at, answered_at)
-        SELECT msg_id, thread_ts, task_id, worker_handle, worktree_name,
-               kind, question, options, relay_ts, status, relayed_at, answered_at
+        (msg_id, thread_ts, channel_id, task_id, dispatch_id, worker_handle,
+         worktree_name, kind, question, options, relay_ts, status,
+         superseded_by, relayed_at, answered_at)
+        SELECT msg_id, thread_ts, ${channelId}, task_id, ${dispatchId}, worker_handle,
+               worktree_name, kind, question, options, relay_ts, status,
+               ${supersededBy}, relayed_at, answered_at
         FROM pending_gates;
       DROP TABLE pending_gates;
       ALTER TABLE pending_gates_next RENAME TO pending_gates;
       COMMIT;
     `);
+  }
+
+  /** Re-keys the remaining single-channel thread tables in place (#93). */
+  private migrateThreadTables(): void {
+    const mailboxSchema = this.tableSql('mailboxes');
+    if (!mailboxSchema.includes('PRIMARY KEY (thread_ts, channel_id)')) {
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE mailboxes_next (
+          thread_ts TEXT NOT NULL, channel_id TEXT NOT NULL, handle TEXT NOT NULL,
+          created_at TEXT NOT NULL, PRIMARY KEY (thread_ts, channel_id)
+        ) STRICT;
+        INSERT INTO mailboxes_next SELECT thread_ts, channel_id, handle, created_at FROM mailboxes;
+        DROP TABLE mailboxes;
+        ALTER TABLE mailboxes_next RENAME TO mailboxes;
+        COMMIT;
+      `);
+    }
+
+    const reconciliationSchema = this.tableSql('reconciliations');
+    if (!reconciliationSchema.includes('channel_id')) {
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE reconciliations_next (
+          thread_ts TEXT NOT NULL, channel_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+          posted_at TEXT NOT NULL, PRIMARY KEY (thread_ts, channel_id)
+        ) STRICT;
+        INSERT INTO reconciliations_next
+          SELECT r.thread_ts,
+                 COALESCE(
+                   (SELECT d.channel_id FROM delegations d WHERE d.thread_ts = r.thread_ts LIMIT 1),
+                   (SELECT m.channel_id FROM mailboxes m WHERE m.thread_ts = r.thread_ts LIMIT 1),
+                   ''),
+                 r.fingerprint, r.posted_at
+          FROM reconciliations r;
+        DROP TABLE reconciliations;
+        ALTER TABLE reconciliations_next RENAME TO reconciliations;
+        COMMIT;
+      `);
+    }
+
+    const stallSchema = this.tableSql('stall_alerts');
+    if (!stallSchema.includes('channel_id')) {
+      this.db.exec(`
+        BEGIN;
+        CREATE TABLE stall_alerts_next (
+          dispatch_id TEXT PRIMARY KEY, thread_ts TEXT NOT NULL, channel_id TEXT NOT NULL,
+          worker_handle TEXT, worktree_name TEXT, last_output TEXT NOT NULL,
+          fingerprint TEXT NOT NULL, relay_ts TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered')),
+          alerted_at TEXT NOT NULL, answered_at TEXT
+        ) STRICT;
+        INSERT INTO stall_alerts_next
+          SELECT s.dispatch_id, s.thread_ts,
+                 COALESCE((SELECT d.channel_id FROM delegations d WHERE d.dispatch_id = s.dispatch_id), ''),
+                 s.worker_handle, s.worktree_name, s.last_output, s.fingerprint,
+                 s.relay_ts, s.status, s.alerted_at, s.answered_at
+          FROM stall_alerts s;
+        DROP TABLE stall_alerts;
+        ALTER TABLE stall_alerts_next RENAME TO stall_alerts;
+        COMMIT;
+      `);
+    }
+  }
+
+  private tableSql(name: string): string {
+    const row = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(name) as { sql?: unknown } | undefined;
+    return typeof row?.sql === 'string' ? row.sql : '';
   }
 
   /**
@@ -362,11 +464,11 @@ export class DelegationStore {
     this.db
       .prepare(
         `UPDATE pending_gates SET status = 'closed'
-         WHERE thread_ts = ? AND status = 'pending'
+         WHERE thread_ts = ? AND channel_id = ? AND status = 'pending'
            AND (dispatch_id = ?
                 OR (dispatch_id IS NULL AND (task_id = ? OR worker_handle = ?)))`,
       )
-      .run(row.threadTs, dispatchId, row.taskId, row.workerHandle);
+      .run(row.threadTs, row.channelId, dispatchId, row.taskId, row.workerHandle);
   }
 
   getByDispatchId(dispatchId: string): DelegationRow | undefined {
@@ -395,65 +497,54 @@ export class DelegationStore {
    *   carries no ids at all): the thread's newest in-flight row for that
    *   handle.
    */
-  resolveWorkerEvent(threadTs: string, event: WorkerEventKeys): DelegationRow | undefined {
+  resolveWorkerEvent(
+    threadTs: string,
+    event: WorkerEventKeys,
+    channelId?: string,
+  ): DelegationRow | undefined {
     if (event.dispatchId !== undefined) return this.getByDispatchId(event.dispatchId);
     if (event.taskId !== undefined) {
       return (
-        this.inFlightByTaskId(threadTs, event.taskId) ??
-        this.latestByTaskId(threadTs, event.taskId)
+        this.inFlightByTaskId(threadTs, channelId, event.taskId) ??
+        this.latestByTaskId(threadTs, channelId, event.taskId)
       );
     }
     if (event.workerHandle !== undefined) {
-      return this.inFlightByWorkerHandle(threadTs, event.workerHandle);
+      return this.inFlightByWorkerHandle(threadTs, channelId, event.workerHandle);
     }
     return undefined;
   }
 
   /** The thread's newest in-flight row for a task — thread-scoped, so the
    * runtime-global bus can never close another thread's delegation. */
-  private inFlightByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM delegations
-         WHERE thread_ts = ? AND task_id = ? AND status = 'dispatched'
-         ORDER BY dispatched_at DESC LIMIT 1`,
-      )
-      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+  private inFlightByTaskId(threadTs: string, channelId: string | undefined, taskId: string): DelegationRow | undefined {
+    const row = (channelId === undefined || channelId === ''
+      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND task_id = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, taskId)
+      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, taskId)) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest in-flight row for an asking terminal (issue #21). */
-  private inFlightByWorkerHandle(threadTs: string, workerHandle: string): DelegationRow | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM delegations
-         WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched'
-         ORDER BY dispatched_at DESC LIMIT 1`,
-      )
-      .get(threadTs, workerHandle) as Record<string, unknown> | undefined;
+  private inFlightByWorkerHandle(threadTs: string, channelId: string | undefined, workerHandle: string): DelegationRow | undefined {
+    const row = (channelId === undefined || channelId === ''
+      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND worker_handle = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, workerHandle)
+      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND worker_handle = ? AND status = 'dispatched' ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, workerHandle)) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's newest row for a task, ANY status (issue #25). */
-  private latestByTaskId(threadTs: string, taskId: string): DelegationRow | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM delegations
-         WHERE thread_ts = ? AND task_id = ?
-         ORDER BY dispatched_at DESC LIMIT 1`,
-      )
-      .get(threadTs, taskId) as Record<string, unknown> | undefined;
+  private latestByTaskId(threadTs: string, channelId: string | undefined, taskId: string): DelegationRow | undefined {
+    const row = (channelId === undefined || channelId === ''
+      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND task_id = ? ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, taskId)
+      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND task_id = ? ORDER BY dispatched_at DESC LIMIT 1`).get(threadTs, channelId, taskId)) as Record<string, unknown> | undefined;
     return row === undefined ? undefined : toDelegationRow(row);
   }
 
   /** The thread's in-flight delegations — what keeps its watcher armed (#20). */
-  listInFlightForThread(threadTs: string): DelegationRow[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM delegations
-         WHERE thread_ts = ? AND status = 'dispatched' ORDER BY dispatched_at`,
-      )
-      .all(threadTs) as Array<Record<string, unknown>>;
+  listInFlightForThread(threadTs: string, channelId?: string): DelegationRow[] {
+    const rows = (channelId === undefined || channelId === ''
+      ? this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND status = 'dispatched' ORDER BY dispatched_at`).all(threadTs)
+      : this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? AND status = 'dispatched' ORDER BY dispatched_at`).all(threadTs, channelId)) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
@@ -486,18 +577,18 @@ export class DelegationStore {
   }
 
   /** All of a thread's delegations, oldest first — the 🔚 summary's ledger. */
-  listForThread(threadTs: string): DelegationRow[] {
-    const rows = this.db
-      .prepare('SELECT * FROM delegations WHERE thread_ts = ? ORDER BY dispatched_at')
-      .all(threadTs) as Array<Record<string, unknown>>;
+  listForThread(threadTs: string, channelId?: string): DelegationRow[] {
+    const rows = (channelId === undefined || channelId === ''
+      ? this.db.prepare('SELECT * FROM delegations WHERE thread_ts = ? ORDER BY dispatched_at').all(threadTs)
+      : this.db.prepare('SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ? ORDER BY dispatched_at').all(threadTs, channelId)) as Array<Record<string, unknown>>;
     return rows.map(toDelegationRow);
   }
 
   /** The thread's mailbox terminal handle, if one was ever created (issue #9). */
-  getMailbox(threadTs: string): string | undefined {
-    const row = this.db
-      .prepare('SELECT handle FROM mailboxes WHERE thread_ts = ?')
-      .get(threadTs) as { handle: string } | undefined;
+  getMailbox(threadTs: string, channelId?: string): string | undefined {
+    const row = (channelId === undefined || channelId === ''
+      ? this.db.prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1').get(threadTs)
+      : this.db.prepare('SELECT handle FROM mailboxes WHERE thread_ts = ? AND channel_id = ?').get(threadTs, channelId)) as { handle: string } | undefined;
     return row?.handle;
   }
 
@@ -517,21 +608,21 @@ export class DelegationStore {
    * classes. Repeated restarts with unchanged state compare equal here and
    * post no second ⚠️ line.
    */
-  getReconcileFingerprint(threadTs: string): string | undefined {
-    const row = this.db
-      .prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ?')
-      .get(threadTs) as { fingerprint: string } | undefined;
+  getReconcileFingerprint(threadTs: string, channelId?: string): string | undefined {
+    const row = (channelId === undefined || channelId === ''
+      ? this.db.prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? ORDER BY posted_at DESC LIMIT 1').get(threadTs)
+      : this.db.prepare('SELECT fingerprint FROM reconciliations WHERE thread_ts = ? AND channel_id = ?').get(threadTs, channelId)) as { fingerprint: string } | undefined;
     return row?.fingerprint;
   }
 
   /** Remembers what the thread's ⚠️ line last reported (issue #25). */
-  setReconcileFingerprint(threadTs: string, fingerprint: string): void {
+  setReconcileFingerprint(threadTs: string, fingerprint: string, channelId = ''): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO reconciliations (thread_ts, fingerprint, posted_at)
-         VALUES (?, ?, ?)`,
+        `INSERT OR REPLACE INTO reconciliations (thread_ts, channel_id, fingerprint, posted_at)
+         VALUES (?, ?, ?, ?)`,
       )
-      .run(threadTs, fingerprint, this.now());
+      .run(threadTs, channelId, fingerprint, this.now());
   }
 
   /**
@@ -541,18 +632,22 @@ export class DelegationStore {
    * call inserted the row.
    */
   recordGate(
-    row: Omit<PendingGateRow, 'status' | 'supersededBy' | 'relayedAt' | 'answeredAt'>,
+    row: Omit<PendingGateRow, 'channelId' | 'status' | 'supersededBy' | 'relayedAt' | 'answeredAt'> & {
+      channelId?: string;
+    },
   ): boolean {
+    const channelId = row.channelId ?? this.channelForThread(row.threadTs, row.dispatchId);
     const { changes } = this.db
       .prepare(
         `INSERT OR IGNORE INTO pending_gates
-           (msg_id, thread_ts, task_id, dispatch_id, worker_handle, worktree_name,
+           (msg_id, thread_ts, channel_id, task_id, dispatch_id, worker_handle, worktree_name,
             kind, question, options, relay_ts, status, relayed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         row.msgId,
         row.threadTs,
+        channelId,
         row.taskId,
         row.dispatchId,
         row.workerHandle,
@@ -601,28 +696,29 @@ export class DelegationStore {
     let current = this.getGate(msgId);
     if (current === undefined) return undefined;
     const threadTs = current.threadTs;
+    const channelId = current.channelId;
     const seen = new Set<string>([current.msgId]);
     while (current.status === 'superseded') {
       if (current.supersededBy === null || seen.has(current.supersededBy)) return undefined;
       seen.add(current.supersededBy);
       const next = this.getGate(current.supersededBy);
-      if (next === undefined || next.threadTs !== threadTs) return undefined;
+      if (next === undefined || next.threadTs !== threadTs || next.channelId !== channelId) return undefined;
       current = next;
     }
     return current;
   }
 
   /** All of a thread's relayed gates, oldest first. */
-  private listGatesForThread(threadTs: string): PendingGateRow[] {
-    const rows = this.db
-      .prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id')
-      .all(threadTs) as Array<Record<string, unknown>>;
+  private listGatesForThread(threadTs: string, channelId?: string): PendingGateRow[] {
+    const rows = (channelId === undefined || channelId === ''
+      ? this.db.prepare('SELECT * FROM pending_gates WHERE thread_ts = ? ORDER BY relayed_at, msg_id').all(threadTs)
+      : this.db.prepare('SELECT * FROM pending_gates WHERE thread_ts = ? AND channel_id = ? ORDER BY relayed_at, msg_id').all(threadTs, channelId)) as Array<Record<string, unknown>>;
     return rows.map(toPendingGateRow);
   }
 
   /** The thread's unanswered gates — what the root reaction and routing read. */
-  listPendingGates(threadTs: string): PendingGateRow[] {
-    return this.listGatesForThread(threadTs).filter((gate) => gate.status === 'pending');
+  listPendingGates(threadTs: string, channelId?: string): PendingGateRow[] {
+    return this.listGatesForThread(threadTs, channelId).filter((gate) => gate.status === 'pending');
   }
 
   /**
@@ -634,8 +730,8 @@ export class DelegationStore {
    * from an open one (issue #46). Superseded rows stay out: their question
    * lives on in the re-ask successor.
    */
-  turnContextFor(threadTs: string): { gates: TurnContextGate[]; stalls: TurnContextStall[] } {
-    const gates = this.listGatesForThread(threadTs)
+  turnContextFor(threadTs: string, channelId?: string): { gates: TurnContextGate[]; stalls: TurnContextStall[] } {
+    const gates = this.listGatesForThread(threadTs, channelId)
       .filter(
         (gate): gate is PendingGateRow & { status: TurnContextGate['status'] } =>
           gate.status !== 'superseded',
@@ -655,7 +751,7 @@ export class DelegationStore {
             gate.msgId,
         }),
       );
-    const stalls = this.listStallsForThread(threadTs).map(
+    const stalls = this.listStallsForThread(threadTs, channelId).map(
       (stall): TurnContextStall => ({
         dispatchId: stall.dispatchId,
         status: stall.status,
@@ -691,17 +787,23 @@ export class DelegationStore {
    * row wholesale — back to pending, new output, new relay ts — which is
    * exactly the "one alert per stall state" contract.
    */
-  recordStall(row: Omit<StallAlertRow, 'status' | 'alertedAt' | 'answeredAt'>): void {
+  recordStall(
+    row: Omit<StallAlertRow, 'channelId' | 'status' | 'alertedAt' | 'answeredAt'> & {
+      channelId?: string;
+    },
+  ): void {
+    const channelId = row.channelId ?? this.channelForThread(row.threadTs, row.dispatchId);
     this.db
       .prepare(
         `INSERT OR REPLACE INTO stall_alerts
-           (dispatch_id, thread_ts, worker_handle, worktree_name,
+           (dispatch_id, thread_ts, channel_id, worker_handle, worktree_name,
             last_output, fingerprint, relay_ts, status, alerted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         row.dispatchId,
         row.threadTs,
+        channelId,
         row.workerHandle,
         row.worktreeName,
         row.lastOutput,
@@ -720,16 +822,16 @@ export class DelegationStore {
   }
 
   /** All of a thread's stall alerts, oldest first. */
-  private listStallsForThread(threadTs: string): StallAlertRow[] {
-    const rows = this.db
-      .prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id')
-      .all(threadTs) as Array<Record<string, unknown>>;
+  private listStallsForThread(threadTs: string, channelId?: string): StallAlertRow[] {
+    const rows = (channelId === undefined || channelId === ''
+      ? this.db.prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? ORDER BY alerted_at, dispatch_id').all(threadTs)
+      : this.db.prepare('SELECT * FROM stall_alerts WHERE thread_ts = ? AND channel_id = ? ORDER BY alerted_at, dispatch_id').all(threadTs, channelId)) as Array<Record<string, unknown>>;
     return rows.map(toStallAlertRow);
   }
 
   /** The thread's unanswered stall alerts — sanctioned send targets, 🚨 state. */
-  listPendingStalls(threadTs: string): StallAlertRow[] {
-    return this.listStallsForThread(threadTs).filter((stall) => stall.status === 'pending');
+  listPendingStalls(threadTs: string, channelId?: string): StallAlertRow[] {
+    return this.listStallsForThread(threadTs, channelId).filter((stall) => stall.status === 'pending');
   }
 
   /**
@@ -747,6 +849,17 @@ export class DelegationStore {
     return Number(changes) > 0;
   }
 
+  private channelForThread(threadTs: string, dispatchId: string | null): string {
+    if (dispatchId !== null) {
+      const delegation = this.getByDispatchId(dispatchId);
+      if (delegation !== undefined) return delegation.channelId;
+    }
+    const mailbox = this.db
+      .prepare('SELECT channel_id FROM mailboxes WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1')
+      .get(threadTs) as { channel_id: string } | undefined;
+    return mailbox?.channel_id ?? '';
+  }
+
   close(): void {
     this.db.close();
   }
@@ -756,6 +869,7 @@ function toStallAlertRow(row: Record<string, unknown>): StallAlertRow {
   return {
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
+    channelId: row.channel_id as string,
     workerHandle: row.worker_handle as string | null,
     worktreeName: row.worktree_name as string | null,
     lastOutput: row.last_output as string,
@@ -771,6 +885,7 @@ function toPendingGateRow(row: Record<string, unknown>): PendingGateRow {
   return {
     msgId: row.msg_id as string,
     threadTs: row.thread_ts as string,
+    channelId: row.channel_id as string,
     taskId: row.task_id as string | null,
     dispatchId: row.dispatch_id as string | null,
     workerHandle: row.worker_handle as string | null,

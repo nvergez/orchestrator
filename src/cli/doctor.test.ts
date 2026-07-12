@@ -8,8 +8,8 @@ const DASHBOARD_UNIT_PATH = '/home/op/.config/systemd/user/orchestrator-dashboar
 const validEnv = {
   SLACK_BOT_TOKEN: 'xoxb-1111-2222-abc',
   SLACK_APP_TOKEN: 'xapp-1-A111-222-abc',
-  SLACK_CHANNEL_ID: 'C0EXAMPLE123',
-  SLACK_ALLOWED_USER_ID: 'U0EXAMPLE456',
+  SLACK_CHANNEL_IDS: 'C0EXAMPLE123,C0EXAMPLE789',
+  SLACK_ALLOWED_USER_IDS: 'U0EXAMPLE456,U0EXAMPLE999',
   CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-abc123',
 };
 
@@ -144,8 +144,8 @@ describe('runDoctorChecks', () => {
         `SLACK_BOT_TOKEN="${validEnv.SLACK_BOT_TOKEN}"`,
         '',
         `export SLACK_APP_TOKEN='${validEnv.SLACK_APP_TOKEN}'`,
-        `SLACK_CHANNEL_ID=${validEnv.SLACK_CHANNEL_ID}`,
-        `SLACK_ALLOWED_USER_ID=${validEnv.SLACK_ALLOWED_USER_ID}`,
+        `SLACK_CHANNEL_IDS=${validEnv.SLACK_CHANNEL_IDS}`,
+        `SLACK_ALLOWED_USER_IDS=${validEnv.SLACK_ALLOWED_USER_IDS}`,
         `CLAUDE_CODE_OAUTH_TOKEN=${validEnv.CLAUDE_CODE_OAUTH_TOKEN}`,
         '#LOG_LEVEL=info',
       ].join('\n'),

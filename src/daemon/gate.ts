@@ -1,4 +1,5 @@
 import type { Logger } from '../kernel/logger.ts';
+import { slackThreadKey } from '../kernel/thread.ts';
 
 /**
  * The 🚦 confirm gate (spec §7/§8): a CONFIRM-tier command suspends inside
@@ -20,17 +21,22 @@ export interface GateVerdict {
 
 /** The slice of GateKeeper that `canUseTool` suspends on. */
 export interface GateRequester {
-  request(threadTs: string, gateText: string, signal?: AbortSignal): Promise<GateVerdict>;
+  request(
+    threadTs: string,
+    gateText: string,
+    signal?: AbortSignal,
+    channelId?: string,
+  ): Promise<GateVerdict>;
 }
 
 /** The slice the Slack event path resolves gates through. */
 export interface GateResolver {
-  tryResolve(threadTs: string, userId: string, text: string): boolean;
+  tryResolve(threadTs: string, userId: string, text: string, channelId?: string): boolean;
 }
 
 /** The slice a session process holds: suspend on gates, release them at death. */
 export interface SessionGates extends GateRequester {
-  cancelThread(threadTs: string): void;
+  cancelThread(threadTs: string, channelId?: string): void;
 }
 
 /**
@@ -87,27 +93,34 @@ interface PendingGate {
 }
 
 export interface GateKeeperOptions {
-  allowedUserId: string;
+  allowedUserIds?: readonly string[];
+  /** Legacy single-user constructor option; plural callers should use allowedUserIds. */
+  allowedUserId?: string;
   /** chat.postMessage into the thread — how the 🚦 line reaches the human. */
-  post: (threadTs: string, text: string) => Promise<unknown>;
+  post: (threadTs: string, text: string, channelId?: string) => Promise<unknown>;
   logger: Logger;
 }
 
 export class GateKeeper implements SessionGates, GateResolver {
-  private readonly allowedUserId: string;
-  private readonly post: (threadTs: string, text: string) => Promise<unknown>;
+  private readonly allowedUserIds: readonly string[];
+  private readonly post: (threadTs: string, text: string, channelId?: string) => Promise<unknown>;
   private readonly logger: Logger;
   /** FIFO of unanswered gates per thread — one reply resolves one gate. */
   private readonly pending = new Map<string, PendingGate[]>();
 
   constructor(options: GateKeeperOptions) {
-    this.allowedUserId = options.allowedUserId;
+    this.allowedUserIds = options.allowedUserIds ?? (options.allowedUserId === undefined ? [] : [options.allowedUserId]);
     this.post = options.post;
     this.logger = options.logger;
   }
 
   /** Suspends until the thread answers; resolves with the human's verdict. */
-  async request(threadTs: string, gateText: string, signal?: AbortSignal): Promise<GateVerdict> {
+  async request(
+    threadTs: string,
+    gateText: string,
+    signal?: AbortSignal,
+    channelId = '',
+  ): Promise<GateVerdict> {
     if (signal?.aborted === true) {
       return { approved: false, reply: 'the session was interrupted before the gate was posted' };
     }
@@ -122,7 +135,7 @@ export class GateKeeper implements SessionGates, GateResolver {
       settle: (result) => {
         if (settled) return;
         settled = true;
-        this.remove(threadTs, gate);
+        this.remove(threadTs, channelId, gate);
         signal?.removeEventListener('abort', onAbort);
         resolvePromise(result);
       },
@@ -130,13 +143,14 @@ export class GateKeeper implements SessionGates, GateResolver {
     const onAbort = (): void =>
       gate.settle({ approved: false, reply: 'the session was interrupted while the gate was pending' });
 
-    const queue = this.pending.get(threadTs) ?? [];
+    const key = slackThreadKey(threadTs, channelId);
+    const queue = this.pending.get(key) ?? [];
     queue.push(gate);
-    this.pending.set(threadTs, queue);
+    this.pending.set(key, queue);
     signal?.addEventListener('abort', onAbort);
 
     try {
-      await this.post(threadTs, gateText);
+      await this.post(threadTs, gateText, channelId);
       this.logger.info({ threadTs, gateText }, '🚦 gate posted, call suspended');
     } catch (error) {
       // If the human can never see the gate, the call must not hang forever.
@@ -152,11 +166,13 @@ export class GateKeeper implements SessionGates, GateResolver {
    * anyone but the authorized user never resolve anything — defense in depth
    * behind the source filter (spec §7).
    */
-  tryResolve(threadTs: string, userId: string, text: string): boolean {
-    const queue = this.pending.get(threadTs);
+  tryResolve(threadTs: string, userId: string, text: string, channelId = ''): boolean {
+    const queue =
+      this.pending.get(slackThreadKey(threadTs, channelId)) ??
+      (channelId === '' ? undefined : this.pending.get(slackThreadKey(threadTs, '')));
     const gate = queue?.[0];
     if (gate === undefined) return false;
-    if (userId !== this.allowedUserId) {
+    if (!this.allowedUserIds.includes(userId)) {
       this.logger.warn({ threadTs, userId }, 'gate reply from a non-authorized user ignored');
       return false;
     }
@@ -167,19 +183,20 @@ export class GateKeeper implements SessionGates, GateResolver {
   }
 
   /** Denies whatever is still pending when a thread's process goes away. */
-  cancelThread(threadTs: string): void {
-    const queue = this.pending.get(threadTs);
+  cancelThread(threadTs: string, channelId = ''): void {
+    const queue = this.pending.get(slackThreadKey(threadTs, channelId));
     if (queue === undefined) return;
     for (const gate of [...queue]) {
       gate.settle({ approved: false, reply: 'the session ended before the gate was answered' });
     }
   }
 
-  private remove(threadTs: string, gate: PendingGate): void {
-    const queue = this.pending.get(threadTs);
+  private remove(threadTs: string, channelId: string, gate: PendingGate): void {
+    const key = slackThreadKey(threadTs, channelId);
+    const queue = this.pending.get(key);
     if (queue === undefined) return;
     const index = queue.indexOf(gate);
     if (index !== -1) queue.splice(index, 1);
-    if (queue.length === 0) this.pending.delete(threadTs);
+    if (queue.length === 0) this.pending.delete(key);
   }
 }

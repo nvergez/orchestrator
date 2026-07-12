@@ -13,6 +13,7 @@ import { DatabaseSync } from 'node:sqlite';
 export interface DelegationView {
   dispatchId: string;
   threadTs: string;
+  channelId: string;
   repo: string | null;
   issueNumber: number | null;
   agent: string | null;
@@ -34,6 +35,7 @@ export interface DelegationView {
 export interface SessionCard {
   threadTs: string;
   channelId: string | null;
+  rootUser: string | null;
   status: 'open' | 'closed' | 'unknown';
   createdAt: string | null;
   lastActivityAt: string | null;
@@ -46,6 +48,7 @@ export interface SessionCard {
 export interface GateView {
   msgId: string;
   threadTs: string;
+  channelId: string | null;
   kind: 'decision_gate' | 'escalation';
   question: string;
   options: string[];
@@ -57,6 +60,7 @@ export interface GateView {
 export interface StallView {
   dispatchId: string;
   threadTs: string;
+  channelId: string | null;
   worktreeName: string | null;
   lastOutput: string;
   alertedAt: string;
@@ -164,6 +168,7 @@ function hasTable(db: DatabaseSync, name: string): boolean {
 interface RawSessionRow {
   thread_ts: string;
   channel_id: string;
+  root_user: string;
   status: string;
   created_at: string;
   last_activity_at: string;
@@ -196,6 +201,7 @@ function toDelegationView(row: Record<string, unknown>): DelegationView {
   return {
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
+    channelId: row.channel_id as string,
     repo: row.repo as string | null,
     issueNumber: row.issue_number === null ? null : Number(row.issue_number),
     agent: row.agent as string | null,
@@ -216,9 +222,10 @@ function toDelegationView(row: Record<string, unknown>): DelegationView {
 function sessionCards(db: DatabaseSync, inFlight: DelegationView[]): SessionCard[] {
   const byThread = new Map<string, DelegationView[]>();
   for (const delegation of inFlight) {
-    const rows = byThread.get(delegation.threadTs) ?? [];
+    const key = threadKey(delegation.threadTs, delegation.channelId);
+    const rows = byThread.get(key) ?? [];
     rows.push(delegation);
-    byThread.set(delegation.threadTs, rows);
+    byThread.set(key, rows);
   }
 
   const cards: SessionCard[] = [];
@@ -227,31 +234,35 @@ function sessionCards(db: DatabaseSync, inFlight: DelegationView[]): SessionCard
       .prepare(`SELECT * FROM sessions WHERE status = 'open' ORDER BY last_activity_at DESC`)
       .all() as unknown as RawSessionRow[];
     for (const row of open) {
+      const key = threadKey(row.thread_ts, row.channel_id);
       cards.push({
         threadTs: row.thread_ts,
         channelId: row.channel_id,
+        rootUser: row.root_user,
         status: 'open',
         createdAt: row.created_at,
         lastActivityAt: row.last_activity_at,
         turnCount: Number(row.turn_count),
         costUsdTotal: Number(row.cost_usd_total),
-        delegations: byThread.get(row.thread_ts) ?? [],
+        delegations: byThread.get(key) ?? [],
       });
-      byThread.delete(row.thread_ts);
+      byThread.delete(key);
     }
   }
-  for (const threadTs of [...byThread.keys()].sort()) {
-    const delegations = byThread.get(threadTs) ?? [];
+  for (const key of [...byThread.keys()].sort()) {
+    const delegations = byThread.get(key) ?? [];
     const first = delegations[0];
+    if (first === undefined) continue;
+    const { threadTs, channelId } = first;
     const session = hasTable(db, 'sessions')
       ? ((db
-          .prepare('SELECT * FROM sessions WHERE thread_ts = ?')
-          .get(threadTs) as unknown as RawSessionRow | undefined) ?? null)
+          .prepare('SELECT * FROM sessions WHERE thread_ts = ? AND channel_id = ?')
+          .get(threadTs, channelId) as unknown as RawSessionRow | undefined) ?? null)
       : null;
     cards.push({
       threadTs,
-      channelId:
-        session?.channel_id ?? (first === undefined ? null : channelIdOf(db, first.dispatchId)),
+      channelId: session?.channel_id ?? channelId,
+      rootUser: session?.root_user ?? null,
       status: session === null ? 'unknown' : 'closed',
       createdAt: session?.created_at ?? null,
       lastActivityAt: session?.last_activity_at ?? null,
@@ -261,14 +272,6 @@ function sessionCards(db: DatabaseSync, inFlight: DelegationView[]): SessionCard
     });
   }
   return cards;
-}
-
-/** The ledger row's own channel id — the orphan card's only channel source. */
-function channelIdOf(db: DatabaseSync, dispatchId: string): string | null {
-  const row = db
-    .prepare('SELECT channel_id FROM delegations WHERE dispatch_id = ?')
-    .get(dispatchId) as { channel_id?: string } | undefined;
-  return row?.channel_id ?? null;
 }
 
 function readPendingGates(db: DatabaseSync): GateView[] {
@@ -281,6 +284,9 @@ function readPendingGates(db: DatabaseSync): GateView[] {
   return rows.map((row) => ({
     msgId: row.msg_id as string,
     threadTs: row.thread_ts as string,
+    channelId: hasColumn(db, 'pending_gates', 'channel_id')
+      ? (row.channel_id as string)
+      : null,
     kind: row.kind as GateView['kind'],
     question: row.question as string,
     options: readOptions(row.options),
@@ -310,10 +316,17 @@ function readPendingStalls(db: DatabaseSync): StallView[] {
   return rows.map((row) => ({
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
+    channelId: hasColumn(db, 'stall_alerts', 'channel_id')
+      ? (row.channel_id as string)
+      : null,
     worktreeName: row.worktree_name as string | null,
     lastOutput: row.last_output as string,
     alertedAt: row.alerted_at as string,
   }));
+}
+
+function threadKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
 }
 
 function readRecentlyClosedSessions(db: DatabaseSync, cutoff: string): ClosedSessionView[] {

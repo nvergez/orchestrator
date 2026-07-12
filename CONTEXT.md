@@ -4,6 +4,10 @@ A Slack-driven orchestrator-dispatcher daemon: one Claude Code session per
 Slack thread, delegating work to Orca worktree agents. Published to npm as
 `@nvergez/orchestrator`, installing the `orc` CLI.
 
+A Slack thread is identified by the pair `(channel_id, thread_ts)`. The same
+timestamp in two channels names two independent sessions, ledgers, mailboxes,
+and relay surfaces.
+
 ## Language
 
 ### Architecture

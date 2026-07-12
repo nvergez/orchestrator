@@ -29,6 +29,12 @@ describe('refusalLine', () => {
       'v1: only <@U0EXAMPLE456> can drive me.',
     );
   });
+
+  it('names all configured operators when the allow-list has several users', () => {
+    expect(refusalLine(['U0EXAMPLE456', 'U0EXAMPLE999'])).toBe(
+      'Only authorized operators (<@U0EXAMPLE456>, <@U0EXAMPLE999>) can drive me.',
+    );
+  });
 });
 
 describe('costWarningLine', () => {

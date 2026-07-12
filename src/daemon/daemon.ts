@@ -78,17 +78,18 @@ export async function runDaemon(): Promise<void> {
       throw new Error('auth.test returned no user_id — cannot build the event filter');
     }
     const guard = {
-      channelId: config.slackChannelId,
-      allowedUserId: config.slackAllowedUserId,
+      channelIds: config.slackChannelIds ?? (config.slackChannelId === undefined ? [] : [config.slackChannelId]),
+      allowedUserIds: config.slackAllowedUserIds ?? (config.slackAllowedUserId === undefined ? [] : [config.slackAllowedUserId]),
       botUserId: auth.user_id,
     };
 
     // The raw Slack adapter under everything the runtime posts — threads,
-    // gates, voices, reactions — pinned to the one configured channel.
+    // gates, voices, reactions — addressed by each event's channel.
     const surface: Surface = {
-      post: async (threadTs, text) => {
+      post: async (threadTs, text, channelId) => {
+        if (channelId === undefined) throw new Error('Slack channel is required');
         const result = await app.client.chat.postMessage({
-          channel: config.slackChannelId,
+          channel: channelId,
           thread_ts: threadTs,
           text,
         });
@@ -97,14 +98,17 @@ export async function runDaemon(): Promise<void> {
         }
         return result.ts;
       },
-      update: async (ts, text) => {
-        await app.client.chat.update({ channel: config.slackChannelId, ts, text });
+      update: async (ts, text, channelId) => {
+        if (channelId === undefined) throw new Error('Slack channel is required');
+        await app.client.chat.update({ channel: channelId, ts, text });
       },
-      react: async (ts, name) => {
-        await app.client.reactions.add({ channel: config.slackChannelId, timestamp: ts, name });
+      react: async (ts, name, channelId) => {
+        if (channelId === undefined) throw new Error('Slack channel is required');
+        await app.client.reactions.add({ channel: channelId, timestamp: ts, name });
       },
-      unreact: async (ts, name) => {
-        await app.client.reactions.remove({ channel: config.slackChannelId, timestamp: ts, name });
+      unreact: async (ts, name, channelId) => {
+        if (channelId === undefined) throw new Error('Slack channel is required');
+        await app.client.reactions.remove({ channel: channelId, timestamp: ts, name });
       },
     };
 
@@ -123,7 +127,7 @@ export async function runDaemon(): Promise<void> {
     registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger);
     await app.start();
     logger.info(
-      { botUserId: guard.botUserId, channelId: guard.channelId },
+      { botUserId: guard.botUserId, channelIds: guard.channelIds },
       'connected to Slack over Socket Mode',
     );
 

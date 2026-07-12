@@ -8,8 +8,11 @@ import { resolveDefaultDbPath } from './xdg.ts';
 export interface Config {
   slackBotToken: string;
   slackAppToken: string;
-  slackChannelId: string;
-  slackAllowedUserId: string;
+  slackChannelIds?: string[];
+  slackAllowedUserIds?: string[];
+  /** Legacy programmatic shape accepted by buildRuntime tests/embedders. */
+  slackChannelId?: string;
+  slackAllowedUserId?: string;
   /** Daemon auth from `claude setup-token` — subscription-billed (spec §10). */
   claudeCodeOauthToken: string;
   logLevel: string;
@@ -107,6 +110,30 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     return value;
   };
 
+  const requiredIds = (pluralKey: string, singularKey: string, prefix: string): string[] => {
+    const plural = env[pluralKey];
+    const singular = env[singularKey];
+    if (plural !== undefined && singular !== undefined) {
+      problems.push(`${pluralKey} and ${singularKey} cannot both be set`);
+    }
+    const raw = plural ?? singular;
+    if (!raw) {
+      problems.push(`${pluralKey} is missing`);
+      return [];
+    }
+    const values = raw.split(',').map((value) => value.trim());
+    if (values.some((value) => value === '')) {
+      problems.push(`${pluralKey} must be a comma-separated list without empty entries`);
+      return [];
+    }
+    const malformed = values.find((value) => !value.startsWith(prefix));
+    if (malformed !== undefined) {
+      problems.push(`${pluralKey} entries must start with "${prefix}"`);
+      return [];
+    }
+    return [...new Set(values)];
+  };
+
   const positiveNumber = (key: string, fallback: number, unit: string): number => {
     const value = Number(env[key] ?? fallback);
     if (!Number.isFinite(value) || value <= 0) {
@@ -183,8 +210,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const config: Config = {
     slackBotToken: required('SLACK_BOT_TOKEN', 'xoxb-'),
     slackAppToken: required('SLACK_APP_TOKEN', 'xapp-'),
-    slackChannelId: required('SLACK_CHANNEL_ID', 'C'),
-    slackAllowedUserId: required('SLACK_ALLOWED_USER_ID', 'U'),
+    slackChannelIds: requiredIds('SLACK_CHANNEL_IDS', 'SLACK_CHANNEL_ID', 'C'),
+    slackAllowedUserIds: requiredIds(
+      'SLACK_ALLOWED_USER_IDS',
+      'SLACK_ALLOWED_USER_ID',
+      'U',
+    ),
     claudeCodeOauthToken: required('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-'),
     logLevel: env.LOG_LEVEL ?? 'info',
     dbPath: env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(env),

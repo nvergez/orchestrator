@@ -16,13 +16,15 @@ export function SessionCard({ session, asOf }: { session: SessionCardView; asOf:
     <Card className="animate-enter">
       <CardHeader className="flex-row flex-wrap items-baseline gap-x-3">
         <CardTitle className="font-mono font-medium">
-          <span className="text-muted-foreground">thread</span> {session.threadTs}
+          <span className="text-muted-foreground">channel</span> {session.channelId ?? 'unknown'}
+          <span className="text-muted-foreground"> · thread</span> {session.threadTs}
         </CardTitle>
         <Badge variant={status.variant}>{status.label}</Badge>
         <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
           {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
           {' · '}${session.costUsdTotal.toFixed(2)}
           {session.lastActivityAt !== null && ` · active ${ago(session.lastActivityAt, asOf)}`}
+          {session.rootUser !== null && ` · opened by ${session.rootUser}`}
         </span>
       </CardHeader>
       <CardContent>

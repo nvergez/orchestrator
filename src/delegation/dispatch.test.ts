@@ -247,7 +247,7 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     expect(verdict).toEqual({ action: 'proceed', command: `${DISPATCH_CMD} --from term_mb1` });
     expect(store.getMailbox(THREAD)).toBe('term_mb1');
     expect(runner.calls).toContain(
-      `terminal create --worktree path:${DAEMON_WT} --title slack-${THREAD} --json`,
+      `terminal create --worktree path:${DAEMON_WT} --title slack-${CHANNEL}-${THREAD} --json`,
     );
   });
 
@@ -277,7 +277,7 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     expect(store.getMailbox(THREAD)).toBe('term_mb1');
   });
 
-  it('creates one mailbox per thread, each titled slack-<thread_ts>', async () => {
+  it('creates one mailbox per channel/thread, each title carrying both identities', async () => {
     const { coordinator, runner } = makeCoordinator();
     await primeWorker(coordinator);
     await primeWorker(coordinator, THREAD_B);
@@ -287,8 +287,8 @@ describe('prepare — the thread mailbox (issue #9)', () => {
 
     const creates = runner.calls.filter((call) => call.startsWith('terminal create'));
     expect(creates).toHaveLength(2);
-    expect(creates[0]).toContain(`--title slack-${THREAD}`);
-    expect(creates[1]).toContain(`--title slack-${THREAD_B}`);
+    expect(creates[0]).toContain(`--title slack-${CHANNEL}-${THREAD}`);
+    expect(creates[1]).toContain(`--title slack-${CHANNEL}-${THREAD_B}`);
   });
 
   it('Orca down → ⚠️ line in the thread, dispatch denied, daemon alive', async () => {
