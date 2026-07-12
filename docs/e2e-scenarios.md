@@ -1,7 +1,7 @@
 # Live e2e scenarios — driving the deployed bot
 
 How to exercise the orchestrator end-to-end against the **deployed daemon** (no mocks): post to
-the pinned channel (your `SLACK_CHANNEL_ID`) as the allowed user, watch `journalctl --user -u orchestrator -f`,
+a configured channel (your `SLACK_CHANNEL_IDS`) as an allowed user, watch `journalctl --user -u orchestrator -f`,
 and verify worker side-effects on disk. First run: 2026-07-09 (findings became issues #45–#52,
 all fixed and redeployed the same day).
 

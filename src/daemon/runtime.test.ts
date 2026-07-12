@@ -35,8 +35,8 @@ const HINTS: RepoHint[] = [
 const CONFIG: Config = {
   slackBotToken: 'xoxb-test',
   slackAppToken: 'xapp-test',
-  slackChannelId: CHANNEL,
-  slackAllowedUserId: USER,
+  slackChannelIds: [CHANNEL],
+  slackAllowedUserIds: [USER],
   claudeCodeOauthToken: 'token',
   logLevel: 'silent',
   dbPath: ':memory:',
@@ -67,30 +67,30 @@ const REPO_LIST_OUT = envelope({
 });
 
 class FakeSurface implements Surface {
-  posts: Array<{ threadTs: string; text: string }> = [];
-  updates: Array<{ ts: string; text: string }> = [];
-  reactions: Array<{ ts: string; name: string }> = [];
-  removed: Array<{ ts: string; name: string }> = [];
+  posts: Array<{ channelId: string; threadTs: string; text: string }> = [];
+  updates: Array<{ channelId: string; ts: string; text: string }> = [];
+  reactions: Array<{ channelId: string; ts: string; name: string }> = [];
+  removed: Array<{ channelId: string; ts: string; name: string }> = [];
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
-    this.posts.push({ threadTs, text });
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
+    this.posts.push({ channelId, threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
-    this.updates.push({ ts, text });
+  update(channelId: string, ts: string, text: string): Promise<void> {
+    this.updates.push({ channelId, ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
-    this.reactions.push({ ts, name });
+  react(channelId: string, ts: string, name: string): Promise<void> {
+    this.reactions.push({ channelId, ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
-    this.removed.push({ ts, name });
+  unreact(channelId: string, ts: string, name: string): Promise<void> {
+    this.removed.push({ channelId, ts, name });
     return Promise.resolve();
   }
 }
@@ -166,6 +166,7 @@ const makeRuntime = (
 const canUseToolFor = (seams: ProcessSeams) =>
   buildCanUseTool({
     threadTs: THREAD,
+    channelId: CHANNEL,
     gates: seams.gates,
     allowList: seams.allowList,
     delegations: seams.delegations,
@@ -201,6 +202,7 @@ const seedGate = (store: DelegationStore): void => {
   store.recordGate({
     msgId: 'msg_1',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_1',
     dispatchId: 'ctx_1',
     workerHandle: 'term_w1',
@@ -222,11 +224,12 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]).toEqual({
+      channelId: CHANNEL,
       threadTs: THREAD,
       text: '🚦 `git push --force-with-lease` — go?',
     });
 
-    expect(runtime.gates.tryResolve(THREAD, USER, 'no, rebase first')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no, rebase first')).toBe(true);
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
     expect((result as { message: string }).message).toContain('no, rebase first');
@@ -244,7 +247,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
-    expect(runtime.gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     expect(await verdict).toEqual({ behavior: 'allow', updatedInput: input });
   });
 
@@ -282,7 +285,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no');
     expect(await verdict).toMatchObject({ behavior: 'deny' });
   });
 
@@ -298,7 +301,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no');
 
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
@@ -431,14 +434,14 @@ describe('buildRuntime — the boot sequence', () => {
     await runtime.boot();
 
     // Reconciliation closed the outage completion and left the live row.
-    expect(store.listInFlightForThread(THREAD)).toEqual([]);
-    expect(store.listInFlightForThread(THREAD_B)).toHaveLength(1);
+    expect(store.listInFlightForThread(THREAD, CHANNEL)).toEqual([]);
+    expect(store.listInFlightForThread(THREAD_B, CHANNEL)).toHaveLength(1);
     // Its worktree got the same success cleanup as a live worker_done.
     expect(runner.calls).toContain('worktree rm --worktree id:wt-a --json');
 
     // Re-arm saw the reconciled ledger: no watcher for the closed thread.
-    expect(runtime.watcher.isArmed(THREAD)).toBe(false);
-    expect(runtime.watcher.isArmed(THREAD_B)).toBe(true);
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(false);
+    expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(true);
     const waits = runner.calls.filter((call) => call.startsWith('orchestration check --wait'));
     expect(waits).toHaveLength(1);
     expect(waits[0]).toContain('term_mb_b');
@@ -487,7 +490,7 @@ describe('buildRuntime — the boot sequence', () => {
 
     await runtime.boot();
     await vi.waitFor(() => {
-      expect(store.listInFlightForThread(THREAD_B)).toEqual([]);
+      expect(store.listInFlightForThread(THREAD_B, CHANNEL)).toEqual([]);
     });
 
     // The card flipped ✅ (posted fresh — the seeded row carried no cardTs),
@@ -504,7 +507,7 @@ describe('buildRuntime — the boot sequence', () => {
     });
     // Nothing left in flight: the watcher loop wound itself down.
     await vi.waitFor(() => {
-      expect(runtime.watcher.isArmed(THREAD_B)).toBe(false);
+      expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(false);
     });
   });
 });

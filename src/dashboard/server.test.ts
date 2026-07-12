@@ -123,6 +123,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           threadTs: THREAD,
           channelId: CHANNEL,
+          rootUser: USER,
           status: 'open',
           createdAt: '2026-07-09T09:00:00.000Z',
           lastActivityAt: '2026-07-10T08:00:00.000Z',
@@ -132,6 +133,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
             {
               dispatchId: 'ctx_live',
               threadTs: THREAD,
+              channelId: CHANNEL,
               repo: 'webapp',
               issueNumber: 84,
               agent: 'claude',
@@ -148,6 +150,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           threadTs: THREAD_ORPHAN,
           channelId: CHANNEL,
+          rootUser: null,
           status: 'unknown',
           createdAt: null,
           lastActivityAt: null,
@@ -157,6 +160,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
             {
               dispatchId: 'ctx_orphan',
               threadTs: THREAD_ORPHAN,
+              channelId: CHANNEL,
               repo: 'sandbox',
               issueNumber: 21,
               agent: 'codex',
@@ -204,6 +208,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           {
             dispatchId: 'ctx_fail',
             threadTs: THREAD,
+            channelId: CHANNEL,
             repo: 'webapp',
             issueNumber: 84,
             agent: 'claude',
@@ -217,6 +222,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           {
             dispatchId: 'ctx_done',
             threadTs: THREAD,
+            channelId: CHANNEL,
             repo: 'webapp',
             issueNumber: 84,
             agent: 'claude',

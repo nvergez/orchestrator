@@ -49,34 +49,34 @@ const REPO_LIST_OUT = envelope({
 });
 
 class FakeSurface implements Surface {
-  posts: Array<{ threadTs: string; text: string }> = [];
-  updates: Array<{ ts: string; text: string }> = [];
-  reactions: Array<{ ts: string; name: string }> = [];
-  removed: Array<{ ts: string; name: string }> = [];
+  posts: Array<{ channelId: string; threadTs: string; text: string }> = [];
+  updates: Array<{ channelId: string; ts: string; text: string }> = [];
+  reactions: Array<{ channelId: string; ts: string; name: string }> = [];
+  removed: Array<{ channelId: string; ts: string; name: string }> = [];
   failPosts = false;
   failReactions = false;
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
     if (this.failPosts) return Promise.reject(new Error('slack down'));
-    this.posts.push({ threadTs, text });
+    this.posts.push({ channelId, threadTs, text });
     this.counter += 1;
     return Promise.resolve(`card-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
-    this.updates.push({ ts, text });
+  update(channelId: string, ts: string, text: string): Promise<void> {
+    this.updates.push({ channelId, ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
+  react(channelId: string, ts: string, name: string): Promise<void> {
     if (this.failReactions) return Promise.reject(new Error('already_reacted'));
-    this.reactions.push({ ts, name });
+    this.reactions.push({ channelId, ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
-    this.removed.push({ ts, name });
+  unreact(channelId: string, ts: string, name: string): Promise<void> {
+    this.removed.push({ channelId, ts, name });
     return Promise.resolve();
   }
 }
@@ -109,7 +109,7 @@ const makeCoordinator = (
     store?: DelegationStore;
     surface?: FakeSurface;
     script?: Record<string, string | Error>;
-    onDispatched?: (threadTs: string) => void;
+    onDispatched?: (threadTs: string, channelId: string) => void;
   } = {},
 ) => {
   const store = options.store ?? new DelegationStore(':memory:');
@@ -118,7 +118,6 @@ const makeCoordinator = (
   const coordinator = new DelegationCoordinator({
     store,
     surface: new ThreadSurface({ surface, store, logger: createLogger('silent'), run: runner.run }),
-    channelId: CHANNEL,
     workerCap: options.workerCap ?? 3,
     mailboxWorktreePath: DAEMON_WT,
     ...(options.onDispatched !== undefined && { onDispatched: options.onDispatched }),
@@ -135,15 +134,15 @@ const WAIT_CMD = 'orca terminal wait --terminal term_w1 --for tui-idle --timeout
 
 /** Walks the §5 order up to the dispatch: the tracker knows and awaited term_w1. */
 const primeWorker = async (coordinator: DelegationCoordinator, threadTs = THREAD): Promise<void> => {
-  await coordinator.observe(threadTs, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
-  await coordinator.observe(threadTs, WAIT_CMD, envelope({ satisfied: true }));
+  await coordinator.observe(threadTs, CHANNEL, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
+  await coordinator.observe(threadTs, CHANNEL, WAIT_CMD, envelope({ satisfied: true }));
 };
 
 describe('prepare — pass-through and the #4 invariants', () => {
   it('passes unrelated commands through untouched', async () => {
     const { coordinator, runner } = makeCoordinator();
     const command = 'orca worktree ps --json';
-    await expect(coordinator.prepare(THREAD, command)).resolves.toEqual({
+    await expect(coordinator.prepare(THREAD, CHANNEL, command)).resolves.toEqual({
       action: 'proceed',
       command,
     });
@@ -152,14 +151,14 @@ describe('prepare — pass-through and the #4 invariants', () => {
 
   it('refuses a create chained to anything else — one delegation step per call', async () => {
     const { coordinator } = makeCoordinator();
-    const verdict = await coordinator.prepare(THREAD, `${CREATE_CMD} && echo done`);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, `${CREATE_CMD} && echo done`);
     expect(verdict).toMatchObject({ action: 'deny' });
   });
 
   it('refuses a create-time --prompt — the brief travels with the injection', async () => {
     const { coordinator } = makeCoordinator();
     const verdict = await coordinator.prepare(
-      THREAD,
+      THREAD, CHANNEL,
       `${CREATE_CMD} --prompt "do the thing"`,
     );
     expect(verdict).toMatchObject({ action: 'deny' });
@@ -171,7 +170,7 @@ describe('prepare — pass-through and the #4 invariants', () => {
     async (required) => {
       const { coordinator } = makeCoordinator();
       const gutted = CREATE_CMD.replace(` ${required}`, '');
-      const verdict = await coordinator.prepare(THREAD, gutted);
+      const verdict = await coordinator.prepare(THREAD, CHANNEL, gutted);
       expect(verdict).toMatchObject({ action: 'deny' });
     },
   );
@@ -179,7 +178,7 @@ describe('prepare — pass-through and the #4 invariants', () => {
   it('refuses a worktree name that does not carry the issue number', async () => {
     const { coordinator } = makeCoordinator();
     const verdict = await coordinator.prepare(
-      THREAD,
+      THREAD, CHANNEL,
       CREATE_CMD.replace('webapp-84-csv-export', 'csv-export'),
     );
     expect(verdict).toMatchObject({ action: 'deny' });
@@ -188,14 +187,14 @@ describe('prepare — pass-through and the #4 invariants', () => {
 
   it('refuses a dispatch that carries its own --from', async () => {
     const { coordinator } = makeCoordinator();
-    const verdict = await coordinator.prepare(THREAD, `${DISPATCH_CMD} --from term_rogue`);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, `${DISPATCH_CMD} --from term_rogue`);
     expect(verdict).toMatchObject({ action: 'deny' });
   });
 
   it('refuses a dispatch without --inject — the worker needs the preamble', async () => {
     const { coordinator } = makeCoordinator();
     const verdict = await coordinator.prepare(
-      THREAD,
+      THREAD, CHANNEL,
       DISPATCH_CMD.replace(' --inject', ''),
     );
     expect(verdict).toMatchObject({ action: 'deny' });
@@ -203,25 +202,25 @@ describe('prepare — pass-through and the #4 invariants', () => {
 
   it('refuses a dispatch to a handle the thread never listed — §5 order', async () => {
     const { coordinator } = makeCoordinator();
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
     expect(verdict).toMatchObject({ action: 'deny' });
     expect((verdict as { message: string }).message).toContain('terminal list');
   });
 
   it('refuses a dispatch to a listed handle never awaited to tui-idle', async () => {
     const { coordinator } = makeCoordinator();
-    await coordinator.observe(THREAD, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    await coordinator.observe(THREAD, CHANNEL, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
     expect(verdict).toMatchObject({ action: 'deny' });
     expect((verdict as { message: string }).message).toContain('tui-idle');
   });
 
   it('a timed-out tui-idle wait does not clear the handle for injection', async () => {
     const { coordinator } = makeCoordinator();
-    await coordinator.observe(THREAD, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
+    await coordinator.observe(THREAD, CHANNEL, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
     // The wait failed: PostToolUseFailure reports empty output.
-    await coordinator.observe(THREAD, WAIT_CMD, '');
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    await coordinator.observe(THREAD, CHANNEL, WAIT_CMD, '');
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
     expect(verdict).toMatchObject({ action: 'deny' });
   });
 
@@ -229,7 +228,7 @@ describe('prepare — pass-through and the #4 invariants', () => {
     const { coordinator } = makeCoordinator();
     await primeWorker(coordinator);
     const verdict = await coordinator.prepare(
-      THREAD,
+      THREAD, CHANNEL,
       'orca orchestration dispatch --task $TASK_ID --to term_w1 --inject --json',
     );
     expect(verdict).toMatchObject({ action: 'deny' });
@@ -242,12 +241,12 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     const { coordinator, store, runner } = makeCoordinator();
     await primeWorker(coordinator);
 
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
 
     expect(verdict).toEqual({ action: 'proceed', command: `${DISPATCH_CMD} --from term_mb1` });
-    expect(store.getMailbox(THREAD)).toBe('term_mb1');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
     expect(runner.calls).toContain(
-      `terminal create --worktree path:${DAEMON_WT} --title slack-${THREAD} --json`,
+      `terminal create --worktree path:${DAEMON_WT} --title slack-${CHANNEL}-${THREAD} --json`,
     );
   });
 
@@ -259,8 +258,8 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     });
 
     await primeWorker(coordinator);
-    await coordinator.prepare(THREAD, DISPATCH_CMD);
-    await coordinator.prepare(THREAD, DISPATCH_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
 
     expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(1);
   });
@@ -271,24 +270,24 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     const { coordinator } = makeCoordinator({ store });
     await primeWorker(coordinator);
 
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
 
     expect(verdict).toEqual({ action: 'proceed', command: `${DISPATCH_CMD} --from term_mb1` });
-    expect(store.getMailbox(THREAD)).toBe('term_mb1');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
   });
 
-  it('creates one mailbox per thread, each titled slack-<thread_ts>', async () => {
+  it('creates one mailbox per thread, each titled slack-<channel_id>-<thread_ts>', async () => {
     const { coordinator, runner } = makeCoordinator();
     await primeWorker(coordinator);
     await primeWorker(coordinator, THREAD_B);
 
-    await coordinator.prepare(THREAD, DISPATCH_CMD);
-    await coordinator.prepare(THREAD_B, DISPATCH_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
+    await coordinator.prepare(THREAD_B, CHANNEL, DISPATCH_CMD);
 
     const creates = runner.calls.filter((call) => call.startsWith('terminal create'));
     expect(creates).toHaveLength(2);
-    expect(creates[0]).toContain(`--title slack-${THREAD}`);
-    expect(creates[1]).toContain(`--title slack-${THREAD_B}`);
+    expect(creates[0]).toContain(`--title slack-${CHANNEL}-${THREAD}`);
+    expect(creates[1]).toContain(`--title slack-${CHANNEL}-${THREAD_B}`);
   });
 
   it('Orca down → ⚠️ line in the thread, dispatch denied, daemon alive', async () => {
@@ -300,12 +299,13 @@ describe('prepare — the thread mailbox (issue #9)', () => {
     });
     await primeWorker(coordinator);
 
-    const verdict = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
 
     expect(verdict).toMatchObject({ action: 'deny' });
     expect((verdict as { message: string }).message).toContain('Orca runtime unavailable');
     expect(surface.posts).toEqual([
       {
+        channelId: CHANNEL,
         threadTs: THREAD,
         text: '⚠️ Orca runtime unavailable — the thread mailbox terminal could not be reached, so nothing was dispatched.',
       },
@@ -346,7 +346,7 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('lets creates through silently under the cap', async () => {
     const { coordinator, surface } = makeCoordinator({ workerCap: 2 });
-    await expect(coordinator.prepare(THREAD, CREATE_CMD)).resolves.toEqual({
+    await expect(coordinator.prepare(THREAD, CHANNEL, CREATE_CMD)).resolves.toEqual({
       action: 'proceed',
       command: CREATE_CMD,
     });
@@ -359,7 +359,7 @@ describe('the worker cap — waves (spec §5)', () => {
     const { coordinator, surface } = makeCoordinator({ workerCap: 1, store });
 
     let resolved = false;
-    const waiting = coordinator.prepare(THREAD_B, CREATE_CMD).then((verdict) => {
+    const waiting = coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD).then((verdict) => {
       resolved = true;
       return verdict;
     });
@@ -367,6 +367,7 @@ describe('the worker cap — waves (spec §5)', () => {
     expect(resolved).toBe(false);
     expect(surface.posts).toEqual([
       {
+        channelId: CHANNEL,
         threadTs: THREAD_B,
         text: '⏳ Worker cap reached (1 worker in flight) — this delegation waits for a free slot.',
       },
@@ -378,10 +379,10 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('a reservation in the create→dispatch window holds a slot too', async () => {
     const { coordinator, surface } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
 
     let resolved = false;
-    const waiting = coordinator.prepare(THREAD_B, CREATE_CMD).then((verdict) => {
+    const waiting = coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD).then((verdict) => {
       resolved = true;
       return verdict;
     });
@@ -390,7 +391,7 @@ describe('the worker cap — waves (spec §5)', () => {
     expect(surface.posts[0]?.text).toContain('⏳ Worker cap reached');
 
     // The reserved create fails — its slot admits the waiting wave.
-    await coordinator.observe(THREAD, CREATE_CMD, '');
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, '');
     await expect(waiting).resolves.toEqual({ action: 'proceed', command: CREATE_CMD });
   });
 
@@ -400,7 +401,7 @@ describe('the worker cap — waves (spec §5)', () => {
     const { coordinator, surface } = makeCoordinator({ workerCap: 1, store });
 
     let resolved = false;
-    void coordinator.prepare(THREAD_B, CREATE_CMD).then(() => {
+    void coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD).then(() => {
       resolved = true;
     });
     await settle();
@@ -416,7 +417,7 @@ describe('the worker cap — waves (spec §5)', () => {
     const { coordinator } = makeCoordinator({ workerCap: 1, store });
 
     let resolved = false;
-    const waiting = coordinator.prepare(THREAD_B, CREATE_CMD).then((verdict) => {
+    const waiting = coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD).then((verdict) => {
       resolved = true;
       return verdict;
     });
@@ -433,20 +434,20 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('a dispatch after abandonThread is still counted — the ledger, not slot bookkeeping, is the cap', async () => {
     const { coordinator, store } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
     // The session died; its reservation went back to the pool…
-    coordinator.abandonThread(THREAD);
+    coordinator.abandonThread(THREAD, CHANNEL);
     // …but a cold-resumed session still dispatches the worktree it created.
     await primeWorker(coordinator);
-    const prepared = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const prepared = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
     expect(prepared.action).toBe('proceed');
-    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
     expect(store.inFlightCount()).toBe(1);
 
     // The dispatched worker holds the only slot — the next create waits.
     let resolved = false;
-    void coordinator.prepare(THREAD_B, CREATE_CMD).then(() => {
+    void coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD).then(() => {
       resolved = true;
     });
     await settle();
@@ -455,10 +456,10 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('a turn abort while waiting denies cleanly and leaves the queue intact', async () => {
     const { coordinator } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
 
     const abort = new AbortController();
-    const waiting = coordinator.prepare(THREAD_B, CREATE_CMD, abort.signal);
+    const waiting = coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD, abort.signal);
     await settle();
     abort.abort();
 
@@ -469,11 +470,11 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('a failed create hands its slot back — the next wave is not starved', async () => {
     const { coordinator } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
     // The command ran and failed: the PostToolUseFailure hook reports empty output.
-    await coordinator.observe(THREAD, CREATE_CMD, '');
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, '');
 
-    await expect(coordinator.prepare(THREAD_B, CREATE_CMD)).resolves.toEqual({
+    await expect(coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD)).resolves.toEqual({
       action: 'proceed',
       command: CREATE_CMD,
     });
@@ -481,12 +482,12 @@ describe('the worker cap — waves (spec §5)', () => {
 
   it('abandonThread releases slots of never-dispatched delegations', async () => {
     const { coordinator } = makeCoordinator({ workerCap: 1 });
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
 
-    coordinator.abandonThread(THREAD);
+    coordinator.abandonThread(THREAD, CHANNEL);
 
-    await expect(coordinator.prepare(THREAD_B, CREATE_CMD)).resolves.toEqual({
+    await expect(coordinator.prepare(THREAD_B, CHANNEL, CREATE_CMD)).resolves.toEqual({
       action: 'proceed',
       command: CREATE_CMD,
     });
@@ -495,28 +496,29 @@ describe('the worker cap — waves (spec §5)', () => {
 
 describe('observe — the card, the 👀 and the ledger', () => {
   const runSequence = async (coordinator: DelegationCoordinator): Promise<void> => {
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
-    await coordinator.observe(THREAD, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
-    await coordinator.observe(THREAD, WAIT_CMD, envelope({ satisfied: true }));
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.observe(THREAD, CHANNEL, 'orca terminal list --worktree id:wt-1 --json', TERMINAL_LIST_OUT);
+    await coordinator.observe(THREAD, CHANNEL, WAIT_CMD, envelope({ satisfied: true }));
     await coordinator.observe(
-      THREAD,
+      THREAD, CHANNEL,
       'orca orchestration task-create --spec "brief" --task-title "CSV export of send metrics" --display-name "webapp#84" --json',
       TASK_CREATE_OUT,
     );
-    const prepared = await coordinator.prepare(THREAD, DISPATCH_CMD);
+    const prepared = await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
     expect(prepared.action).toBe('proceed');
-    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
   };
 
   it('posts the card at worktree-ready with the mock format, 👀 on the root', async () => {
     const { coordinator, surface } = makeCoordinator();
 
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
 
     expect(surface.posts).toEqual([
       {
+        channelId: CHANNEL,
         threadTs: THREAD,
         text:
           '⚙️ *webapp#84 — csv export*\n' +
@@ -525,7 +527,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
           '• 14:04 — issue linked, worktree ready',
       },
     ]);
-    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
+    expect(surface.reactions).toEqual([{ channelId: CHANNEL, ts: THREAD, name: 'eyes' }]);
   });
 
   it('edits the card at hand-off — real title, task id milestone — and ledgers everything', async () => {
@@ -535,6 +537,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
 
     expect(surface.updates).toEqual([
       {
+        channelId: CHANNEL,
         ts: 'card-ts-1',
         text:
           '⚙️ *webapp#84 — CSV export of send metrics*\n' +
@@ -544,7 +547,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
           '• 14:04 — brief handed off (task `task_3f81`)',
       },
     ]);
-    expect(store.listForThread(THREAD)).toEqual([
+    expect(store.listForThread(THREAD, CHANNEL)).toEqual([
       {
         taskId: 'task_3f81',
         dispatchId: 'ctx_d1',
@@ -577,7 +580,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
 
     expect(armed).toEqual([THREAD]);
     // The row is already in flight when the callback fires.
-    expect(store.listInFlightForThread(THREAD)).toHaveLength(1);
+    expect(store.listInFlightForThread(THREAD, CHANNEL)).toHaveLength(1);
   });
 
   it('degrades to plain repo#n when the repo has no GitHub remote', async () => {
@@ -586,9 +589,9 @@ describe('observe — the card, the 👀 and the ledger', () => {
       'orca worktree create --repo id:repo-sandbox --name sandbox-21-bench ' +
       '--agent claude --issue 21 --no-parent --json';
 
-    await coordinator.prepare(THREAD, sandboxCreate);
+    await coordinator.prepare(THREAD, CHANNEL, sandboxCreate);
     await coordinator.observe(
-      THREAD,
+      THREAD, CHANNEL,
       sandboxCreate,
       envelope({
         worktree: {
@@ -610,8 +613,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
       script: { 'repo list --json': new Error('connect ECONNREFUSED') },
     });
 
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
 
     expect(surface.posts[0]?.text).toContain('⚙️ *webapp#84 — csv export*');
     expect(surface.posts[0]?.text).not.toContain('<https://');
@@ -620,25 +623,25 @@ describe('observe — the card, the 👀 and the ledger', () => {
   it('catches the card up at dispatch when the ready-post failed', async () => {
     const { coordinator, surface, store } = makeCoordinator();
     surface.failPosts = true;
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
     expect(surface.posts).toEqual([]);
 
     surface.failPosts = false;
     await primeWorker(coordinator);
-    await coordinator.prepare(THREAD, DISPATCH_CMD);
-    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
 
     expect(surface.posts.at(-1)?.text).toContain('brief handed off (task `task_3f81`)');
-    expect(store.listForThread(THREAD)[0]?.cardTs).toBe('card-ts-1');
+    expect(store.listForThread(THREAD, CHANNEL)[0]?.cardTs).toBe('card-ts-1');
   });
 
   it('a failed 👀 reaction never blocks the card or the ledger', async () => {
     const { coordinator, surface } = makeCoordinator();
     surface.failReactions = true;
 
-    await coordinator.prepare(THREAD, CREATE_CMD);
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
+    await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
 
     expect(surface.posts).toHaveLength(1);
   });
@@ -646,9 +649,9 @@ describe('observe — the card, the 👀 and the ledger', () => {
   it('ledgers a dispatch it could not associate — nulls and a warning, no crash', async () => {
     const { coordinator, store } = makeCoordinator();
 
-    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
 
-    const rows = store.listForThread(THREAD);
+    const rows = store.listForThread(THREAD, CHANNEL);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       taskId: 'task_3f81',
@@ -661,29 +664,29 @@ describe('observe — the card, the 👀 and the ledger', () => {
 
   it('shrugs off garbage output — the observer never throws', async () => {
     const { coordinator } = makeCoordinator();
-    await expect(coordinator.observe(THREAD, DISPATCH_CMD, 'not json')).resolves.toBeUndefined();
-    await expect(coordinator.observe(THREAD, 'orca terminal list --json', '{}')).resolves.toBeUndefined();
+    await expect(coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, 'not json')).resolves.toBeUndefined();
+    await expect(coordinator.observe(THREAD, CHANNEL, 'orca terminal list --json', '{}')).resolves.toBeUndefined();
   });
 });
 
 describe('created-but-undispatched worktrees (issue #49)', () => {
   it('hasUndispatched covers exactly the create→dispatch window', async () => {
     const { coordinator } = makeCoordinator();
-    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+    expect(coordinator.hasUndispatched(THREAD, CHANNEL)).toBe(false);
 
-    await coordinator.observe(THREAD, CREATE_CMD, WT_CREATE_OUT);
-    expect(coordinator.hasUndispatched(THREAD)).toBe(true);
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
+    expect(coordinator.hasUndispatched(THREAD, CHANNEL)).toBe(true);
 
     await primeWorker(coordinator);
-    await coordinator.observe(THREAD, DISPATCH_CMD, DISPATCH_OUT);
-    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
+    expect(coordinator.hasUndispatched(THREAD, CHANNEL)).toBe(false);
   });
 
   it('a failed create leaves nothing behind — no phantom undispatched work', async () => {
     const { coordinator } = makeCoordinator();
 
-    await coordinator.observe(THREAD, CREATE_CMD, envelope({ error: 'boom' }));
+    await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, envelope({ error: 'boom' }));
 
-    expect(coordinator.hasUndispatched(THREAD)).toBe(false);
+    expect(coordinator.hasUndispatched(THREAD, CHANNEL)).toBe(false);
   });
 });

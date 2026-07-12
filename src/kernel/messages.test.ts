@@ -25,7 +25,7 @@ import {
 
 describe('refusalLine', () => {
   it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
-    expect(refusalLine('U0EXAMPLE456')).toBe(
+    expect(refusalLine(['U0EXAMPLE456'])).toBe(
       'v1: only <@U0EXAMPLE456> can drive me.',
     );
   });

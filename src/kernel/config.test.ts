@@ -18,8 +18,8 @@ describe('loadConfig', () => {
     expect(config).toEqual({
       slackBotToken: 'xoxb-1111-2222-abc',
       slackAppToken: 'xapp-1-A111-222-abc',
-      slackChannelId: 'C0EXAMPLE123',
-      slackAllowedUserId: 'U0EXAMPLE456',
+      slackChannelIds: ['C0EXAMPLE123'],
+      slackAllowedUserIds: ['U0EXAMPLE456'],
       claudeCodeOauthToken: 'sk-ant-oat01-abc123',
       logLevel: 'info',
       dbPath: join(homedir(), '.local', 'state', 'orchestrator', 'orchestrator.db'),
@@ -39,7 +39,7 @@ describe('loadConfig', () => {
   it('fails fast, naming every missing key at once', () => {
     expect(() => loadConfig({})).toThrowError(ConfigError);
     expect(() => loadConfig({})).toThrowError(
-      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_ID.*SLACK_ALLOWED_USER_ID.*CLAUDE_CODE_OAUTH_TOKEN/s,
+      /SLACK_BOT_TOKEN.*SLACK_APP_TOKEN.*SLACK_CHANNEL_IDS.*SLACK_ALLOWED_USER_IDS.*CLAUDE_CODE_OAUTH_TOKEN/s,
     );
   });
 
@@ -54,6 +54,41 @@ describe('loadConfig', () => {
 
     expect(() => loadConfig(env)).toThrowError(ConfigError);
     expect(() => loadConfig(env)).toThrowError(new RegExp(key));
+  });
+
+  it('parses the plural CSV lists — several channels, several users (issue #93)', () => {
+    const config = loadConfig({
+      ...validEnv,
+      SLACK_CHANNEL_IDS: 'C0EXAMPLE123, C0SECOND456',
+      SLACK_ALLOWED_USER_IDS: 'U0EXAMPLE456,U0TEAMMATE1',
+    });
+
+    expect(config.slackChannelIds).toEqual(['C0EXAMPLE123', 'C0SECOND456']);
+    expect(config.slackAllowedUserIds).toEqual(['U0EXAMPLE456', 'U0TEAMMATE1']);
+  });
+
+  it('the plural var wins over the legacy singular when both are set (issue #93)', () => {
+    const config = loadConfig({
+      ...validEnv,
+      SLACK_CHANNEL_IDS: 'C0SECOND456',
+      SLACK_ALLOWED_USER_IDS: 'U0TEAMMATE1',
+    });
+
+    expect(config.slackChannelIds).toEqual(['C0SECOND456']);
+    expect(config.slackAllowedUserIds).toEqual(['U0TEAMMATE1']);
+  });
+
+  it.each([
+    ['SLACK_CHANNEL_IDS', 'C0EXAMPLE123,U0NOTACHANNEL', /must start with "C"/],
+    ['SLACK_CHANNEL_IDS', 'C0EXAMPLE123,C0EXAMPLE123', /must not repeat/],
+    ['SLACK_ALLOWED_USER_IDS', 'U0EXAMPLE456,C0NOTAUSER', /must start with "U"/],
+    ['SLACK_ALLOWED_USER_IDS', 'U0EXAMPLE456,U0EXAMPLE456', /must not repeat/],
+    ['SLACK_CHANNEL_IDS', ' , ', /SLACK_CHANNEL_IDS is missing/],
+  ])('rejects a malformed %s (%s → %s)', (key, badValue, message) => {
+    const env = { ...validEnv, [key]: badValue };
+
+    expect(() => loadConfig(env)).toThrowError(ConfigError);
+    expect(() => loadConfig(env)).toThrowError(message);
   });
 
   it('honors LOG_LEVEL when provided', () => {

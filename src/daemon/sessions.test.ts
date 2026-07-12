@@ -72,9 +72,9 @@ const makeHarness = (
     notify?: Notifier;
     cap?: number;
     autoCloseMs?: number;
-    listDelegations?: (threadTs: string) => Promise<ClosingDelegation[]>;
-    onTurnStart?: (threadTs: string) => Promise<void>;
-    onTurnEnd?: (threadTs: string) => Promise<void>;
+    listDelegations?: (threadTs: string, channelId: string) => Promise<ClosingDelegation[]>;
+    onTurnStart?: (threadTs: string, channelId: string) => Promise<void>;
+    onTurnEnd?: (threadTs: string, channelId: string) => Promise<void>;
   } = {},
 ): Harness => {
   const store = options.store ?? new SessionStore(':memory:');
@@ -97,7 +97,7 @@ const makeHarness = (
     },
     notify:
       options.notify ??
-      ((threadTs, text) => {
+      ((threadTs, _channelId, text) => {
         notices.push({ threadTs, text });
         return Promise.resolve();
       }),

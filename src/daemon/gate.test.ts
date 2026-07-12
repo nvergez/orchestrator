@@ -3,22 +3,25 @@ import { createLogger } from '../kernel/logger.ts';
 import { GateKeeper, isApproval } from './gate.ts';
 
 const THREAD = '1751970000.000100';
+const CHANNEL = 'C0EXAMPLE123';
 const USER = 'U0EXAMPLE456';
 const INTRUDER = 'U0INTRUDER99';
 
 interface Harness {
   gates: GateKeeper;
-  posted: Array<{ threadTs: string; text: string }>;
+  posted: Array<{ threadTs: string; channelId: string; text: string }>;
 }
 
-const makeHarness = (post?: (threadTs: string, text: string) => Promise<void>): Harness => {
-  const posted: Array<{ threadTs: string; text: string }> = [];
+const makeHarness = (
+  post?: (threadTs: string, channelId: string, text: string) => Promise<void>,
+): Harness => {
+  const posted: Array<{ threadTs: string; channelId: string; text: string }> = [];
   const gates = new GateKeeper({
-    allowedUserId: USER,
+    allowedUserIds: [USER],
     post:
       post ??
-      ((threadTs, text) => {
-        posted.push({ threadTs, text });
+      ((threadTs, channelId, text) => {
+        posted.push({ threadTs, channelId, text });
         return Promise.resolve();
       }),
     logger: createLogger('silent'),
@@ -33,26 +36,26 @@ describe('GateKeeper.request', () => {
   it('posts the gate text into the thread and stays pending', async () => {
     const { gates, posted } = makeHarness();
     let settled = false;
-    void gates.request(THREAD, '🚦 `git push` — go?').then(() => {
+    void gates.request(THREAD, CHANNEL, '🚦 `git push` — go?').then(() => {
       settled = true;
     });
     await tick();
-    expect(posted).toEqual([{ threadTs: THREAD, text: '🚦 `git push` — go?' }]);
+    expect(posted).toEqual([{ threadTs: THREAD, channelId: CHANNEL, text: '🚦 `git push` — go?' }]);
     expect(settled).toBe(false);
   });
 
   it('denies fail-closed when the gate message cannot be posted', async () => {
     const { gates } = makeHarness(() => Promise.reject(new Error('slack down')));
-    const verdict = await gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = await gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     expect(verdict.approved).toBe(false);
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(false);
   });
 
   it('denies immediately when the signal is already aborted', async () => {
     const { gates, posted } = makeHarness();
     const controller = new AbortController();
     controller.abort();
-    const verdict = await gates.request(THREAD, '🚦 `git push` — go?', controller.signal);
+    const verdict = await gates.request(THREAD, CHANNEL, '🚦 `git push` — go?', controller.signal);
     expect(verdict.approved).toBe(false);
     expect(posted).toEqual([]);
   });
@@ -60,37 +63,37 @@ describe('GateKeeper.request', () => {
   it('denies and cleans up when the signal aborts while pending', async () => {
     const { gates } = makeHarness();
     const controller = new AbortController();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?', controller.signal);
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?', controller.signal);
     await tick();
     controller.abort();
     const verdict = await pending;
     expect(verdict.approved).toBe(false);
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(false);
   });
 });
 
 describe('GateKeeper.tryResolve', () => {
   it('"go" from the authorized user approves the pending call', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     await expect(pending).resolves.toEqual({ approved: true, reply: 'go' });
   });
 
   it('"no" denies and carries the verbatim reply', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, USER, 'no')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'no')).toBe(true);
     await expect(pending).resolves.toEqual({ approved: false, reply: 'no' });
   });
 
   it('free text denies but still reaches the session verbatim', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, USER, 'wait, rebase on main first')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'wait, rebase on main first')).toBe(true);
     await expect(pending).resolves.toEqual({
       approved: false,
       reply: 'wait, rebase on main first',
@@ -99,52 +102,77 @@ describe('GateKeeper.tryResolve', () => {
 
   it('"go — <comment>" approves with the comment preserved in the verdict reply (issue #47)', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
     const reply = 'go — and from here on, consider plain reads fine without asking in this thread.';
-    expect(gates.tryResolve(THREAD, USER, reply)).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, reply)).toBe(true);
     await expect(pending).resolves.toEqual({ approved: true, reply });
   });
 
   it('"no — <reason>" denies with the reason preserved verbatim (issue #47)', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, USER, 'no — rebase on main first')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'no — rebase on main first')).toBe(true);
     await expect(pending).resolves.toEqual({ approved: false, reply: 'no — rebase on main first' });
   });
 
   it('only the authorized user can resolve a gate (spec §7 / issue AC)', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, INTRUDER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, INTRUDER, 'go')).toBe(false);
     // Still pending: the real user's later reply is what resolves it.
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
+    await expect(pending).resolves.toEqual({ approved: true, reply: 'go' });
+  });
+
+  it('any allowed user may resolve a gate — one shared trust boundary (issue #93)', async () => {
+    const posted: Array<{ threadTs: string; channelId: string; text: string }> = [];
+    const gates = new GateKeeper({
+      allowedUserIds: [USER, 'U0TEAMMATE1'],
+      post: (threadTs, channelId, text) => {
+        posted.push({ threadTs, channelId, text });
+        return Promise.resolve();
+      },
+      logger: createLogger('silent'),
+    });
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
+    await tick();
+    expect(gates.tryResolve(THREAD, CHANNEL, 'U0TEAMMATE1', 'go')).toBe(true);
+    await expect(pending).resolves.toEqual({ approved: true, reply: 'go' });
+  });
+
+  it('does not leak across channels — same ts, different channel (issue #93)', async () => {
+    const { gates } = makeHarness();
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
+    await tick();
+    expect(gates.tryResolve(THREAD, 'C0OTHER', USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     await expect(pending).resolves.toEqual({ approved: true, reply: 'go' });
   });
 
   it('returns false when nothing is pending — the reply is an ordinary turn', () => {
     const { gates } = makeHarness();
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(false);
   });
 
   it('does not leak across threads', async () => {
     const { gates } = makeHarness();
-    const pending = gates.request(THREAD, '🚦 `git push` — go?');
+    const pending = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
     await tick();
-    expect(gates.tryResolve('1751970000.000999', USER, 'go')).toBe(false);
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(gates.tryResolve('1751970000.000999', CHANNEL, USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     await expect(pending).resolves.toEqual({ approved: true, reply: 'go' });
   });
 
   it('resolves stacked gates FIFO, one reply each', async () => {
     const { gates } = makeHarness();
-    const first = gates.request(THREAD, '🚦 `git push` — go?');
-    const second = gates.request(THREAD, '🚦 `orca worktree delete x` — go?');
+    const first = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
+    const second = gates.request(THREAD, CHANNEL, '🚦 `orca worktree delete x` — go?');
     await tick();
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
-    expect(gates.tryResolve(THREAD, USER, 'no')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'no')).toBe(true);
     await expect(first).resolves.toEqual({ approved: true, reply: 'go' });
     await expect(second).resolves.toEqual({ approved: false, reply: 'no' });
   });
@@ -153,18 +181,18 @@ describe('GateKeeper.tryResolve', () => {
 describe('GateKeeper.cancelThread', () => {
   it('denies every pending gate when the session process goes away', async () => {
     const { gates } = makeHarness();
-    const first = gates.request(THREAD, '🚦 `git push` — go?');
-    const second = gates.request(THREAD, '🚦 `git merge main` — go?');
+    const first = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
+    const second = gates.request(THREAD, CHANNEL, '🚦 `git merge main` — go?');
     await tick();
-    gates.cancelThread(THREAD);
+    gates.cancelThread(THREAD, CHANNEL);
     expect((await first).approved).toBe(false);
     expect((await second).approved).toBe(false);
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(false);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(false);
   });
 
   it('is a no-op on a thread with nothing pending', () => {
     const { gates } = makeHarness();
-    expect(() => gates.cancelThread(THREAD)).not.toThrow();
+    expect(() => gates.cancelThread(THREAD, CHANNEL)).not.toThrow();
   });
 });
 

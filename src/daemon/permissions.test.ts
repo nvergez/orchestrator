@@ -7,6 +7,7 @@ import type { DelegationVerdict } from '../kernel/routing.ts';
 import type { SessionRelay } from '../delegation/relay.ts';
 
 const THREAD = '1751970000.000100';
+const CHANNEL = 'C0EXAMPLE123';
 
 /** A scriptable stand-in for the GateKeeper. */
 class FakeGates {
@@ -17,7 +18,7 @@ class FakeGates {
     this.verdict = verdict;
   }
 
-  request(threadTs: string, gateText: string): Promise<GateVerdict> {
+  request(threadTs: string, _channelId: string, gateText: string): Promise<GateVerdict> {
     this.requests.push({ threadTs, gateText });
     return Promise.resolve(this.verdict);
   }
@@ -48,14 +49,14 @@ class FakeDelegations implements DispatchPreparer, DispatchObserver {
     this.verdict = verdict;
   }
 
-  prepare(threadTs: string, command: string): Promise<PrepareVerdict> {
+  prepare(threadTs: string, _channelId: string, command: string): Promise<PrepareVerdict> {
     this.prepared.push({ threadTs, command });
     return Promise.resolve(
       this.verdict === 'passthrough' ? { action: 'proceed', command } : this.verdict,
     );
   }
 
-  observe(threadTs: string, command: string, stdout: string): Promise<void> {
+  observe(threadTs: string, _channelId: string, command: string, stdout: string): Promise<void> {
     this.observed.push({ threadTs, command, stdout });
     return Promise.resolve();
   }
@@ -75,17 +76,17 @@ class FakeRelay implements SessionRelay {
     this.verdict = verdict;
   }
 
-  sanctionsSend(_threadTs: string, command: string): boolean {
+  sanctionsSend(_threadTs: string, _channelId: string, command: string): boolean {
     this.sanctioned.push(command);
     return this.sendSanctioned;
   }
 
-  prepare(threadTs: string, command: string): PrepareVerdict {
+  prepare(threadTs: string, _channelId: string, command: string): PrepareVerdict {
     this.prepared.push({ threadTs, command });
     return this.verdict === 'passthrough' ? { action: 'proceed', command } : this.verdict;
   }
 
-  observe(threadTs: string, command: string, stdout: string): Promise<void> {
+  observe(threadTs: string, _channelId: string, command: string, stdout: string): Promise<void> {
     this.observed.push({ threadTs, command, stdout });
     return Promise.resolve();
   }
@@ -105,6 +106,7 @@ const makeCanUseTool = (
 ) =>
   buildCanUseTool({
     threadTs: THREAD,
+    channelId: CHANNEL,
     gates,
     allowList,
     delegations,
@@ -342,7 +344,7 @@ describe('buildCanUseTool — the gate relay seam (issue #21)', () => {
 
 describe('guardrailHooks', () => {
   const makeHooks = (delegations = new FakeDelegations(), relay = new FakeRelay()) =>
-    guardrailHooks({ threadTs: THREAD, delegations, relay, logger: createLogger('silent') });
+    guardrailHooks({ threadTs: THREAD, channelId: CHANNEL, delegations, relay, logger: createLogger('silent') });
 
   const baseHookFields = {
     session_id: 's1',

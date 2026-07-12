@@ -12,7 +12,7 @@ const envelope = (result: object): string => JSON.stringify({ id: 'x', ok: true,
 
 /** Recording Slack adapter; each failure mode mimics the Web API's usual error. */
 class FakeSurface implements Surface {
-  posts: Array<{ threadTs: string; text: string }> = [];
+  posts: Array<{ channelId: string; threadTs: string; text: string }> = [];
   updates: Array<{ ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
@@ -22,26 +22,26 @@ class FakeSurface implements Surface {
   failRemove = false;
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
     if (this.failPosts) return Promise.reject(new Error('slack down'));
-    this.posts.push({ threadTs, text });
+    this.posts.push({ channelId, threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
+  update(_channelId: string, ts: string, text: string): Promise<void> {
     if (this.failUpdates) return Promise.reject(new Error('slack down'));
     this.updates.push({ ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
+  react(_channelId: string, ts: string, name: string): Promise<void> {
     if (this.failAdd) return Promise.reject(new Error('already_reacted'));
     this.reactions.push({ ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
+  unreact(_channelId: string, ts: string, name: string): Promise<void> {
     if (this.failRemove) return Promise.reject(new Error('no_reaction'));
     this.removed.push({ ts, name });
     return Promise.resolve();
@@ -77,6 +77,7 @@ const seedGate = (
   store.recordGate({
     msgId: 'msg_g1',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_3f81',
     dispatchId: 'ctx_d1',
     workerHandle: 'term_w1',
@@ -93,6 +94,7 @@ const seedStall = (store: DelegationStore, dispatchId = 'ctx_d1'): void => {
   store.recordStall({
     dispatchId,
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_w1',
     worktreeName: 'webapp-84-csv-export',
     lastOutput: '? proceed (y/N)',
@@ -126,7 +128,7 @@ describe('ackWorking — the add-only 👀 (issue #49)', () => {
   it('adds 👀 on the root and nothing else — no stale-reaction sweep', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.ackWorking(THREAD);
+    await threadSurface.ackWorking(CHANNEL, THREAD);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
     // Add-only: a pending ❓/🚨 or an earlier ✅/❌ must survive the ack —
@@ -138,7 +140,7 @@ describe('ackWorking — the add-only 👀 (issue #49)', () => {
     const { threadSurface, surface } = makeThreadSurface();
     surface.failAdd = true;
 
-    await expect(threadSurface.ackWorking(THREAD)).resolves.toBeUndefined();
+    await expect(threadSurface.ackWorking(CHANNEL, THREAD)).resolves.toBeUndefined();
   });
 });
 
@@ -146,7 +148,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
   it('removes the 👀 when nothing is in flight and nothing is pending', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleTurnEnd(THREAD);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD);
 
     expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
     expect(surface.reactions).toEqual([]);
@@ -156,7 +158,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedDispatch(store);
 
-    await threadSurface.settleTurnEnd(THREAD);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD);
 
     expect(surface.removed).toEqual([]);
     expect(surface.reactions).toEqual([]);
@@ -166,7 +168,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedGate(store);
 
-    await threadSurface.settleTurnEnd(THREAD);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD);
 
     expect(surface.removed).toEqual([]);
   });
@@ -175,7 +177,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedStall(store);
 
-    await threadSurface.settleTurnEnd(THREAD);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD);
 
     expect(surface.removed).toEqual([]);
   });
@@ -185,7 +187,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     // coordinator knows, and its signal must keep the milestone 👀 on.
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleTurnEnd(THREAD, true);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD, true);
 
     expect(surface.removed).toEqual([]);
   });
@@ -195,7 +197,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     seedDispatch(store);
     store.closeDelegation('ctx_d1', 'completed');
 
-    await threadSurface.settleTurnEnd(THREAD);
+    await threadSurface.settleTurnEnd(CHANNEL, THREAD);
 
     expect(surface.removed).toEqual([{ ts: THREAD, name: 'eyes' }]);
   });
@@ -204,7 +206,7 @@ describe('settleTurnEnd — the remove-only 👀 (issue #49)', () => {
     const { threadSurface, surface } = makeThreadSurface();
     surface.failRemove = true;
 
-    await expect(threadSurface.settleTurnEnd(THREAD)).resolves.toBeUndefined();
+    await expect(threadSurface.settleTurnEnd(CHANNEL, THREAD)).resolves.toBeUndefined();
   });
 });
 
@@ -212,7 +214,7 @@ describe('settleRoot — 🚨 outranks ❓ outranks 👀 (spec §8)', () => {
   it('settles to 👀 when nothing pends, sweeping the other managed reactions off', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleRoot(THREAD);
+    await threadSurface.settleRoot(CHANNEL, THREAD);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
     expect(surface.removed.map((reaction) => reaction.name).sort()).toEqual([
@@ -227,7 +229,7 @@ describe('settleRoot — 🚨 outranks ❓ outranks 👀 (spec §8)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedGate(store);
 
-    await threadSurface.settleRoot(THREAD);
+    await threadSurface.settleRoot(CHANNEL, THREAD);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'question' }]);
   });
@@ -237,7 +239,7 @@ describe('settleRoot — 🚨 outranks ❓ outranks 👀 (spec §8)', () => {
     seedGate(store);
     seedGate(store, { msgId: 'msg_esc', kind: 'escalation', question: 'main is broken' });
 
-    await threadSurface.settleRoot(THREAD);
+    await threadSurface.settleRoot(CHANNEL, THREAD);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
   });
@@ -246,7 +248,7 @@ describe('settleRoot — 🚨 outranks ❓ outranks 👀 (spec §8)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedStall(store);
 
-    await threadSurface.settleRoot(THREAD);
+    await threadSurface.settleRoot(CHANNEL, THREAD);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
   });
@@ -256,7 +258,7 @@ describe('settleRoot — 🚨 outranks ❓ outranks 👀 (spec §8)', () => {
     surface.failAdd = true;
     surface.failRemove = true;
 
-    await expect(threadSurface.settleRoot(THREAD)).resolves.toBeUndefined();
+    await expect(threadSurface.settleRoot(CHANNEL, THREAD)).resolves.toBeUndefined();
   });
 });
 
@@ -265,7 +267,7 @@ describe('settleWorkerDone — the live close (spec §8)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedDispatch(store);
 
-    await threadSurface.settleWorkerDone(THREAD, true);
+    await threadSurface.settleWorkerDone(CHANNEL, THREAD, true);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
   });
@@ -273,7 +275,7 @@ describe('settleWorkerDone — the live close (spec §8)', () => {
   it('a success flips to ✅ once nothing is left in flight', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleWorkerDone(THREAD, false);
+    await threadSurface.settleWorkerDone(CHANNEL, THREAD, false);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'white_check_mark' }]);
   });
@@ -282,7 +284,7 @@ describe('settleWorkerDone — the live close (spec §8)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedDispatch(store);
 
-    await threadSurface.settleWorkerDone(THREAD, false);
+    await threadSurface.settleWorkerDone(CHANNEL, THREAD, false);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
   });
@@ -292,7 +294,7 @@ describe('settleWorkerDone — the live close (spec §8)', () => {
     seedDispatch(store);
     seedStall(store);
 
-    await threadSurface.settleWorkerDone(THREAD, false);
+    await threadSurface.settleWorkerDone(CHANNEL, THREAD, false);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'rotating_light' }]);
   });
@@ -303,7 +305,7 @@ describe('settleReconciled — the boot batch close (issue #25)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedDispatch(store);
 
-    await threadSurface.settleReconciled(THREAD, ['completed', 'failed']);
+    await threadSurface.settleReconciled(CHANNEL, THREAD, ['completed', 'failed']);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
   });
@@ -311,7 +313,7 @@ describe('settleReconciled — the boot batch close (issue #25)', () => {
   it('all-clear flips to ✅ when the closures left nothing in flight', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleReconciled(THREAD, ['completed']);
+    await threadSurface.settleReconciled(CHANNEL, THREAD, ['completed']);
 
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'white_check_mark' }]);
   });
@@ -320,7 +322,7 @@ describe('settleReconciled — the boot batch close (issue #25)', () => {
     const { threadSurface, store, surface } = makeThreadSurface();
     seedDispatch(store);
 
-    await threadSurface.settleReconciled(THREAD, ['completed']);
+    await threadSurface.settleReconciled(CHANNEL, THREAD, ['completed']);
 
     expect(surface.reactions).toEqual([]);
     expect(surface.removed).toEqual([]);
@@ -329,7 +331,7 @@ describe('settleReconciled — the boot batch close (issue #25)', () => {
   it('no closures leave the root alone', async () => {
     const { threadSurface, surface } = makeThreadSurface();
 
-    await threadSurface.settleReconciled(THREAD, []);
+    await threadSurface.settleReconciled(CHANNEL, THREAD, []);
 
     expect(surface.reactions).toEqual([]);
     expect(surface.removed).toEqual([]);
@@ -445,6 +447,7 @@ describe('cleanupDeliveredWorktree (issue #43)', () => {
 
     expect(surface.posts).toEqual([
       {
+        channelId: CHANNEL,
         threadTs: THREAD,
         text:
           '🧹 Could not clean up worktree `webapp-84-csv-export` — kept for inspection.\n' +

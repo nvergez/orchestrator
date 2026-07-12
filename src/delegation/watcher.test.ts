@@ -43,8 +43,8 @@ const REPO_LIST_OUT = envelope({
 });
 
 class FakeSurface implements Surface {
-  posts: Array<{ threadTs: string; text: string }> = [];
-  updates: Array<{ ts: string; text: string }> = [];
+  posts: Array<{ channelId: string; threadTs: string; text: string }> = [];
+  updates: Array<{ channelId: string; ts: string; text: string }> = [];
   reactions: Array<{ ts: string; name: string }> = [];
   removed: Array<{ ts: string; name: string }> = [];
   failPosts = false;
@@ -52,28 +52,28 @@ class FakeSurface implements Surface {
   failNextPosts = 0;
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
     if (this.failNextPosts > 0) {
       this.failNextPosts -= 1;
       return Promise.reject(new Error('slack down'));
     }
     if (this.failPosts) return Promise.reject(new Error('slack down'));
-    this.posts.push({ threadTs, text });
+    this.posts.push({ channelId, threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
-    this.updates.push({ ts, text });
+  update(channelId: string, ts: string, text: string): Promise<void> {
+    this.updates.push({ channelId, ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
+  react(_channelId: string, ts: string, name: string): Promise<void> {
     this.reactions.push({ ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
+  unreact(_channelId: string, ts: string, name: string): Promise<void> {
     if (name === 'eyes') return Promise.reject(new Error('no_reaction'));
     this.removed.push({ ts, name });
     return Promise.resolve();
@@ -168,7 +168,7 @@ const makeWatcher = (options: HarnessOptions = {}) => {
 
 const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
   vi.waitFor(() => {
-    expect(watcher.isArmed(threadTs)).toBe(false);
+    expect(watcher.isArmed(threadTs, CHANNEL)).toBe(false);
   });
 
 describe('worker_done — the happy path', () => {
@@ -178,7 +178,7 @@ describe('worker_done — the happy path', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls[0]).toBe(
@@ -221,7 +221,7 @@ describe('worker_done — the happy path', () => {
     const { watcher, store, surface } = makeWatcher({ checks: [checkOut(busMessage())] });
     seedDispatch(store, { cardTs: null });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(surface.updates).toEqual([]);
@@ -235,7 +235,7 @@ describe('worker_done — the happy path', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(surface.updates[0]?.text).toContain('• issue: webapp#84');
@@ -249,11 +249,11 @@ describe('worker_done — the happy path', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(surface.posts).toEqual([
-      { threadTs: THREAD, text: '✅ Delivered — CSV export shipped. Details in the card ⤴' },
+      { channelId: CHANNEL, threadTs: THREAD, text: '✅ Delivered — CSV export shipped. Details in the card ⤴' },
     ]);
   });
 
@@ -264,7 +264,7 @@ describe('worker_done — the happy path', () => {
     seedDispatch(store);
     seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     });
@@ -272,7 +272,7 @@ describe('worker_done — the happy path', () => {
     // Never ✅ with work still out — the registries settle the honest state.
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
     // The second window parked on the still-armed watcher.
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
     expect(checkRunner.calls).toHaveLength(2);
   });
 
@@ -285,6 +285,7 @@ describe('worker_done — the happy path', () => {
     store.recordStall({
       dispatchId: 'ctx_d2',
       threadTs: THREAD,
+      channelId: CHANNEL,
       workerHandle: 'term_stalled',
       worktreeName: 'sandbox-9-slug',
       lastOutput: '? proceed (y/N)',
@@ -292,7 +293,7 @@ describe('worker_done — the happy path', () => {
       relayTs: null,
     });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     });
@@ -306,7 +307,7 @@ describe('worker_done — the happy path', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
@@ -325,7 +326,7 @@ describe('worker_done — the happy path', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
@@ -351,7 +352,7 @@ describe('worker_done — failure', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
@@ -373,7 +374,7 @@ describe('worker_done — failure', () => {
     seedDispatch(store);
     seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
     });
@@ -398,13 +399,14 @@ describe('worker_done — worktree cleanup (issue #43)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     // The delegation still closed cleanly — cleanup is janitorial.
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     expect(surface.posts).toEqual([
       {
+        channelId: CHANNEL,
         threadTs: THREAD,
         text:
           '🧹 Could not clean up worktree `webapp-84-csv-export` — kept for inspection.\n' +
@@ -420,7 +422,7 @@ describe('worker_done — worktree cleanup (issue #43)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
@@ -433,7 +435,7 @@ describe('worker_done — worktree cleanup (issue #43)', () => {
     });
     seedDispatch(store, { worktreeId: null, worktreeName: null, worktreePath: null });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
@@ -463,7 +465,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
@@ -500,7 +502,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     expect(wakes).toHaveLength(0);
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(slotsFreed()).toBe(0);
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('relays an escalation 🚨 from its body, without options or a number tail', async () => {
@@ -517,7 +519,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
@@ -544,7 +546,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(2);
     });
@@ -560,14 +562,14 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
     // Both windows consumed; the replay changed nothing.
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
-      expect(store.listPendingGates(THREAD)).toHaveLength(1);
+      expect(store.listPendingGates(THREAD, CHANNEL)).toHaveLength(1);
     });
   });
 
@@ -578,7 +580,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     surface.failPosts = true;
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getGate('msg_a8f37bac632f')).toBeDefined();
     });
@@ -602,7 +604,7 @@ describe('decision_gate / escalation — the relay up (issue #21)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
@@ -648,7 +650,7 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getGate('msg_first')?.status).toBe('superseded');
       expect(surface.reactions).toHaveLength(2);
@@ -666,7 +668,7 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
       supersededBy: 'msg_second',
     });
     expect(store.getGate('msg_second')).toMatchObject({ status: 'pending', relayTs: 'msg-ts-1' });
-    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_second']);
+    expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId)).toEqual(['msg_second']);
     // The coarse state never wavers — still one question waiting.
     expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
   });
@@ -684,13 +686,13 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(2);
     });
 
     expect(surface.updates).toEqual([]);
-    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual([
+    expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId)).toEqual([
       'msg_q1',
       'msg_q2',
     ]);
@@ -713,12 +715,12 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(2);
     });
 
-    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId).sort()).toEqual([
+    expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId).sort()).toEqual([
       'msg_esc',
       'msg_q',
     ]);
@@ -731,7 +733,7 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
     surface.failNextPosts = 1;
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getGate('msg_first')?.status).toBe('superseded');
     });
@@ -747,11 +749,11 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getGate('msg_q')?.status).toBe('closed');
-    expect(store.listPendingGates(THREAD)).toEqual([]);
+    expect(store.listPendingGates(THREAD, CHANNEL)).toEqual([]);
     // The moot question no longer holds ❓ — the thread ends delivered.
     expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'white_check_mark' });
   });
@@ -776,7 +778,7 @@ describe('re-asked questions and closed delegations — gate hygiene (issue #46)
       cardTs: 'card-ts-2',
     });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
     });
@@ -793,7 +795,7 @@ describe('rolling windows', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls).toHaveLength(3);
@@ -807,7 +809,7 @@ describe('rolling windows', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls).toHaveLength(2);
@@ -821,7 +823,7 @@ describe('rolling windows', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
@@ -832,7 +834,7 @@ describe('arming and stopping', () => {
   it('never spawns a check for a thread with no in-flight work', async () => {
     const { watcher, checkRunner } = makeWatcher();
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls).toEqual([]);
@@ -842,12 +844,12 @@ describe('arming and stopping', () => {
     const { watcher, store, checkRunner } = makeWatcher();
     seedDispatch(store);
 
-    watcher.arm(THREAD);
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(checkRunner.calls).toHaveLength(1);
     });
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('re-arms for a dispatch landing right after a stop — un-arm is atomic with the stop', async () => {
@@ -856,11 +858,11 @@ describe('arming and stopping', () => {
       checks: [checkOut(busMessage()), checkOut(second)],
     });
     seedDispatch(store);
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls).toHaveLength(2);
@@ -874,16 +876,16 @@ describe('arming and stopping', () => {
     seedDispatch(store);
     // The wake fires mid-handling — a session turn dispatching again right
     // then must find the loop still alive for its next window.
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(wakes).toHaveLength(1);
     });
     seedDispatch(store, { dispatchId: 'ctx_d2', taskId: 'task_9999' });
-    watcher.arm(THREAD); // what onDispatched does — must not double-loop
+    watcher.arm(THREAD, CHANNEL); // what onDispatched does — must not double-loop
     await vi.waitFor(() => {
       expect(checkRunner.calls).toHaveLength(2);
     });
-    expect(watcher.isArmed(THREAD)).toBe(true);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
   });
 
   it('stops when the mailbox is missing instead of spinning', async () => {
@@ -919,7 +921,7 @@ describe('arming and stopping', () => {
       title: null,
     });
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     expect(checkRunner.calls).toEqual([]);
@@ -940,8 +942,8 @@ describe('boot re-arm', () => {
       expect(checkRunner.calls).toHaveLength(1);
     });
     expect(checkRunner.calls[0]).toContain(MAILBOX);
-    expect(watcher.isArmed(THREAD)).toBe(true);
-    expect(watcher.isArmed(THREAD_B)).toBe(false);
+    expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
+    expect(watcher.isArmed(THREAD_B, CHANNEL)).toBe(false);
   });
 
   it('a completion sent while the daemon was down lands after the re-arm', async () => {
@@ -974,7 +976,7 @@ describe('worker_done after boot reconciliation (issue #25)', () => {
     // Boot reconciliation closed the first delegation during the outage.
     store.closeDelegation('ctx_d1', 'completed');
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await stopped(watcher);
 
     // The replayed completion neither surfaces raw nor wakes anyone; only
@@ -992,6 +994,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     store.recordStall({
       dispatchId: 'ctx_d1',
       threadTs: THREAD,
+      channelId: CHANNEL,
       workerHandle: 'term_w1',
       worktreeName: 'webapp-84-csv-export',
       lastOutput: 'Exit code 1 / Orca is not running.',
@@ -1009,7 +1012,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
       seedDispatch(store);
       pendingStall(store);
 
-      watcher.arm(THREAD);
+      watcher.arm(THREAD, CHANNEL);
       await vi.waitFor(() => {
         expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
       });
@@ -1035,7 +1038,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
     });
@@ -1060,10 +1063,10 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     });
     seedDispatch(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     // The next (dry) window parks — give the handled message a beat to land.
     await vi.waitFor(() => {
-      expect(watcher.isArmed(THREAD)).toBe(true);
+      expect(watcher.isArmed(THREAD, CHANNEL)).toBe(true);
     });
 
     expect(store.getByDispatchId('ctx_d1')?.lastBusAt).toBeNull();
@@ -1087,7 +1090,7 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     seedDispatch(store);
     pendingStall(store);
 
-    watcher.arm(THREAD);
+    watcher.arm(THREAD, CHANNEL);
     await vi.waitFor(() => {
       expect(store.getByDispatchId('ctx_d1')?.lastBusAt).not.toBeNull();
     });

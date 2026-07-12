@@ -5,6 +5,7 @@ import { deriveOverviewStats } from './stats';
 const delegation = (over: Partial<DelegationView>): DelegationView => ({
   dispatchId: 'ctx_a',
   threadTs: '1751970000.000100',
+  channelId: 'C0EXAMPLE123',
   repo: 'webapp',
   issueNumber: 84,
   agent: 'claude',
@@ -31,6 +32,7 @@ const snapshot = (over: Partial<StateSnapshot>): StateSnapshot => ({
 const session = (delegations: DelegationView[]) => ({
   threadTs: '1751970000.000100',
   channelId: 'C0EXAMPLE123',
+  rootUser: 'U0EXAMPLE456',
   status: 'open' as const,
   createdAt: '2026-07-11T08:00:00.000Z',
   lastActivityAt: '2026-07-11T11:00:00.000Z',

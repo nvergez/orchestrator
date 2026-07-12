@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { classifyEvent } from './filter.ts';
 
 const guard = {
-  channelId: 'C0EXAMPLE123',
-  allowedUserId: 'U0EXAMPLE456',
+  channelIds: ['C0EXAMPLE123', 'C0SECOND456'],
+  allowedUserIds: ['U0EXAMPLE456', 'U0TEAMMATE1'],
   botUserId: 'U0EXAMPLEBOT',
 };
 
@@ -29,6 +29,8 @@ describe('classifyEvent', () => {
     expect(classifyEvent(mention, guard)).toEqual({
       action: 'open',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
+      userId: 'U0EXAMPLE456',
       text: 'deploy the fix',
     });
   });
@@ -39,6 +41,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent(inThread, guard)).toEqual({
       action: 'reply',
       threadTs: '1751960000.000001',
+      channelId: 'C0EXAMPLE123',
       text: 'deploy the fix',
     });
   });
@@ -47,6 +50,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent(threadReply, guard)).toEqual({
       action: 'reply',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',
     });
   });
@@ -57,6 +61,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent(thirdParty, guard)).toEqual({
       action: 'refuse',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
     });
   });
 
@@ -155,6 +160,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent(closeCommand, guard)).toEqual({
       action: 'close',
       threadTs: '1751960000.000001',
+      channelId: 'C0EXAMPLE123',
     });
   });
 
@@ -175,6 +181,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent({ ...threadReply, text: 'close' }, guard)).toEqual({
       action: 'close',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
     });
   });
 
@@ -203,6 +210,7 @@ describe('classifyEvent', () => {
     expect(classifyEvent({ ...threadReply, text: 'close the PR when CI is green' }, guard)).toEqual({
       action: 'reply',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
       text: 'close the PR when CI is green',
     });
   });
@@ -235,6 +243,34 @@ describe('classifyEvent', () => {
       action: 'ignore',
       reason: 'third_party_in_thread',
     });
+  });
+
+  it('serves every configured channel — the decision names the event’s channel (issue #93)', () => {
+    expect(classifyEvent({ ...mention, channel: 'C0SECOND456' }, guard)).toEqual({
+      action: 'open',
+      threadTs: '1751970000.000100',
+      channelId: 'C0SECOND456',
+      userId: 'U0EXAMPLE456',
+      text: 'deploy the fix',
+    });
+    expect(classifyEvent({ ...threadReply, channel: 'C0SECOND456' }, guard)).toMatchObject({
+      action: 'reply',
+      channelId: 'C0SECOND456',
+    });
+  });
+
+  it('any allowed user drives the daemon — a teammate’s mention opens too (issue #93)', () => {
+    expect(classifyEvent({ ...mention, user: 'U0TEAMMATE1' }, guard)).toEqual({
+      action: 'open',
+      threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
+      userId: 'U0TEAMMATE1',
+      text: 'deploy the fix',
+    });
+    expect(classifyEvent({ ...threadReply, user: 'U0TEAMMATE1' }, guard).action).toBe('reply');
+    expect(classifyEvent({ ...threadReply, user: 'U0TEAMMATE1', text: 'close' }, guard).action).toBe(
+      'close',
+    );
   });
 
   it('a bare root mention still opens the session — the mention IS the open (spec §3)', () => {
@@ -291,6 +327,7 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
     expect(classifyEvent(event, guard)).toEqual({
       action: 'close',
       threadTs: '1751970000.000100',
+      channelId: 'C0EXAMPLE123',
     });
   });
 
@@ -304,6 +341,7 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
     expect(classifyEvent(event, guard)).toEqual({
       action: 'reply',
       threadTs: threadReply.thread_ts,
+      channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',
     });
   });
@@ -328,6 +366,7 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
     expect(classifyEvent(threadReply, guard)).toEqual({
       action: 'reply',
       threadTs: threadReply.thread_ts,
+      channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',
     });
   });

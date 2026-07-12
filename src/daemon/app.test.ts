@@ -24,7 +24,7 @@ const USER = 'U0ALLOWED';
 const BOT = 'U0BOT';
 const OTHER = 'U0STRANGER';
 
-const GUARD: Guard = { channelId: CHANNEL, allowedUserId: USER, botUserId: BOT };
+const GUARD: Guard = { channelIds: [CHANNEL], allowedUserIds: [USER], botUserId: BOT };
 
 /** Captures the handlers exactly as Bolt would hold them. */
 class FakeBoltApp implements SlackApp {
@@ -87,8 +87,8 @@ const makeHarness = () => {
   const store = new DelegationStore(':memory:');
   const gatePosts: Array<{ threadTs: string; text: string }> = [];
   const gates = new GateKeeper({
-    allowedUserId: USER,
-    post: (threadTs, text) => {
+    allowedUserIds: [USER],
+    post: (threadTs, _channelId, text) => {
       gatePosts.push({ threadTs, text });
       return Promise.resolve('gate-ts-1');
     },
@@ -126,7 +126,7 @@ const threadReply = (text: string, user: string = USER): IncomingEvent => ({
 describe('registerHandlers — gate-eats-reply', () => {
   it('a pending 🚦 gate consumes the thread reply before it becomes a session turn', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('go'));
 
@@ -136,7 +136,7 @@ describe('registerHandlers — gate-eats-reply', () => {
 
   it('a denial reply is consumed the same way, verbatim', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('wait, rebase first'));
 
@@ -149,6 +149,7 @@ describe('registerHandlers — gate-eats-reply', () => {
     store.recordGate({
       msgId: 'msg_1',
       threadTs: THREAD,
+      channelId: CHANNEL,
       taskId: 'task_1',
       dispatchId: 'ctx_1',
       workerHandle: 'term_w1',
@@ -180,7 +181,7 @@ describe('registerHandlers — gate-eats-reply', () => {
 describe('registerHandlers — close-denies-gate', () => {
   it('"close" while a 🚦 is pending denies the gate with the word verbatim, then still closes', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('close'));
 
@@ -221,14 +222,14 @@ describe('registerHandlers — routing', () => {
       text: `<@${BOT}> hello`,
     });
     expect(app.posts).toEqual([
-      { channel: CHANNEL, thread_ts: ROOT_TS, text: refusalLine(USER) },
+      { channel: CHANNEL, thread_ts: ROOT_TS, text: refusalLine([USER]) },
     ]);
     expect(sessions.opened).toEqual([]);
   });
 
   it('a third-party thread reply is silence — not eaten, not a turn, not refused', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('go', OTHER));
 
@@ -236,7 +237,7 @@ describe('registerHandlers — routing', () => {
     expect(app.posts).toEqual([]);
     // The stranger's "go" resolved nothing: the gate still waits for the
     // authorized user.
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     await expect(verdict).resolves.toEqual({ approved: true, reply: 'go' });
   });
 
