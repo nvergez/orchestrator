@@ -103,10 +103,10 @@ authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
 
-## 4. Create or choose the channel and invite the bot
+## 4. Create or choose the channel(s) and invite the bot
 
-The daemon listens to **one dedicated channel** — public or private, your
-choice — and ignores every other conversation. In that channel, run
+The daemon listens to **the channels you configure** — public or private,
+one or several — and ignores every other conversation. In each of them, run
 `/invite @orchestrator` (or *Add apps* from the channel settings).
 
 Membership is not cosmetic: Slack only delivers events for conversations the
