@@ -50,6 +50,8 @@ export interface SessionCard {
 export interface GateView {
   msgId: string;
   threadTs: string;
+  /** The thread's channel (issue #93); null on pre-migration rows. */
+  channelId: string | null;
   kind: 'decision_gate' | 'escalation';
   question: string;
   options: string[];
@@ -61,6 +63,8 @@ export interface GateView {
 export interface StallView {
   dispatchId: string;
   threadTs: string;
+  /** The thread's channel (issue #93); null on pre-migration rows. */
+  channelId: string | null;
   worktreeName: string | null;
   lastOutput: string;
   alertedAt: string;
@@ -287,6 +291,7 @@ function readPendingGates(db: DatabaseSync): GateView[] {
   return rows.map((row) => ({
     msgId: row.msg_id as string,
     threadTs: row.thread_ts as string,
+    channelId: (row.channel_id ?? null) as string | null,
     kind: row.kind as GateView['kind'],
     question: row.question as string,
     options: readOptions(row.options),
@@ -316,6 +321,7 @@ function readPendingStalls(db: DatabaseSync): StallView[] {
   return rows.map((row) => ({
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
+    channelId: (row.channel_id ?? null) as string | null,
     worktreeName: row.worktree_name as string | null,
     lastOutput: row.last_output as string,
     alertedAt: row.alerted_at as string,

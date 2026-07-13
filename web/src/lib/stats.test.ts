@@ -44,6 +44,7 @@ const session = (delegations: DelegationView[]) => ({
 const gate = {
   msgId: 'msg_gate',
   threadTs: '1751970000.000100',
+  channelId: 'C0EXAMPLE123',
   kind: 'decision_gate' as const,
   question: 'Rebase or merge?',
   options: ['rebase', 'merge'],
@@ -54,6 +55,7 @@ const gate = {
 const stall = {
   dispatchId: 'ctx_a',
   threadTs: '1751970000.000100',
+  channelId: 'C0EXAMPLE123',
   worktreeName: 'webapp-84-dashboard',
   lastOutput: 'waiting at a prompt',
   alertedAt: '2026-07-11T11:45:00.000Z',

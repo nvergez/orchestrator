@@ -35,6 +35,7 @@ export interface SessionCardView {
 export interface GateView {
   msgId: string;
   threadTs: string;
+  channelId: string | null;
   kind: 'decision_gate' | 'escalation';
   question: string;
   options: string[];
@@ -45,6 +46,7 @@ export interface GateView {
 export interface StallView {
   dispatchId: string;
   threadTs: string;
+  channelId: string | null;
   worktreeName: string | null;
   lastOutput: string;
   alertedAt: string;

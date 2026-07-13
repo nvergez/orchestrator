@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from '../daemon/db.ts';
+import { DelegationStore } from '../delegation/delegations.ts';
 import { CHANNEL, seedDemoState, THREAD, THREAD_CLOSED, THREAD_ORPHAN, USER } from './demo-state.ts';
 import { startDashboard, type DashboardHandle } from './server.ts';
 import { readSnapshot, type SnapshotDeps, type StateSnapshot } from './snapshot.ts';
@@ -178,6 +179,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           msgId: 'msg_gate',
           threadTs: THREAD,
+          channelId: CHANNEL,
           kind: 'decision_gate',
           question: 'Migrations diverge — rebase or merge?',
           options: ['rebase', 'merge'],
@@ -187,6 +189,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           msgId: 'msg_escalation',
           threadTs: THREAD,
+          channelId: CHANNEL,
           kind: 'escalation',
           question: 'CI is red on main — halt the merge?',
           options: [],
@@ -198,6 +201,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         {
           dispatchId: 'ctx_live',
           threadTs: THREAD,
+          channelId: CHANNEL,
           worktreeName: 'webapp-84-dashboard',
           lastOutput: '… waiting at a permissions prompt',
           alertedAt: '2026-07-10T11:45:00.000Z',
@@ -327,6 +331,78 @@ describe('GET /api/state — live state off a daemon-written database', () => {
 
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('npm run build:web');
+  });
+
+  it('two same-ts threads in different channels yield separate cards — nothing merges (issue #93)', async () => {
+    const dbPath = join(tempDir(), 'orchestrator.db');
+    const CHANNEL_B = 'C0OTHER456';
+    const sessions = new SessionStore(dbPath);
+    const delegations = new DelegationStore(dbPath);
+    sessions.register(THREAD, CHANNEL, USER);
+    sessions.register(THREAD, CHANNEL_B, 'U0TEAMMATE1');
+    const row = {
+      taskId: 'task_a',
+      dispatchId: 'ctx_chan_a',
+      worktreeId: 'wt-a',
+      worktreeName: 'webapp-84-export',
+      worktreePath: '/w/a',
+      repo: 'webapp',
+      issueNumber: 84,
+      agent: 'claude',
+      workerHandle: 'term_a',
+      threadTs: THREAD,
+      channelId: CHANNEL,
+      cardTs: null,
+      title: 'export',
+    };
+    delegations.recordDispatch(row);
+    delegations.recordDispatch({
+      ...row,
+      taskId: 'task_b',
+      dispatchId: 'ctx_chan_b',
+      channelId: CHANNEL_B,
+      title: 'the other channel’s work',
+    });
+    delegations.recordGate({
+      msgId: 'msg_chan_b',
+      threadTs: THREAD,
+      channelId: CHANNEL_B,
+      taskId: 'task_b',
+      dispatchId: 'ctx_chan_b',
+      workerHandle: 'term_a',
+      worktreeName: 'webapp-84-export',
+      kind: 'decision_gate',
+      question: 'rebase or merge?',
+      options: [],
+      relayTs: null,
+    });
+    sessions.close();
+    delegations.close();
+    const { baseUrl } = await serve(snapshotDeps(dbPath));
+
+    const state = (await (await fetch(`${baseUrl}/api/state`)).json()) as StateSnapshot;
+
+    const cards = state.sessions.map((card) => ({
+      channelId: card.channelId,
+      rootUser: card.rootUser,
+      delegations: card.delegations.map((delegation) => delegation.dispatchId),
+    }));
+    expect(cards).toHaveLength(2);
+    expect(cards).toContainEqual({
+      channelId: CHANNEL,
+      rootUser: USER,
+      delegations: ['ctx_chan_a'],
+    });
+    expect(cards).toContainEqual({
+      channelId: CHANNEL_B,
+      rootUser: 'U0TEAMMATE1',
+      delegations: ['ctx_chan_b'],
+    });
+    // The gate callout names its channel — the operator can tell which
+    // same-ts thread is asking.
+    expect(state.pendingGates).toEqual([
+      expect.objectContaining({ msgId: 'msg_chan_b', channelId: CHANNEL_B }),
+    ]);
   });
 
   it('keeps reading while a live daemon keeps writing — WAL coexistence (ADR 0002)', async () => {
