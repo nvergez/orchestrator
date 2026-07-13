@@ -23,6 +23,9 @@ export function GateCallout({ gate, asOf }: { gate: GateView; asOf: string }) {
         {gate.worktreeName !== null && (
           <span className="font-mono text-2xs text-muted-foreground">{gate.worktreeName}</span>
         )}
+        {gate.channelId !== null && (
+          <span className="font-mono text-2xs text-muted-foreground">{gate.channelId}</span>
+        )}
         <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
           asked {ago(gate.relayedAt, asOf)}
         </span>
@@ -51,6 +54,9 @@ export function StallCallout({ stall, asOf }: { stall: StallView; asOf: string }
         <Badge variant="serious">⏸ stalled worker</Badge>
         {stall.worktreeName !== null && (
           <span className="font-mono text-2xs text-muted-foreground">{stall.worktreeName}</span>
+        )}
+        {stall.channelId !== null && (
+          <span className="font-mono text-2xs text-muted-foreground">{stall.channelId}</span>
         )}
         <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
           alerted {ago(stall.alertedAt, asOf)}

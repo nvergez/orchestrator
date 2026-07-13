@@ -253,7 +253,7 @@ export class Watchdog {
     const gated =
       row.workerHandle !== null &&
       this.store
-        .listPendingGates(row.threadTs)
+        .listPendingGates(row.threadTs, row.channelId)
         .some((gate) => gate.workerHandle === row.workerHandle);
     if (gated) {
       this.logger.debug(
@@ -272,7 +272,7 @@ export class Watchdog {
   ): Promise<void> {
     let relayTs: string | null = null;
     try {
-      relayTs = await this.surface.post(row.threadTs, opts.text);
+      relayTs = await this.surface.post(row.channelId, row.threadTs, opts.text);
     } catch (error) {
       this.logger.error(
         { err: error, threadTs: row.threadTs, dispatchId: row.dispatchId },
@@ -294,6 +294,7 @@ export class Watchdog {
     this.store.recordStall({
       dispatchId: row.dispatchId,
       threadTs: row.threadTs,
+      channelId: row.channelId,
       workerHandle: row.workerHandle,
       worktreeName: row.worktreeName,
       lastOutput: opts.lastOutput,
@@ -310,7 +311,7 @@ export class Watchdog {
       },
       opts.log,
     );
-    await this.surface.settleRoot(row.threadTs);
+    await this.surface.settleRoot(row.channelId, row.threadTs);
   }
 
   /** The worker terminal's tail, truncated for the alert; '' when unreadable. */

@@ -6,6 +6,7 @@ import { ThreadSurface, type Surface } from './thread-surface.ts';
 
 const THREAD = '1751970000.000100';
 const OTHER_THREAD = '1751970001.000200';
+const CHANNEL = 'C0TEST';
 const GATE = 'msg_6a8c14d55c7d';
 const WORKER = 'term_300035ab';
 
@@ -13,10 +14,10 @@ const REPLY_OK = JSON.stringify({ id: 'x', ok: true, result: { message: { id: 'm
 const SEND_OK = JSON.stringify({ id: 'x', ok: true, result: { send: { accepted: true } } });
 
 class FakeReactions implements Surface {
-  reactions: Array<{ ts: string; name: string }> = [];
-  removed: Array<{ ts: string; name: string }> = [];
+  reactions: Array<{ channelId: string; ts: string; name: string }> = [];
+  removed: Array<{ channelId: string; ts: string; name: string }> = [];
 
-  post(threadTs: string): Promise<string> {
+  post(_channelId: string, threadTs: string): Promise<string> {
     return Promise.resolve(`msg-ts-${threadTs}`);
   }
 
@@ -24,13 +25,13 @@ class FakeReactions implements Surface {
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
-    this.reactions.push({ ts, name });
+  react(channelId: string, ts: string, name: string): Promise<void> {
+    this.reactions.push({ channelId, ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
-    this.removed.push({ ts, name });
+  unreact(channelId: string, ts: string, name: string): Promise<void> {
+    this.removed.push({ channelId, ts, name });
     return Promise.resolve();
   }
 }
@@ -54,6 +55,7 @@ const seedGate = (
   store.recordGate({
     msgId: GATE,
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_13c7',
     dispatchId: 'ctx_13c7',
     workerHandle: WORKER,
@@ -76,6 +78,7 @@ const seedStall = (
   store.recordStall({
     dispatchId: 'ctx_stalled',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: WORKER,
     worktreeName: 'sandbox-21-bench',
     lastOutput: '? Overwrite existing bench.json? (y/N)',
@@ -88,7 +91,7 @@ const seedStall = (
 describe('decorateReply — the registry as turn context', () => {
   it('passes a gate-less thread through untouched', () => {
     const { relay } = makeRelay();
-    expect(relay.decorateReply(THREAD, 'hello')).toBe('hello');
+    expect(relay.decorateReply(THREAD, CHANNEL, 'hello')).toBe('hello');
   });
 
   it('prepends every gate with its msg id, ack ref, question, options and status', () => {
@@ -97,7 +100,7 @@ describe('decorateReply — the registry as turn context', () => {
     seedGate(store, { msgId: 'msg_answered', kind: 'escalation', options: [] });
     store.answerGate('msg_answered');
 
-    const decorated = relay.decorateReply(THREAD, 'the human words');
+    const decorated = relay.decorateReply(THREAD, CHANNEL, 'the human words');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
     expect(decorated).toContain(`[PENDING] ❓ question ${GATE} from \`sandbox-21-bench\``);
     expect(decorated).toContain('ack ref: sandbox#21');
@@ -114,7 +117,7 @@ describe('decorateReply — the registry as turn context', () => {
     seedStall(store, { dispatchId: 'ctx_nudged', workerHandle: null, worktreeName: null });
     store.answerStall('ctx_nudged');
 
-    const decorated = relay.decorateReply(THREAD, 'y');
+    const decorated = relay.decorateReply(THREAD, CHANNEL, 'y');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
     expect(decorated).toContain('[PENDING] ⚠️ stall from `sandbox-21-bench`');
     expect(decorated).toContain('ack ref: sandbox#21');
@@ -131,19 +134,19 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   it('lets non-reply commands through untouched', () => {
     const { relay } = makeRelay();
     const command = 'orca repo list --json';
-    expect(relay.prepare(THREAD, command)).toEqual({ action: 'proceed', command });
+    expect(relay.prepare(THREAD, CHANNEL, command)).toEqual({ action: 'proceed', command });
   });
 
   it('denies a reply chained with anything else', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
-    const verdict = relay.prepare(THREAD, `${replyCommand('ok')} && echo done`);
+    const verdict = relay.prepare(THREAD, CHANNEL, `${replyCommand('ok')} && echo done`);
     expect(verdict.action).toBe('deny');
   });
 
   it('denies a reply to an id the registry never relayed', () => {
     const { relay } = makeRelay();
-    const verdict = relay.prepare(THREAD, replyCommand('ok', 'msg_unknown'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('ok', 'msg_unknown'));
     expect(verdict).toMatchObject({ action: 'deny' });
     expect((verdict as { message: string }).message).toContain('not a gate relayed in this thread');
   });
@@ -151,7 +154,22 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   it('denies a reply to another thread’s gate — cross-thread routing is impossible', () => {
     const { relay, store } = makeRelay();
     seedGate(store, { threadTs: OTHER_THREAD });
-    expect(relay.prepare(THREAD, replyCommand('ok')).action).toBe('deny');
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('ok')).action).toBe('deny');
+  });
+
+  it('denies a reply to a same-ts gate in another channel (issue #93)', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store, { channelId: 'C0OTHER' });
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('ok')).action).toBe('deny');
+  });
+
+  it('routes a pre-#93 NULL-channel gate under whatever channel the thread speaks from', () => {
+    const { relay, store } = makeRelay();
+    seedGate(store, { channelId: null });
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('2'))).toEqual({
+      action: 'proceed',
+      command: `orca orchestration reply --id ${GATE} --body app/ --json`,
+    });
   });
 
   it('denies re-routing an answered gate, pointing at the terminal-send correction', () => {
@@ -159,7 +177,7 @@ describe('prepare — registry enforcement on orchestration reply', () => {
     seedGate(store);
     store.answerGate(GATE);
 
-    const verdict = relay.prepare(THREAD, replyCommand('actually option 1'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('actually option 1'));
     expect(verdict.action).toBe('deny');
     const message = (verdict as { message: string }).message;
     expect(message).toContain('never re-routes');
@@ -169,10 +187,10 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   it('demands --json and a --body', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
-    expect(relay.prepare(THREAD, `orca orchestration reply --id ${GATE} --body "x"`).action).toBe(
+    expect(relay.prepare(THREAD, CHANNEL, `orca orchestration reply --id ${GATE} --body "x"`).action).toBe(
       'deny',
     );
-    expect(relay.prepare(THREAD, `orca orchestration reply --id ${GATE} --json`).action).toBe(
+    expect(relay.prepare(THREAD, CHANNEL, `orca orchestration reply --id ${GATE} --json`).action).toBe(
       'deny',
     );
   });
@@ -181,11 +199,11 @@ describe('prepare — registry enforcement on orchestration reply', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
 
-    expect(relay.prepare(THREAD, replyCommand('2'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('2'))).toEqual({
       action: 'proceed',
       command: `orca orchestration reply --id ${GATE} --body app/ --json`,
     });
-    expect(relay.prepare(THREAD, replyCommand('3.'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('3.'))).toEqual({
       action: 'proceed',
       command: `orca orchestration reply --id ${GATE} --body 'merge both into flat config' --json`,
     });
@@ -194,7 +212,7 @@ describe('prepare — registry enforcement on orchestration reply', () => {
   it('denies an out-of-range option number instead of guessing', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
-    const verdict = relay.prepare(THREAD, replyCommand('7'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('7'));
     expect(verdict.action).toBe('deny');
     expect((verdict as { message: string }).message).toContain('no option 7');
   });
@@ -205,10 +223,10 @@ describe('prepare — registry enforcement on orchestration reply', () => {
     seedGate(store, { msgId: 'msg_free', options: [] });
 
     const free = replyCommand('use the flat config, drop the rest');
-    expect(relay.prepare(THREAD, free)).toEqual({ action: 'proceed', command: free });
+    expect(relay.prepare(THREAD, CHANNEL, free)).toEqual({ action: 'proceed', command: free });
 
     const numeric = replyCommand('2', 'msg_free');
-    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+    expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
   });
 });
 
@@ -220,9 +238,9 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     const { relay, store } = makeRelay();
     seedGate(store);
     // The reply to GATE fails (ask timed out) — the fallback send follows.
-    await relay.observe(THREAD, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
 
-    expect(relay.prepare(THREAD, send('2'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, send('2'))).toEqual({
       action: 'proceed',
       command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
     });
@@ -232,7 +250,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     const { relay, store } = makeRelay();
     seedGate(store);
 
-    expect(relay.prepare(THREAD, send('3.'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, send('3.'))).toEqual({
       action: 'proceed',
       command: `orca terminal send --terminal ${WORKER} --text 'merge both into flat config' --enter --json`,
     });
@@ -242,7 +260,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     const { relay, store } = makeRelay();
     seedGate(store);
 
-    const verdict = relay.prepare(THREAD, send('7'));
+    const verdict = relay.prepare(THREAD, CHANNEL, send('7'));
     expect(verdict.action).toBe('deny');
     expect((verdict as { message: string }).message).toContain('no option 7');
   });
@@ -252,7 +270,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedGate(store);
 
     const free = send('use the flat config');
-    expect(relay.prepare(THREAD, free)).toEqual({ action: 'proceed', command: free });
+    expect(relay.prepare(THREAD, CHANNEL, free)).toEqual({ action: 'proceed', command: free });
   });
 
   it('passes a bare number verbatim when the gate carried no options', () => {
@@ -260,7 +278,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedGate(store, { options: [] });
 
     const numeric = send('2');
-    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+    expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
   });
 
   it('never rewrites with two pending gates on the worker — attribution is ambiguous', () => {
@@ -269,7 +287,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedGate(store, { msgId: 'msg_two' });
 
     const numeric = send('2');
-    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+    expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
   });
 
   it('keeps a stalled worker’s keystrokes literal — a stall answer is typed as-is (issue #22)', () => {
@@ -278,16 +296,16 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedStall(store);
 
     const numeric = send('2');
-    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+    expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
   });
 
   it('the failed reply’s attribution outranks the stall — the fallback still rewrites', async () => {
     const { relay, store } = makeRelay();
     seedGate(store);
     seedStall(store);
-    await relay.observe(THREAD, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
 
-    expect(relay.prepare(THREAD, send('2'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, send('2'))).toEqual({
       action: 'proceed',
       command: `orca terminal send --terminal ${WORKER} --text app/ --enter --json`,
     });
@@ -297,9 +315,9 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     const { relay, store } = makeRelay();
     seedGate(store);
     store.answerGate(GATE);
-    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('actually 1')).action).toBe('deny');
 
-    expect(relay.prepare(THREAD, send('1'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, send('1'))).toEqual({
       action: 'proceed',
       command: `orca terminal send --terminal ${WORKER} --text root --enter --json`,
     });
@@ -310,11 +328,11 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedGate(store);
     // The reply against the original ask fails, then the worker re-asks with
     // renumbered options — the digit must resolve against the live numbering.
-    await relay.observe(THREAD, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
     seedGate(store, { msgId: 'msg_reask', options: ['markdown table', 'CSV file', 'HTML page'] });
     store.supersedeGate(GATE, 'msg_reask');
 
-    expect(relay.prepare(THREAD, send('2'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, send('2'))).toEqual({
       action: 'proceed',
       command: `orca terminal send --terminal ${WORKER} --text 'CSV file' --enter --json`,
     });
@@ -325,7 +343,7 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
     seedGate(store);
 
     const chained = `${send('2')} && ls`;
-    expect(relay.prepare(THREAD, chained)).toEqual({ action: 'proceed', command: chained });
+    expect(relay.prepare(THREAD, CHANNEL, chained)).toEqual({ action: 'proceed', command: chained });
   });
 });
 
@@ -335,12 +353,12 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
   it('sanctions the fallback while the worker’s gate is pending, not forever after', () => {
     const { relay, store } = makeRelay();
     seedGate(store);
-    expect(relay.sanctionsSend(THREAD, SEND)).toBe(true);
+    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(true);
 
     // All answered and no correction under way: the worker is no longer a
     // silent AUTO target — the 🚦 is back.
     store.answerGate(GATE);
-    expect(relay.sanctionsSend(THREAD, SEND)).toBe(false);
+    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(false);
   });
 
   it('sanctions the correction send an answered-gate denial just pointed at', () => {
@@ -348,8 +366,8 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
     seedGate(store);
     store.answerGate(GATE);
 
-    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
-    expect(relay.sanctionsSend(THREAD, SEND)).toBe(true);
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('actually 1')).action).toBe('deny');
+    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(true);
   });
 
   it.each([
@@ -360,18 +378,18 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
   ])('never sanctions %s', (label, command) => {
     const { relay, store } = makeRelay();
     seedGate(store, label === 'another thread’s gate' ? { threadTs: OTHER_THREAD } : {});
-    expect(relay.sanctionsSend(THREAD, command)).toBe(false);
+    expect(relay.sanctionsSend(THREAD, CHANNEL, command)).toBe(false);
   });
 
   it('sanctions the nudge while the worker’s stall alert is pending, not after (issue #22)', () => {
     const { relay, store } = makeRelay();
     seedStall(store);
-    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
+    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
       true,
     );
 
     store.answerStall('ctx_stalled');
-    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
+    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
       false,
     );
   });
@@ -379,7 +397,7 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
   it('never sanctions a send for another thread’s stall', () => {
     const { relay, store } = makeRelay();
     seedStall(store, { threadTs: OTHER_THREAD });
-    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
+    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
       false,
     );
   });
@@ -387,7 +405,7 @@ describe('sanctionsSend — the registry-anchored terminal send', () => {
   it('the stall sanction demands --enter — keystrokes without it answer nothing', () => {
     const { relay, store } = makeRelay();
     seedStall(store);
-    expect(relay.sanctionsSend(THREAD, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
+    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
       false,
     );
   });
@@ -409,7 +427,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
       agent: 'claude',
       workerHandle: WORKER,
       threadTs: THREAD,
-      channelId: 'C0TEST',
+      channelId: CHANNEL,
       cardTs: null,
       title: 'bench harness',
       ...over,
@@ -422,7 +440,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     seedGate(store);
     store.closeDelegation('ctx_13c7', 'completed');
 
-    expect(relay.decorateReply(THREAD, 'root')).toContain(`[CLOSED] ❓ question ${GATE}`);
+    expect(relay.decorateReply(THREAD, CHANNEL, 'root')).toContain(`[CLOSED] ❓ question ${GATE}`);
   });
 
   it('forwards a reply aimed at a superseded gate to its live re-ask — with option fidelity', () => {
@@ -431,7 +449,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     seedGate(store, { msgId: 'msg_reask' });
     store.supersedeGate(GATE, 'msg_reask');
 
-    expect(relay.prepare(THREAD, replyCommand('2'))).toEqual({
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('2'))).toEqual({
       action: 'proceed',
       command: 'orca orchestration reply --id msg_reask --body app/ --json',
     });
@@ -444,7 +462,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     store.supersedeGate(GATE, 'msg_reask');
     store.answerGate('msg_reask');
 
-    const verdict = relay.prepare(THREAD, replyCommand('actually 1'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('actually 1'));
     expect(verdict.action).toBe('deny');
     expect((verdict as { message: string }).message).toContain('never re-routes');
   });
@@ -455,7 +473,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     seedGate(store);
     store.closeDelegation('ctx_13c7', 'completed');
 
-    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('root'));
     expect(verdict.action).toBe('deny');
     expect((verdict as { message: string }).message).toContain('moot');
   });
@@ -465,7 +483,7 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     seedGate(store);
     store.supersedeGate(GATE, 'msg_ghost');
 
-    const verdict = relay.prepare(THREAD, replyCommand('root'));
+    const verdict = relay.prepare(THREAD, CHANNEL, replyCommand('root'));
     expect(verdict.action).toBe('deny');
     expect((verdict as { message: string }).message).toContain('re-asked');
   });
@@ -475,11 +493,11 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     seedDispatch(store);
     seedGate(store);
     // The reply fails, then the delegation closes before the fallback runs.
-    await relay.observe(THREAD, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
     store.closeDelegation('ctx_13c7', 'completed');
 
     const numeric = `orca terminal send --terminal ${WORKER} --text "2" --enter --json`;
-    expect(relay.prepare(THREAD, numeric)).toEqual({ action: 'proceed', command: numeric });
+    expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
   });
 
   it('sanctionsSend lapses once the delegation close mooted the worker’s gates', () => {
@@ -487,10 +505,10 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
     const send = `orca terminal send --terminal ${WORKER} --text "root" --enter --json`;
     seedDispatch(store);
     seedGate(store);
-    expect(relay.sanctionsSend(THREAD, send)).toBe(true);
+    expect(relay.sanctionsSend(THREAD, CHANNEL, send)).toBe(true);
 
     store.closeDelegation('ctx_13c7', 'completed');
-    expect(relay.sanctionsSend(THREAD, send)).toBe(false);
+    expect(relay.sanctionsSend(THREAD, CHANNEL, send)).toBe(false);
   });
 });
 
@@ -499,10 +517,10 @@ describe('observe — the pending → answered flip', () => {
     const { relay, store, surface } = makeRelay();
     seedGate(store);
 
-    await relay.observe(THREAD, replyCommand('2'), REPLY_OK);
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), REPLY_OK);
 
     expect(store.getGate(GATE)?.status).toBe('answered');
-    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'eyes' }]);
+    expect(surface.reactions).toEqual([{ channelId: CHANNEL, ts: THREAD, name: 'eyes' }]);
     expect(surface.removed.map((entry) => entry.name)).toContain('question');
   });
 
@@ -510,20 +528,20 @@ describe('observe — the pending → answered flip', () => {
     const { relay, store, surface } = makeRelay();
     seedGate(store);
     seedGate(store, { msgId: 'msg_sibling' });
-    await relay.observe(THREAD, replyCommand('2'), REPLY_OK);
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'question' });
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), REPLY_OK);
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'question' });
 
     seedGate(store, { msgId: 'msg_esc', kind: 'escalation', options: [] });
-    await relay.observe(THREAD, replyCommand('free text', 'msg_sibling'), REPLY_OK);
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'rotating_light' });
+    await relay.observe(THREAD, CHANNEL, replyCommand('free text', 'msg_sibling'), REPLY_OK);
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'rotating_light' });
   });
 
   it('leaves the gate pending when the reply command failed', async () => {
     const { relay, store, surface } = makeRelay();
     seedGate(store);
 
-    await relay.observe(THREAD, replyCommand('2'), '');
-    await relay.observe(THREAD, replyCommand('2'), JSON.stringify({ ok: false, error: {} }));
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), JSON.stringify({ ok: false, error: {} }));
 
     expect(store.getGate(GATE)?.status).toBe('pending');
     expect(surface.reactions).toEqual([]);
@@ -535,16 +553,17 @@ describe('observe — the pending → answered flip', () => {
     seedGate(store, { msgId: 'msg_sibling', kind: 'escalation', options: [] });
 
     // The reply to GATE fails (ask timed out) — the fallback send follows.
-    await relay.observe(THREAD, replyCommand('2'), '');
+    await relay.observe(THREAD, CHANNEL, replyCommand('2'), '');
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`,
       SEND_OK,
     );
 
     expect(store.getGate(GATE)?.status).toBe('answered');
     expect(store.getGate('msg_sibling')?.status).toBe('pending');
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'rotating_light' });
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'rotating_light' });
   });
 
   it('flips the single unambiguous pending gate on an unattributed send — never one of several', async () => {
@@ -552,13 +571,13 @@ describe('observe — the pending → answered flip', () => {
     seedGate(store);
     const send = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
 
-    await relay.observe(THREAD, send, SEND_OK);
+    await relay.observe(THREAD, CHANNEL, send, SEND_OK);
     expect(store.getGate(GATE)?.status).toBe('answered');
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'eyes' });
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'eyes' });
 
     seedGate(store, { msgId: 'msg_two' });
     seedGate(store, { msgId: 'msg_three', kind: 'escalation', options: [] });
-    await relay.observe(THREAD, send, SEND_OK);
+    await relay.observe(THREAD, CHANNEL, send, SEND_OK);
     expect(store.getGate('msg_two')?.status).toBe('pending');
     expect(store.getGate('msg_three')?.status).toBe('pending');
   });
@@ -569,12 +588,13 @@ describe('observe — the pending → answered flip', () => {
 
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
       SEND_OK,
     );
 
     expect(store.getStall('ctx_stalled')?.status).toBe('answered');
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'eyes' });
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'eyes' });
   });
 
   it('a failed nudge leaves the stall pending — the send never reached the terminal', async () => {
@@ -583,6 +603,7 @@ describe('observe — the pending → answered flip', () => {
 
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
       JSON.stringify({ ok: false, error: {} }),
     );
@@ -598,12 +619,13 @@ describe('observe — the pending → answered flip', () => {
 
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "y" --enter --json`,
       SEND_OK,
     );
 
     expect(store.getStall('ctx_stalled')?.status).toBe('answered');
-    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'rotating_light' });
+    expect(surface.reactions.at(-1)).toEqual({ channelId: CHANNEL, ts: THREAD, name: 'rotating_light' });
   });
 
   it('a send to a different terminal leaves the stall pending', async () => {
@@ -612,6 +634,7 @@ describe('observe — the pending → answered flip', () => {
 
     await relay.observe(
       THREAD,
+      CHANNEL,
       'orca terminal send --terminal term_other --text "y" --enter --json',
       SEND_OK,
     );
@@ -625,6 +648,7 @@ describe('observe — the pending → answered flip', () => {
 
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "y" --json`,
       SEND_OK,
     );
@@ -640,10 +664,11 @@ describe('observe — the pending → answered flip', () => {
     surface.reactions.length = 0;
 
     // The human revises the answered gate: deny points at terminal send…
-    expect(relay.prepare(THREAD, replyCommand('actually 1')).action).toBe('deny');
+    expect(relay.prepare(THREAD, CHANNEL, replyCommand('actually 1')).action).toBe('deny');
     // …and that send must not mark the newer, unrelated question answered.
     await relay.observe(
       THREAD,
+      CHANNEL,
       `orca terminal send --terminal ${WORKER} --text "correction" --enter --json`,
       SEND_OK,
     );

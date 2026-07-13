@@ -106,8 +106,8 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   // 🚦 gates post as their own thread messages (spec §8: anything requiring
   // the human is a new message, never an edit of the streaming voice).
   const gates = new GateKeeper({
-    allowedUserId: config.slackAllowedUserId,
-    post: (threadTs, text) => slack.post(threadTs, text),
+    allowedUserIds: config.slackAllowedUserIds,
+    post: (threadTs, channelId, text) => slack.post(channelId, threadTs, text),
     logger,
   });
 
@@ -123,12 +123,11 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   const delegations = new DelegationCoordinator({
     store: delegationStore,
     surface,
-    channelId: config.slackChannelId,
     workerCap: config.workerCap,
     mailboxWorktreePath: options.mailboxWorktreePath,
     // Evaluated at dispatch time, long after the watcher below exists.
-    onDispatched: (threadTs) => {
-      watcher.arm(threadTs);
+    onDispatched: (threadTs, channelId) => {
+      watcher.arm(threadTs, channelId);
     },
     logger,
     run,
@@ -148,17 +147,17 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       relay,
       systemPromptAppend: routingInstructions(hints),
     }),
-    voiceFor: (threadTs) =>
+    voiceFor: (threadTs, channelId) =>
       new Voice(
         {
-          post: (text) => slack.post(threadTs, text),
-          update: (ts, text) => slack.update(ts, text),
+          post: (text) => slack.post(channelId, threadTs, text),
+          update: (ts, text) => slack.update(channelId, ts, text),
         },
         { onError: (err) => logger.warn({ err, threadTs }, 'voice flush failed') },
       ),
     // 💸 warnings are events, not status: always a fresh message (spec §8).
-    notify: async (threadTs, text) => {
-      await slack.post(threadTs, text);
+    notify: async (threadTs, channelId, text) => {
+      await slack.post(channelId, threadTs, text);
     },
     costThresholdsUsd: config.costWarnThresholdsUsd,
     warmTtlMs: config.warmTtlMs,
@@ -166,13 +165,14 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     autoCloseAfterMs: config.autoCloseAfterMs,
     // The 🔚 summary's ledger (issue #51): every delegation with its outcome,
     // issue links resolved off one registry read — folder repos stay plain.
-    listDelegations: (threadTs) =>
-      safeRegistryIssueUrls(run, logger, delegationStore.listForThread(threadTs)),
+    listDelegations: (threadTs, channelId) =>
+      safeRegistryIssueUrls(run, logger, delegationStore.listForThread(threadTs, channelId)),
     // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
     // — session open included — and off again when the turn ends with no
     // delegation in flight and nothing pending.
-    onTurnStart: (threadTs) => surface.ackWorking(threadTs),
-    onTurnEnd: (threadTs) => surface.settleTurnEnd(threadTs, delegations.hasUndispatched(threadTs)),
+    onTurnStart: (threadTs, channelId) => surface.ackWorking(channelId, threadTs),
+    onTurnEnd: (threadTs, channelId) =>
+      surface.settleTurnEnd(channelId, threadTs, delegations.hasUndispatched(threadTs, channelId)),
     logger,
   });
 

@@ -24,7 +24,13 @@ const USER = 'U0ALLOWED';
 const BOT = 'U0BOT';
 const OTHER = 'U0STRANGER';
 
-const GUARD: Guard = { channelId: CHANNEL, allowedUserId: USER, botUserId: BOT };
+const CHANNEL_B = 'C0SECOND456';
+
+const GUARD: Guard = {
+  channelIds: [CHANNEL, CHANNEL_B],
+  allowedUserIds: [USER],
+  botUserId: BOT,
+};
 
 /** Captures the handlers exactly as Bolt would hold them. */
 class FakeBoltApp implements SlackApp {
@@ -87,8 +93,8 @@ const makeHarness = () => {
   const store = new DelegationStore(':memory:');
   const gatePosts: Array<{ threadTs: string; text: string }> = [];
   const gates = new GateKeeper({
-    allowedUserId: USER,
-    post: (threadTs, text) => {
+    allowedUserIds: [USER],
+    post: (threadTs, _channelId, text) => {
       gatePosts.push({ threadTs, text });
       return Promise.resolve('gate-ts-1');
     },
@@ -126,7 +132,7 @@ const threadReply = (text: string, user: string = USER): IncomingEvent => ({
 describe('registerHandlers — gate-eats-reply', () => {
   it('a pending 🚦 gate consumes the thread reply before it becomes a session turn', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('go'));
 
@@ -136,7 +142,7 @@ describe('registerHandlers — gate-eats-reply', () => {
 
   it('a denial reply is consumed the same way, verbatim', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('wait, rebase first'));
 
@@ -149,6 +155,7 @@ describe('registerHandlers — gate-eats-reply', () => {
     store.recordGate({
       msgId: 'msg_1',
       threadTs: THREAD,
+      channelId: CHANNEL,
       taskId: 'task_1',
       dispatchId: 'ctx_1',
       workerHandle: 'term_w1',
@@ -180,7 +187,7 @@ describe('registerHandlers — gate-eats-reply', () => {
 describe('registerHandlers — close-denies-gate', () => {
   it('"close" while a 🚦 is pending denies the gate with the word verbatim, then still closes', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('close'));
 
@@ -221,14 +228,14 @@ describe('registerHandlers — routing', () => {
       text: `<@${BOT}> hello`,
     });
     expect(app.posts).toEqual([
-      { channel: CHANNEL, thread_ts: ROOT_TS, text: refusalLine(USER) },
+      { channel: CHANNEL, thread_ts: ROOT_TS, text: refusalLine() },
     ]);
     expect(sessions.opened).toEqual([]);
   });
 
   it('a third-party thread reply is silence — not eaten, not a turn, not refused', async () => {
     const { app, sessions, gates } = makeHarness();
-    const verdict = gates.request(THREAD, '🚦 `git push` — go?');
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
 
     await app.emit('message', threadReply('go', OTHER));
 
@@ -236,8 +243,70 @@ describe('registerHandlers — routing', () => {
     expect(app.posts).toEqual([]);
     // The stranger's "go" resolved nothing: the gate still waits for the
     // authorized user.
-    expect(gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     await expect(verdict).resolves.toEqual({ approved: true, reply: 'go' });
+  });
+
+  it('events from two channels drive two independent sessions — same ts, no merge (issue #93)', async () => {
+    const { app, sessions } = makeHarness();
+    const mention = (channel: string) => ({
+      type: 'app_mention' as const,
+      channel,
+      user: USER,
+      ts: ROOT_TS,
+      text: `<@${BOT}> hello from ${channel}`,
+    });
+
+    await app.emit('app_mention', mention(CHANNEL));
+    await app.emit('app_mention', mention(CHANNEL_B));
+    await app.emit('message', { ...threadReply('status?'), thread_ts: ROOT_TS });
+    await app.emit('message', { ...threadReply('progress?'), thread_ts: ROOT_TS, channel: CHANNEL_B });
+
+    expect(sessions.opened).toEqual([
+      { threadTs: ROOT_TS, channelId: CHANNEL, rootUser: USER, text: `hello from ${CHANNEL}` },
+      { threadTs: ROOT_TS, channelId: CHANNEL_B, rootUser: USER, text: `hello from ${CHANNEL_B}` },
+    ]);
+    expect(sessions.replies).toEqual([
+      { threadTs: ROOT_TS, channelId: CHANNEL, text: 'status?' },
+      { threadTs: ROOT_TS, channelId: CHANNEL_B, text: 'progress?' },
+    ]);
+  });
+
+  it('a 🚦 gate pending in one channel never eats a same-ts reply from another (issue #93)', async () => {
+    const { app, sessions, gates } = makeHarness();
+    const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
+
+    // Same thread ts, other channel: an ordinary turn there, and the gate
+    // still waits for ITS channel's reply.
+    await app.emit('message', { ...threadReply('go'), channel: CHANNEL_B });
+    expect(sessions.replies).toEqual([{ threadTs: THREAD, channelId: CHANNEL_B, text: 'go' }]);
+
+    await app.emit('message', threadReply('go'));
+    await expect(verdict).resolves.toEqual({ approved: true, reply: 'go' });
+    expect(sessions.replies).toHaveLength(1);
+  });
+
+  it("a same-ts turn context never leaks another channel's relayed gates (issue #93)", async () => {
+    const { app, sessions, store } = makeHarness();
+    store.recordGate({
+      msgId: 'msg_chan_a',
+      threadTs: THREAD,
+      channelId: CHANNEL,
+      taskId: 'task_1',
+      dispatchId: 'ctx_1',
+      workerHandle: 'term_w1',
+      worktreeName: 'webapp-84-csv-export',
+      kind: 'decision_gate',
+      question: 'Which directory should the export live in?',
+      options: ['app/', 'lib/'],
+      relayTs: '1751970002.000300',
+    });
+
+    await app.emit('message', { ...threadReply('what is the status?'), channel: CHANNEL_B });
+
+    expect(sessions.replies).toEqual([
+      { threadTs: THREAD, channelId: CHANNEL_B, text: 'what is the status?' },
+    ]);
   });
 
   it('registers the Bolt error hook', () => {

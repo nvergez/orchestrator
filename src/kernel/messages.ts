@@ -3,9 +3,11 @@
  * docs/prototypes/slack-ux/conversations.md).
  */
 
-/** Scenario G1 — root @mention by a third party. */
-export function refusalLine(allowedUserId: string): string {
-  return `v1: only <@${allowedUserId}> can drive me.`;
+/** Scenario G1 — root @mention by a third party. Deliberately generic
+ * (issue #93): enumerating the allowed users would leak the allow-list to
+ * exactly the people it exists to keep out. */
+export function refusalLine(): string {
+  return 'Only authorized operators can drive me.';
 }
 
 /**

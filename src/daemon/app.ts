@@ -37,7 +37,7 @@ export interface SessionGateway {
 /** The slice of the gate relay the reply path decorates turns through (#21). */
 export interface ReplyDecorator {
   /** Prepends the thread's relayed-gates registry; a no-op without gates. */
-  decorateReply(threadTs: string, text: string): string;
+  decorateReply(threadTs: string, channelId: string, text: string): string;
 }
 
 const REPLY_LOG_LINES: Record<ReplyResult, string> = {
@@ -83,19 +83,17 @@ export function registerHandlers(
       case 'refuse':
         logger.info({ ts: incoming.ts, user: incoming.user }, 'third-party mention refused');
         await app.client.chat.postMessage({
-          channel: guard.channelId,
+          channel: decision.channelId,
           thread_ts: decision.threadTs,
-          text: refusalLine(guard.allowedUserId),
+          text: refusalLine(),
         });
         return;
       case 'open':
-        logger.info({ threadTs: decision.threadTs }, 'root mention — opening session');
-        sessions.open(
-          decision.threadTs,
-          guard.channelId,
-          incoming.user ?? guard.allowedUserId,
-          decision.text,
+        logger.info(
+          { threadTs: decision.threadTs, channelId: decision.channelId },
+          'root mention — opening session',
         );
+        sessions.open(decision.threadTs, decision.channelId, decision.userId, decision.text);
         return;
       case 'reply': {
         // A pending 🚦 gate eats the reply (spec §7): it resolves the
@@ -104,7 +102,7 @@ export function registerHandlers(
         // tryResolve re-checks the user as defense in depth.
         if (
           incoming.user !== undefined &&
-          gates.tryResolve(decision.threadTs, incoming.user, decision.text)
+          gates.tryResolve(decision.threadTs, decision.channelId, incoming.user, decision.text)
         ) {
           logger.info({ threadTs: decision.threadTs }, 'thread reply resolved a pending 🚦 gate');
           return;
@@ -113,8 +111,8 @@ export function registerHandlers(
         // turn (spec §6): the session routes the reply anchored on it.
         const result = sessions.reply(
           decision.threadTs,
-          guard.channelId,
-          relay.decorateReply(decision.threadTs, decision.text),
+          decision.channelId,
+          relay.decorateReply(decision.threadTs, decision.channelId, decision.text),
         );
         // Fixed-line posts are user-visible events (info); the rest is
         // ambient routing (debug).
@@ -131,11 +129,11 @@ export function registerHandlers(
         // wrap up before the queued close runs — never a mid-turn kill.
         if (
           incoming.user !== undefined &&
-          gates.tryResolve(decision.threadTs, incoming.user, 'close')
+          gates.tryResolve(decision.threadTs, decision.channelId, incoming.user, 'close')
         ) {
           logger.info({ threadTs: decision.threadTs }, 'close command denied a pending 🚦 gate');
         }
-        const result = sessions.close(decision.threadTs, guard.channelId);
+        const result = sessions.close(decision.threadTs, decision.channelId);
         if (result === 'unregistered') {
           logger.debug({ threadTs: decision.threadTs, result }, CLOSE_LOG_LINES[result]);
         } else {

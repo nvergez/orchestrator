@@ -42,26 +42,30 @@ export type PrepareVerdict =
 
 /** The slice canUseTool drives right before allowing a Bash command. */
 export interface DispatchPreparer {
-  prepare(threadTs: string, command: string, signal?: AbortSignal): Promise<PrepareVerdict>;
+  prepare(
+    threadTs: string,
+    channelId: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<PrepareVerdict>;
 }
 
 /** The slice the PostToolUse hook feeds and the process lifecycle clears. */
 export interface DispatchObserver {
-  observe(threadTs: string, command: string, stdout: string): Promise<void>;
-  abandonThread(threadTs: string): void;
+  observe(threadTs: string, channelId: string, command: string, stdout: string): Promise<void>;
+  abandonThread(threadTs: string, channelId: string): void;
 }
 
 export interface DelegationCoordinatorOptions {
   store: DelegationStore;
   /** The thread surface — cards, milestone edits, the working 👀. */
   surface: ThreadSurface;
-  channelId: string;
   /** Global cap on concurrent workers (spec §5) — env `WORKER_CAP`. */
   workerCap: number;
   /** The Orca worktree the mailbox terminals live in — the daemon's own checkout. */
   mailboxWorktreePath: string;
   /** Fires after every ledgered dispatch — how the gate watcher arms (#20). */
-  onDispatched?: (threadTs: string) => void;
+  onDispatched?: (threadTs: string, channelId: string) => void;
   logger: Logger;
   /** Injectable for tests; defaults to the real orca CLI. */
   run?: CommandRunner;
@@ -100,19 +104,18 @@ interface ThreadTracker {
 export class DelegationCoordinator implements DispatchPreparer, DispatchObserver {
   private readonly store: DelegationStore;
   private readonly surface: ThreadSurface;
-  private readonly channelId: string;
   private readonly mailboxWorktreePath: string;
-  private readonly onDispatched: (threadTs: string) => void;
+  private readonly onDispatched: (threadTs: string, channelId: string) => void;
   private readonly logger: Logger;
   private readonly run: CommandRunner;
   private readonly now: () => Date;
   private readonly slots: WorkerSlots;
+  /** One tracker per thread, keyed `channelId:threadTs` (issue #93). */
   private readonly threads = new Map<string, ThreadTracker>();
 
   constructor(options: DelegationCoordinatorOptions) {
     this.store = options.store;
     this.surface = options.surface;
-    this.channelId = options.channelId;
     this.mailboxWorktreePath = options.mailboxWorktreePath;
     this.onDispatched = options.onDispatched ?? (() => undefined);
     this.logger = options.logger;
@@ -127,7 +130,12 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   // ── prepare: the canUseTool seam ───────────────────────────────────────────
 
-  async prepare(threadTs: string, command: string, signal?: AbortSignal): Promise<PrepareVerdict> {
+  async prepare(
+    threadTs: string,
+    channelId: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<PrepareVerdict> {
     const segments = commandSegments(command);
     const creates = segments.filter((tokens) =>
       isOrcaCommand(tokens, CREATE_STEP.topic, CREATE_STEP.action),
@@ -146,13 +154,16 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
           'command — one delegation step per Bash call, nothing chained around it',
       );
     }
-    if (creates.length === 1) return this.prepareCreate(threadTs, command, creates[0] as string[], signal);
-    return this.prepareDispatch(threadTs, dispatches[0] as string[]);
+    if (creates.length === 1) {
+      return this.prepareCreate(threadTs, channelId, command, creates[0] as string[], signal);
+    }
+    return this.prepareDispatch(threadTs, channelId, dispatches[0] as string[]);
   }
 
   /** Pins the #4 create invariants, then takes a worker slot — waiting its wave. */
   private async prepareCreate(
     threadTs: string,
+    channelId: string,
     command: string,
     tokens: string[],
     signal?: AbortSignal,
@@ -173,14 +184,14 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
         { threadTs, inFlight: this.slots.inUse },
         'worker cap reached — delegation waits its wave',
       );
-      await this.postSafe(threadTs, workerCapLine(this.slots.inUse));
+      await this.postSafe(threadTs, channelId, workerCapLine(this.slots.inUse));
       try {
         await this.slots.reserve(signal);
       } catch {
         return deny('the turn was interrupted while waiting for a worker slot — nothing was created');
       }
     }
-    this.tracker(threadTs).looseSlots += 1;
+    this.tracker(threadTs, channelId).looseSlots += 1;
     return { action: 'proceed', command };
   }
 
@@ -189,7 +200,11 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    * handle this thread has listed and awaited to TUI-idle — plus --inject,
    * then rewrites the dispatch to origin from the mailbox.
    */
-  private async prepareDispatch(threadTs: string, tokens: string[]): Promise<PrepareVerdict> {
+  private async prepareDispatch(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+  ): Promise<PrepareVerdict> {
     const violation = flagViolation(DISPATCH_STEP, tokens);
     if (violation !== undefined) return deny(violation);
     if (tokens.some((token) => token.includes('$'))) {
@@ -198,7 +213,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
           'spell out the literal task id and terminal handle',
       );
     }
-    const tracker = this.tracker(threadTs);
+    const tracker = this.tracker(threadTs, channelId);
     const toHandle = flagValue(tokens, '--to');
     if (toHandle === undefined || !tracker.handles.has(toHandle)) {
       return deny(
@@ -215,11 +230,12 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
     let mailbox: string;
     try {
-      mailbox = await this.ensureMailbox(threadTs);
+      mailbox = await this.ensureMailbox(threadTs, channelId);
     } catch (error) {
       this.logger.warn({ err: error, threadTs }, 'mailbox terminal unavailable — dispatch denied');
       await this.postSafe(
         threadTs,
+        channelId,
         orcaUnavailableLine('the thread mailbox terminal could not be reached, so nothing was dispatched.'),
       );
       return deny(
@@ -236,40 +252,43 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   }
 
   /**
-   * The thread's mailbox terminal (`slack-<thread_ts>`, issue #9): reused
-   * from SQLite when the handle is still live, lazily (re)created otherwise.
-   * Throws when Orca is unreachable — the caller turns that into the ⚠️ line.
+   * The thread's mailbox terminal (`slack-<channel_id>-<thread_ts>`, issue
+   * #9): reused from SQLite when the handle is still live, lazily
+   * (re)created otherwise. The title carries the channel (issue #93) so two
+   * same-ts threads in different channels never share one; pre-#93 handles
+   * keep their old title and keep working. Throws when Orca is unreachable
+   * — the caller turns that into the ⚠️ line.
    */
-  private async ensureMailbox(threadTs: string): Promise<string> {
-    const stored = this.store.getMailbox(threadTs);
+  private async ensureMailbox(threadTs: string, channelId: string): Promise<string> {
+    const stored = this.store.getMailbox(threadTs, channelId);
     if (stored !== undefined && (await listLiveTerminalHandles(this.run)).has(stored)) {
       return stored;
     }
     const handle = await createTerminal(this.run, {
       worktreePath: this.mailboxWorktreePath,
-      title: `slack-${threadTs}`,
+      title: `slack-${channelId}-${threadTs}`,
     });
-    this.store.setMailbox(threadTs, this.channelId, handle);
-    this.logger.info({ threadTs, handle }, 'mailbox terminal created and persisted');
+    this.store.setMailbox(threadTs, channelId, handle);
+    this.logger.info({ threadTs, channelId, handle }, 'mailbox terminal created and persisted');
     return handle;
   }
 
   // ── observe: the PostToolUse seam ──────────────────────────────────────────
 
   /** Reads a finished command's output. Never throws — hooks must not crash a turn. */
-  async observe(threadTs: string, command: string, stdout: string): Promise<void> {
+  async observe(threadTs: string, channelId: string, command: string, stdout: string): Promise<void> {
     try {
       for (const tokens of commandSegments(command)) {
         if (isOrcaCommand(tokens, CREATE_STEP.topic, CREATE_STEP.action)) {
-          await this.observeCreate(threadTs, tokens, stdout);
+          await this.observeCreate(threadTs, channelId, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'terminal', 'list')) {
-          this.observeTerminalList(threadTs, stdout);
+          this.observeTerminalList(threadTs, channelId, stdout);
         } else if (isOrcaCommand(tokens, 'terminal', 'wait')) {
-          this.observeTerminalWait(threadTs, tokens, stdout);
+          this.observeTerminalWait(threadTs, channelId, tokens, stdout);
         } else if (isOrcaCommand(tokens, 'orchestration', 'task-create')) {
-          this.observeTaskCreate(threadTs, stdout);
+          this.observeTaskCreate(threadTs, channelId, stdout);
         } else if (isOrcaCommand(tokens, DISPATCH_STEP.topic, DISPATCH_STEP.action)) {
-          await this.observeDispatch(threadTs, stdout);
+          await this.observeDispatch(threadTs, channelId, stdout);
         }
       }
     } catch (error) {
@@ -278,8 +297,13 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   }
 
   /** Worktree created → claim the slot, post the card, 👀 on the root. */
-  private async observeCreate(threadTs: string, tokens: string[], stdout: string): Promise<void> {
-    const tracker = this.tracker(threadTs);
+  private async observeCreate(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+    stdout: string,
+  ): Promise<void> {
+    const tracker = this.tracker(threadTs, channelId);
     const worktree = parseOrcaEnvelope(stdout)?.worktree as
       | { id?: unknown; repoId?: unknown; path?: unknown; displayName?: unknown; linkedIssue?: unknown }
       | undefined;
@@ -328,26 +352,31 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     tracker.pending.set(pending.worktreeId, pending);
 
     try {
-      pending.cardTs = await this.surface.post(threadTs, this.renderCard(pending));
+      pending.cardTs = await this.surface.post(channelId, threadTs, this.renderCard(pending));
     } catch (error) {
       // The dispatch milestone retries the post — the card may still catch up.
       this.logger.warn({ err: error, threadTs }, 'delegation card post failed');
     }
-    await this.surface.ackWorking(threadTs);
+    await this.surface.ackWorking(channelId, threadTs);
   }
 
   /** A successful tui-idle wait clears that handle for injection (spec §5). */
-  private observeTerminalWait(threadTs: string, tokens: string[], stdout: string): void {
+  private observeTerminalWait(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+    stdout: string,
+  ): void {
     if (flagValue(tokens, '--for') !== 'tui-idle' || parseOrcaEnvelope(stdout) === null) return;
     const handle = flagValue(tokens, '--terminal');
-    if (handle !== undefined) this.tracker(threadTs).waited.add(handle);
+    if (handle !== undefined) this.tracker(threadTs, channelId).waited.add(handle);
   }
 
   /** `terminal list` output teaches us which handle belongs to which worktree. */
-  private observeTerminalList(threadTs: string, stdout: string): void {
+  private observeTerminalList(threadTs: string, channelId: string, stdout: string): void {
     const terminals = parseOrcaEnvelope(stdout)?.terminals;
     if (!Array.isArray(terminals)) return;
-    const tracker = this.tracker(threadTs);
+    const tracker = this.tracker(threadTs, channelId);
     for (const terminal of terminals) {
       const { handle, worktreeId } = terminal as { handle?: unknown; worktreeId?: unknown };
       if (typeof handle === 'string' && typeof worktreeId === 'string') {
@@ -357,12 +386,12 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   }
 
   /** `task-create` output carries the real title — the card upgrades to it. */
-  private observeTaskCreate(threadTs: string, stdout: string): void {
+  private observeTaskCreate(threadTs: string, channelId: string, stdout: string): void {
     const task = parseOrcaEnvelope(stdout)?.task as
       | { id?: unknown; task_title?: unknown; display_name?: unknown }
       | undefined;
     if (typeof task?.id !== 'string') return;
-    const tracker = this.tracker(threadTs);
+    const tracker = this.tracker(threadTs, channelId);
     const title = typeof task.task_title === 'string' && task.task_title !== '' ? task.task_title : undefined;
     if (title !== undefined) tracker.taskTitles.set(task.id, title);
 
@@ -374,14 +403,14 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   }
 
   /** Dispatch succeeded → milestone edit + the ledger row, all identifiers. */
-  private async observeDispatch(threadTs: string, stdout: string): Promise<void> {
+  private async observeDispatch(threadTs: string, channelId: string, stdout: string): Promise<void> {
     const dispatch = parseOrcaEnvelope(stdout)?.dispatch as
       | { id?: unknown; task_id?: unknown; assignee_handle?: unknown }
       | undefined;
     if (typeof dispatch?.id !== 'string' || typeof dispatch.task_id !== 'string') return;
     const workerHandle = typeof dispatch.assignee_handle === 'string' ? dispatch.assignee_handle : null;
 
-    const tracker = this.tracker(threadTs);
+    const tracker = this.tracker(threadTs, channelId);
     const byHandle = workerHandle === null ? undefined : tracker.handles.get(workerHandle);
     const pending =
       (byHandle !== undefined ? tracker.pending.get(byHandle) : undefined) ??
@@ -400,9 +429,9 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       // Card first, ledger second, so the row carries the card's ts.
       try {
         if (pending.cardTs === null) {
-          pending.cardTs = await this.surface.post(threadTs, this.renderCard(pending));
+          pending.cardTs = await this.surface.post(channelId, threadTs, this.renderCard(pending));
         } else {
-          await this.surface.update(pending.cardTs, this.renderCard(pending));
+          await this.surface.update(channelId, pending.cardTs, this.renderCard(pending));
         }
       } catch (error) {
         this.logger.warn({ err: error, threadTs }, 'delegation card milestone edit failed');
@@ -421,7 +450,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       agent: pending?.agent ?? null,
       workerHandle,
       threadTs,
-      channelId: this.channelId,
+      channelId,
       cardTs: pending?.cardTs ?? null,
       title: pending?.title ?? tracker.taskTitles.get(dispatch.task_id) ?? null,
     });
@@ -439,7 +468,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       'delegation dispatched and ledgered',
     );
     // The row is in flight from here — the thread needs its gate watcher.
-    this.onDispatched(threadTs);
+    this.onDispatched(threadTs, channelId);
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -451,8 +480,8 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    * earlier, and the card association survives; that dispatch is counted
    * the moment it is ledgered, reservation or not.
    */
-  abandonThread(threadTs: string): void {
-    const tracker = this.threads.get(threadTs);
+  abandonThread(threadTs: string, channelId: string): void {
+    const tracker = this.threads.get(trackerKey(threadTs, channelId));
     if (tracker === undefined) return;
     let released = tracker.looseSlots;
     tracker.looseSlots = 0;
@@ -479,14 +508,15 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    * (issue #49): they carry a 👀-backed card but no ledger row yet, so the
    * turn-end settle must ask here — the registries cannot see this window.
    */
-  hasUndispatched(threadTs: string): boolean {
-    return (this.threads.get(threadTs)?.pending.size ?? 0) > 0;
+  hasUndispatched(threadTs: string, channelId: string): boolean {
+    return (this.threads.get(trackerKey(threadTs, channelId))?.pending.size ?? 0) > 0;
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  private tracker(threadTs: string): ThreadTracker {
-    let tracker = this.threads.get(threadTs);
+  private tracker(threadTs: string, channelId: string): ThreadTracker {
+    const key = trackerKey(threadTs, channelId);
+    let tracker = this.threads.get(key);
     if (tracker === undefined) {
       tracker = {
         pending: new Map(),
@@ -495,7 +525,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
         taskTitles: new Map(),
         looseSlots: 0,
       };
-      this.threads.set(threadTs, tracker);
+      this.threads.set(key, tracker);
     }
     return tracker;
   }
@@ -560,13 +590,18 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   }
 
-  private async postSafe(threadTs: string, text: string): Promise<void> {
+  private async postSafe(threadTs: string, channelId: string, text: string): Promise<void> {
     try {
-      await this.surface.post(threadTs, text);
+      await this.surface.post(channelId, threadTs, text);
     } catch (error) {
       this.logger.warn({ err: error, threadTs }, 'delegation thread post failed');
     }
   }
+}
+
+/** The (channel, thread) pair flattened for the tracker map (issue #93). */
+function trackerKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
 }
 
 /**

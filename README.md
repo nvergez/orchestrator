@@ -8,8 +8,8 @@ Slack thread, delegating work to Orca worktree agents.
 Mention the bot in a channel, describe what you want, and it routes the request
 to the right repo, dispatches a worker agent in its own worktree, supervises it
 (questions and escalations relayed back into the thread), and reports the
-result. Single-operator by design: one workspace, one channel, one authorized
-user.
+result. Small-team by design: one workspace, the channels you configure, and
+a shared allow-list of authorized users — anyone else gets one polite refusal.
 
 ## How it works
 

@@ -19,6 +19,12 @@ export function SessionCard({ session, asOf }: { session: SessionCardView; asOf:
           <span className="text-muted-foreground">thread</span> {session.threadTs}
         </CardTitle>
         <Badge variant={status.variant}>{status.label}</Badge>
+        {session.channelId !== null && (
+          <span className="font-mono text-2xs text-muted-foreground">{session.channelId}</span>
+        )}
+        {session.rootUser !== null && (
+          <span className="font-mono text-2xs text-muted-foreground">@{session.rootUser}</span>
+        )}
         <span className="ml-auto text-2xs text-muted-foreground tabular-nums">
           {session.turnCount} turn{session.turnCount === 1 ? '' : 's'}
           {' · '}${session.costUsdTotal.toFixed(2)}

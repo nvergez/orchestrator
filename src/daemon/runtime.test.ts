@@ -21,6 +21,7 @@ import type { CommandRunner } from '../kernel/orca.ts';
 const THREAD = '1751970000.000100';
 const THREAD_B = '1751970001.000200';
 const CHANNEL = 'C0EXAMPLE123';
+const CHANNEL_B = 'C0SECOND456';
 const USER = 'U0ALLOWED';
 const DAEMON_WT = '/home/op/projects/orchestrator';
 
@@ -35,8 +36,8 @@ const HINTS: RepoHint[] = [
 const CONFIG: Config = {
   slackBotToken: 'xoxb-test',
   slackAppToken: 'xapp-test',
-  slackChannelId: CHANNEL,
-  slackAllowedUserId: USER,
+  slackChannelIds: [CHANNEL],
+  slackAllowedUserIds: [USER],
   claudeCodeOauthToken: 'token',
   logLevel: 'silent',
   dbPath: ':memory:',
@@ -67,30 +68,30 @@ const REPO_LIST_OUT = envelope({
 });
 
 class FakeSurface implements Surface {
-  posts: Array<{ threadTs: string; text: string }> = [];
-  updates: Array<{ ts: string; text: string }> = [];
-  reactions: Array<{ ts: string; name: string }> = [];
-  removed: Array<{ ts: string; name: string }> = [];
+  posts: Array<{ channelId: string; threadTs: string; text: string }> = [];
+  updates: Array<{ channelId: string; ts: string; text: string }> = [];
+  reactions: Array<{ channelId: string; ts: string; name: string }> = [];
+  removed: Array<{ channelId: string; ts: string; name: string }> = [];
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
-    this.posts.push({ threadTs, text });
+  post(channelId: string, threadTs: string, text: string): Promise<string> {
+    this.posts.push({ channelId, threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
-    this.updates.push({ ts, text });
+  update(channelId: string, ts: string, text: string): Promise<void> {
+    this.updates.push({ channelId, ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
-    this.reactions.push({ ts, name });
+  react(channelId: string, ts: string, name: string): Promise<void> {
+    this.reactions.push({ channelId, ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
-    this.removed.push({ ts, name });
+  unreact(channelId: string, ts: string, name: string): Promise<void> {
+    this.removed.push({ channelId, ts, name });
     return Promise.resolve();
   }
 }
@@ -101,9 +102,21 @@ class FakeSurface implements Surface {
  * forever — how a real quiet mailbox looks to the loop. Both record into ONE
  * ordered call log, which is what the boot-ordering pins read.
  */
-const makeRunner = (opts: { script?: Record<string, string | Error>; windows?: string[] } = {}) => {
+const makeRunner = (
+  opts: {
+    script?: Record<string, string | Error>;
+    windows?: string[];
+    /** Per-mailbox scripted windows (issue #93) — two same-ts threads in
+     * different channels watch different mailboxes, so the shared FIFO
+     * cannot express which one a message lands on. */
+    windowsByMailbox?: Record<string, string[]>;
+  } = {},
+) => {
   const calls: string[] = [];
   const windows = [...(opts.windows ?? [])];
+  const byMailbox = Object.fromEntries(
+    Object.entries(opts.windowsByMailbox ?? {}).map(([handle, list]) => [handle, [...list]]),
+  );
   const table: Record<string, string | Error> = {
     'repo list --json': REPO_LIST_OUT,
     'terminal list --json': envelope({ terminals: [] }),
@@ -122,7 +135,9 @@ const makeRunner = (opts: { script?: Record<string, string | Error>; windows?: s
   };
   const runCheck: CommandRunner = (_command, args) => {
     calls.push(args.join(' '));
-    const next = windows.shift();
+    const mailbox = args[args.indexOf('--terminal') + 1];
+    const next =
+      (mailbox !== undefined ? byMailbox[mailbox]?.shift() : undefined) ?? windows.shift();
     if (next !== undefined) return Promise.resolve({ stdout: next });
     return new Promise(() => {
       // an open --wait window: nothing arrives before the test ends
@@ -132,7 +147,12 @@ const makeRunner = (opts: { script?: Record<string, string | Error>; windows?: s
 };
 
 const makeRuntime = (
-  opts: { workerCap?: number; script?: Record<string, string | Error>; windows?: string[] } = {},
+  opts: {
+    workerCap?: number;
+    script?: Record<string, string | Error>;
+    windows?: string[];
+    windowsByMailbox?: Record<string, string[]>;
+  } = {},
 ) => {
   const surface = new FakeSurface();
   const runner = makeRunner(opts);
@@ -166,6 +186,7 @@ const makeRuntime = (
 const canUseToolFor = (seams: ProcessSeams) =>
   buildCanUseTool({
     threadTs: THREAD,
+    channelId: CHANNEL,
     gates: seams.gates,
     allowList: seams.allowList,
     delegations: seams.delegations,
@@ -179,7 +200,16 @@ const callOptions = (signal: AbortSignal = new AbortController().signal) => ({
   requestId: 'req_01',
 });
 
-const seedDispatch = (store: DelegationStore, over: { threadTs?: string; taskId?: string; dispatchId?: string; worktreeId?: string } = {}): void => {
+const seedDispatch = (
+  store: DelegationStore,
+  over: {
+    threadTs?: string;
+    channelId?: string;
+    taskId?: string;
+    dispatchId?: string;
+    worktreeId?: string;
+  } = {},
+): void => {
   store.recordDispatch({
     taskId: over.taskId ?? 'task_1',
     dispatchId: over.dispatchId ?? 'ctx_1',
@@ -191,7 +221,7 @@ const seedDispatch = (store: DelegationStore, over: { threadTs?: string; taskId?
     agent: 'claude',
     workerHandle: 'term_w1',
     threadTs: over.threadTs ?? THREAD,
-    channelId: CHANNEL,
+    channelId: over.channelId ?? CHANNEL,
     cardTs: null,
     title: 'CSV export',
   });
@@ -201,6 +231,7 @@ const seedGate = (store: DelegationStore): void => {
   store.recordGate({
     msgId: 'msg_1',
     threadTs: THREAD,
+    channelId: CHANNEL,
     taskId: 'task_1',
     dispatchId: 'ctx_1',
     workerHandle: 'term_w1',
@@ -222,11 +253,12 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]).toEqual({
+      channelId: CHANNEL,
       threadTs: THREAD,
       text: '🚦 `git push --force-with-lease` — go?',
     });
 
-    expect(runtime.gates.tryResolve(THREAD, USER, 'no, rebase first')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no, rebase first')).toBe(true);
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
     expect((result as { message: string }).message).toContain('no, rebase first');
@@ -244,7 +276,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });
-    expect(runtime.gates.tryResolve(THREAD, USER, 'go')).toBe(true);
+    expect(runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'go')).toBe(true);
     expect(await verdict).toEqual({ behavior: 'allow', updatedInput: input });
   });
 
@@ -282,7 +314,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no');
     expect(await verdict).toMatchObject({ behavior: 'deny' });
   });
 
@@ -298,7 +330,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       expect(surface.posts).toHaveLength(1);
     });
     expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, USER, 'no');
+    runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no');
 
     const result = await verdict;
     expect(result).toMatchObject({ behavior: 'deny' });
@@ -431,14 +463,14 @@ describe('buildRuntime — the boot sequence', () => {
     await runtime.boot();
 
     // Reconciliation closed the outage completion and left the live row.
-    expect(store.listInFlightForThread(THREAD)).toEqual([]);
-    expect(store.listInFlightForThread(THREAD_B)).toHaveLength(1);
+    expect(store.listInFlightForThread(THREAD, CHANNEL)).toEqual([]);
+    expect(store.listInFlightForThread(THREAD_B, CHANNEL)).toHaveLength(1);
     // Its worktree got the same success cleanup as a live worker_done.
     expect(runner.calls).toContain('worktree rm --worktree id:wt-a --json');
 
     // Re-arm saw the reconciled ledger: no watcher for the closed thread.
-    expect(runtime.watcher.isArmed(THREAD)).toBe(false);
-    expect(runtime.watcher.isArmed(THREAD_B)).toBe(true);
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(false);
+    expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(true);
     const waits = runner.calls.filter((call) => call.startsWith('orchestration check --wait'));
     expect(waits).toHaveLength(1);
     expect(waits[0]).toContain('term_mb_b');
@@ -468,6 +500,88 @@ describe('buildRuntime — the boot sequence', () => {
     expect(intervals).toEqual([CONFIG.watchdogSweepIntervalMs, CONFIG.sweepIntervalMs]);
   });
 
+  it('two same-ts threads in different channels run independent watchers end to end (issue #93)', async () => {
+    const workerDone = {
+      id: 'msg_done_b',
+      type: 'worker_done',
+      subject: 'Delivered: the other channel’s work',
+      body: 'PR: https://github.com/acme/webapp/pull/93',
+      from_handle: 'term_w1',
+      payload: JSON.stringify({ taskId: 'task_chan_b', dispatchId: 'ctx_chan_b' }),
+    };
+    const { runtime, surface, runner } = makeRuntime({
+      script: bootScript(
+        [liveWorktree('wt-a', '/w/a'), liveWorktree('wt-b', '/w/b')],
+        [
+          { id: 'task_chan_a', status: 'running' },
+          { id: 'task_chan_b', status: 'running' },
+        ],
+      ),
+      // Only channel B's mailbox has a message waiting; channel A's window
+      // stays open — exactly one worker finished.
+      windowsByMailbox: { term_mb_b: [envelope({ messages: [workerDone] })] },
+    });
+    const store = runtime.delegationStore;
+    store.setMailbox(THREAD, CHANNEL, 'term_mb_a');
+    store.setMailbox(THREAD, CHANNEL_B, 'term_mb_b');
+    seedDispatch(store, { taskId: 'task_chan_a', dispatchId: 'ctx_chan_a', worktreeId: 'wt-a' });
+    seedDispatch(store, {
+      channelId: CHANNEL_B,
+      taskId: 'task_chan_b',
+      dispatchId: 'ctx_chan_b',
+      worktreeId: 'wt-b',
+    });
+
+    await runtime.boot();
+
+    // One watcher per (thread, channel) pair — the same ts armed twice.
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(true);
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL_B)).toBe(true);
+    const waits = runner.calls.filter((call) => call.startsWith('orchestration check --wait'));
+    expect(waits.some((call) => call.includes('term_mb_a'))).toBe(true);
+    expect(waits.some((call) => call.includes('term_mb_b'))).toBe(true);
+
+    // Channel B's completion closes ONLY channel B's row…
+    await vi.waitFor(() => {
+      expect(store.listInFlightForThread(THREAD, CHANNEL_B)).toEqual([]);
+    });
+    expect(store.listInFlightForThread(THREAD, CHANNEL)).toHaveLength(1);
+
+    // …its ✅ fallback summary and root flip land in channel B alone…
+    await vi.waitFor(() => {
+      expect(
+        surface.posts.some(
+          (post) => post.channelId === CHANNEL_B && post.text.includes('Delivered: the other channel’s work'),
+        ),
+      ).toBe(true);
+    });
+    expect(
+      surface.posts.filter((post) => post.channelId === CHANNEL && post.text.includes('✅')),
+    ).toEqual([]);
+    await vi.waitFor(() => {
+      expect(surface.reactions).toContainEqual({
+        channelId: CHANNEL_B,
+        ts: THREAD,
+        name: 'white_check_mark',
+      });
+    });
+    expect(
+      surface.reactions.filter(
+        (reaction) => reaction.channelId === CHANNEL && reaction.name === 'white_check_mark',
+      ),
+    ).toEqual([]);
+
+    // …and channel A's watcher keeps watching while B's wound down.
+    await vi.waitFor(() => {
+      expect(runtime.watcher.isArmed(THREAD, CHANNEL_B)).toBe(false);
+    });
+    expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(true);
+    await vi.waitFor(() => {
+      expect(runner.calls).toContain('worktree rm --worktree id:wt-b --json');
+    });
+    expect(runner.calls).not.toContain('worktree rm --worktree id:wt-a --json');
+  });
+
   it('routes a worker_done from the re-armed watcher through ledger, card and cleanup', async () => {
     const workerDone = {
       id: 'msg_done_1',
@@ -487,7 +601,7 @@ describe('buildRuntime — the boot sequence', () => {
 
     await runtime.boot();
     await vi.waitFor(() => {
-      expect(store.listInFlightForThread(THREAD_B)).toEqual([]);
+      expect(store.listInFlightForThread(THREAD_B, CHANNEL)).toEqual([]);
     });
 
     // The card flipped ✅ (posted fresh — the seeded row carried no cardTs),
@@ -504,7 +618,7 @@ describe('buildRuntime — the boot sequence', () => {
     });
     // Nothing left in flight: the watcher loop wound itself down.
     await vi.waitFor(() => {
-      expect(runtime.watcher.isArmed(THREAD_B)).toBe(false);
+      expect(runtime.watcher.isArmed(THREAD_B, CHANNEL)).toBe(false);
     });
   });
 });

@@ -24,10 +24,9 @@ import {
 } from './messages.ts';
 
 describe('refusalLine', () => {
-  it('matches the UX mock verbatim (docs/prototypes/slack-ux, scenario G1)', () => {
-    expect(refusalLine('U0EXAMPLE456')).toBe(
-      'v1: only <@U0EXAMPLE456> can drive me.',
-    );
+  it('stays generic — the allow-list is never enumerated to third parties (issue #93)', () => {
+    expect(refusalLine()).toBe('Only authorized operators can drive me.');
+    expect(refusalLine()).not.toContain('<@');
   });
 });
 

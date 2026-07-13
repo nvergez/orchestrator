@@ -55,24 +55,24 @@ class FakeSurface implements Surface {
   failPosts = false;
   private counter = 0;
 
-  post(threadTs: string, text: string): Promise<string> {
+  post(_channelId: string, threadTs: string, text: string): Promise<string> {
     if (this.failPosts) return Promise.reject(new Error('slack down'));
     this.posts.push({ threadTs, text });
     this.counter += 1;
     return Promise.resolve(`msg-ts-${this.counter}`);
   }
 
-  update(ts: string, text: string): Promise<void> {
+  update(_channelId: string, ts: string, text: string): Promise<void> {
     this.updates.push({ ts, text });
     return Promise.resolve();
   }
 
-  react(ts: string, name: string): Promise<void> {
+  react(_channelId: string, ts: string, name: string): Promise<void> {
     this.reactions.push({ ts, name });
     return Promise.resolve();
   }
 
-  unreact(ts: string, name: string): Promise<void> {
+  unreact(_channelId: string, ts: string, name: string): Promise<void> {
     this.removed.push({ ts, name });
     return Promise.resolve();
   }
@@ -303,6 +303,7 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
     store.recordGate({
       msgId: 'msg_gate',
       threadTs: THREAD,
+      channelId: CHANNEL,
       taskId: 'task_bench',
       dispatchId: 'ctx_w1',
       workerHandle: WORKER,
@@ -380,9 +381,9 @@ describe('a stall → the ⚠️ alert (mock scenario "Stalled worker")', () => 
     seedDispatch(store);
     // The delegation closes while the ⚠️ post is in flight.
     const post = surface.post.bind(surface);
-    surface.post = (threadTs, text) => {
+    surface.post = (channelId, threadTs, text) => {
       store.closeDelegation('ctx_w1', 'completed');
-      return post(threadTs, text);
+      return post(channelId, threadTs, text);
     };
 
     await watchdog.sweep();
@@ -571,6 +572,7 @@ describe('a live-but-mute worker → the in-flight ⚠️ alert (issue #48)', ()
     store.recordGate({
       msgId: 'msg_gate',
       threadTs: THREAD,
+      channelId: CHANNEL,
       taskId: 'task_bench',
       dispatchId: 'ctx_w1',
       workerHandle: WORKER,

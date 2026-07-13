@@ -13,8 +13,8 @@ You end up with the four Slack values of `~/.config/orchestrator/env`
 |---|---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-` | Bot User OAuth Token — all Web API calls |
 | `SLACK_APP_TOKEN` | `xapp-` | App-level token — opens the Socket Mode WebSocket |
-| `SLACK_CHANNEL_ID` | `C` | The single channel the daemon listens to |
-| `SLACK_ALLOWED_USER_ID` | `U` | Your user ID — the only human the daemon obeys |
+| `SLACK_CHANNEL_IDS` | `C` | The channel(s) the daemon listens to — comma-separated (the legacy single-value `SLACK_CHANNEL_ID` still works) |
+| `SLACK_ALLOWED_USER_IDS` | `U` | The authorized user(s) — comma-separated (the legacy single-value `SLACK_ALLOWED_USER_ID` still works) |
 
 The app runs in **Socket Mode**: it connects outbound to Slack over a
 WebSocket, so your machine needs no public URL, reverse proxy, or open port.
@@ -103,26 +103,28 @@ authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
 
-## 4. Create or choose the channel and invite the bot
+## 4. Create or choose the channel(s) and invite the bot
 
-The daemon listens to **one dedicated channel** — public or private, your
-choice — and ignores every other conversation. In that channel, run
+The daemon listens to **the channels you configure** — public or private,
+one or several — and ignores every other conversation. In each of them, run
 `/invite @orchestrator` (or *Add apps* from the channel settings).
 
 Membership is not cosmetic: Slack only delivers events for conversations the
 bot is party to, and `chat:write` only lets it post where it is a member. No
 invite → no bot.
 
-## 5. Collect the two IDs
+## 5. Collect the two ID lists
 
-- **Channel ID → `SLACK_CHANNEL_ID`.** Click the channel name to open its
+- **Channel ID(s) → `SLACK_CHANNEL_IDS`.** Click the channel name to open its
   details; the **Channel ID** is at the bottom of the *About* tab (with a
   copy button). It must start with `C` — modern private channels also use
-  `C…` IDs.
-- **Your user ID → `SLACK_ALLOWED_USER_ID`.** Click your profile picture →
-  **Profile** → the **⋮** menu → **Copy member ID** — a `U…` value. This is
-  the single authorized user: root mentions by anyone else get one polite
-  refusal; thread replies by anyone else are silently ignored.
+  `C…` IDs. Serving several channels is one CSV (`C…,C…`); the bot must be
+  invited to each.
+- **User ID(s) → `SLACK_ALLOWED_USER_IDS`.** Click a profile picture →
+  **Profile** → the **⋮** menu → **Copy member ID** — a `U…` value. Everyone
+  on this comma-separated allow-list may drive the daemon anywhere it
+  listens; root mentions by anyone else get one polite refusal, and thread
+  replies by anyone else are silently ignored.
 
 ## 6. Fill the env file and smoke-test
 

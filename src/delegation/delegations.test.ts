@@ -36,7 +36,7 @@ describe('DelegationStore — delegations ledger', () => {
 
     store.recordDispatch(dispatchRow());
 
-    expect(store.listForThread(THREAD)).toEqual([
+    expect(store.listForThread(THREAD, CHANNEL)).toEqual([
       {
         ...dispatchRow(),
         status: 'dispatched',
@@ -53,7 +53,7 @@ describe('DelegationStore — delegations ledger', () => {
     store.recordDispatch(dispatchRow());
     store.recordDispatch(dispatchRow({ title: 'bench harness, retried' }));
 
-    const rows = store.listForThread(THREAD);
+    const rows = store.listForThread(THREAD, CHANNEL);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.title).toBe('bench harness, retried');
   });
@@ -170,7 +170,7 @@ describe('DelegationStore — delegations ledger', () => {
 
     store.closeDelegation('ctx_8b685db09a47', 'completed');
 
-    const row = store.listForThread(THREAD)[0];
+    const row = store.listForThread(THREAD, CHANNEL)[0];
     expect(row?.status).toBe('completed');
     expect(row?.closedAt).not.toBeNull();
     expect(store.inFlightCount()).toBe(0);
@@ -193,8 +193,8 @@ describe('DelegationStore — delegations ledger', () => {
       }),
     );
 
-    expect(store.listForThread(THREAD)).toHaveLength(1);
-    expect(store.listForThread(THREAD)[0]?.issueNumber).toBeNull();
+    expect(store.listForThread(THREAD, CHANNEL)).toHaveLength(1);
+    expect(store.listForThread(THREAD, CHANNEL)[0]?.issueNumber).toBeNull();
   });
 
   it('scopes the thread ledger to the thread', () => {
@@ -203,9 +203,9 @@ describe('DelegationStore — delegations ledger', () => {
     store.recordDispatch(dispatchRow());
     store.recordDispatch(dispatchRow({ dispatchId: 'ctx_2', threadTs: '1751970099.000900' }));
 
-    expect(store.listForThread(THREAD)).toHaveLength(1);
-    expect(store.listForThread('1751970099.000900')).toHaveLength(1);
-    expect(store.listForThread('1751970098.000000')).toHaveLength(0);
+    expect(store.listForThread(THREAD, CHANNEL)).toHaveLength(1);
+    expect(store.listForThread('1751970099.000900', CHANNEL)).toHaveLength(1);
+    expect(store.listForThread('1751970098.000000', CHANNEL)).toHaveLength(0);
   });
 });
 
@@ -230,7 +230,7 @@ describe('DelegationStore — closing and the in-flight views (issue #20)', () =
     store.recordDispatch(dispatchRow({ dispatchId: 'ctx_3', threadTs: '1751970099.000900' }));
     store.closeDelegation('ctx_2', 'completed');
 
-    expect(store.listInFlightForThread(THREAD).map((row) => row.dispatchId)).toEqual([
+    expect(store.listInFlightForThread(THREAD, CHANNEL).map((row) => row.dispatchId)).toEqual([
       'ctx_8b685db09a47',
     ]);
     expect(store.threadsWithInFlight()).toEqual([
@@ -254,7 +254,7 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
     // watcher handles the event in the ROW's thread, and a straggler naming
     // a closed dispatch lands on the duplicate guard instead of matching
     // anything live.
-    const row = store.resolveWorkerEvent(THREAD, {
+    const row = store.resolveWorkerEvent(THREAD, CHANNEL, {
       dispatchId: 'ctx_8b685db09a47',
       taskId: 'task_13c700f151b3',
     });
@@ -269,7 +269,7 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
     store.closeDelegation('ctx_8b685db09a47', 'failed');
 
     expect(
-      store.resolveWorkerEvent(THREAD, {
+      store.resolveWorkerEvent(THREAD, CHANNEL, {
         dispatchId: 'ctx_8b685db09a47',
         workerHandle: 'term_300035ab',
       })?.dispatchId,
@@ -283,16 +283,16 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
     // A stale straggler naming an unknown dispatch or task id must not
     // claim the live delegation through the ids it also carries.
     expect(
-      store.resolveWorkerEvent(THREAD, {
+      store.resolveWorkerEvent(THREAD, CHANNEL, {
         dispatchId: 'ctx_unknown',
         taskId: 'task_13c700f151b3',
         workerHandle: 'term_300035ab',
       }),
     ).toBeUndefined();
     expect(
-      store.resolveWorkerEvent(THREAD, { taskId: 'task_unknown', workerHandle: 'term_300035ab' }),
+      store.resolveWorkerEvent(THREAD, CHANNEL, { taskId: 'task_unknown', workerHandle: 'term_300035ab' }),
     ).toBeUndefined();
-    expect(store.resolveWorkerEvent(THREAD, {})).toBeUndefined();
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, {})).toBeUndefined();
   });
 
   it('the task-id fallback is thread-scoped and prefers the newest in-flight row', () => {
@@ -304,11 +304,11 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
       dispatchRow({ dispatchId: 'ctx_other_thread', threadTs: '1751970099.000900' }),
     );
 
-    expect(store.resolveWorkerEvent(THREAD, { taskId: 'task_13c700f151b3' })?.dispatchId).toBe(
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, { taskId: 'task_13c700f151b3' })?.dispatchId).toBe(
       'ctx_retry',
     );
     expect(
-      store.resolveWorkerEvent('1751970098.000000', { taskId: 'task_13c700f151b3' }),
+      store.resolveWorkerEvent('1751970098.000000', CHANNEL, { taskId: 'task_13c700f151b3' }),
     ).toBeUndefined();
   });
 
@@ -319,11 +319,11 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
 
     // A worker_done consumed after boot reconciliation already closed its
     // delegation must resolve to the closed row, not surface as unknown.
-    expect(store.resolveWorkerEvent(THREAD, { taskId: 'task_13c700f151b3' })?.status).toBe(
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, { taskId: 'task_13c700f151b3' })?.status).toBe(
       'completed',
     );
     expect(
-      store.resolveWorkerEvent('1751970099.000900', { taskId: 'task_13c700f151b3' }),
+      store.resolveWorkerEvent('1751970099.000900', CHANNEL, { taskId: 'task_13c700f151b3' }),
     ).toBeUndefined();
   });
 
@@ -335,15 +335,15 @@ describe('DelegationStore — resolveWorkerEvent (the event identity rules)', ()
       dispatchRow({ dispatchId: 'ctx_other', workerHandle: 'term_w', threadTs: '1751970099.000900' }),
     );
 
-    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_w' })?.dispatchId).toBe(
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, { workerHandle: 'term_w' })?.dispatchId).toBe(
       'ctx_new',
     );
-    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_unknown' })).toBeUndefined();
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, { workerHandle: 'term_unknown' })).toBeUndefined();
 
     // A closed row never matches by handle — an `ask` can only come from a
     // worker still out there.
     store.closeDelegation('ctx_new', 'completed');
-    expect(store.resolveWorkerEvent(THREAD, { workerHandle: 'term_w' })?.dispatchId).toBe(
+    expect(store.resolveWorkerEvent(THREAD, CHANNEL, { workerHandle: 'term_w' })?.dispatchId).toBe(
       'ctx_old',
     );
   });
@@ -353,10 +353,10 @@ describe('DelegationStore — mailboxes', () => {
   it('remembers a thread mailbox handle across lookups', () => {
     const store = openStore();
 
-    expect(store.getMailbox(THREAD)).toBeUndefined();
+    expect(store.getMailbox(THREAD, CHANNEL)).toBeUndefined();
     store.setMailbox(THREAD, CHANNEL, 'term_mailbox_1');
 
-    expect(store.getMailbox(THREAD)).toBe('term_mailbox_1');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_1');
   });
 
   it('replaces a stale handle for the same thread', () => {
@@ -365,7 +365,7 @@ describe('DelegationStore — mailboxes', () => {
     store.setMailbox(THREAD, CHANNEL, 'term_mailbox_1');
     store.setMailbox(THREAD, CHANNEL, 'term_mailbox_2');
 
-    expect(store.getMailbox(THREAD)).toBe('term_mailbox_2');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_2');
   });
 
   it('keeps mailboxes per thread', () => {
@@ -373,13 +373,14 @@ describe('DelegationStore — mailboxes', () => {
 
     store.setMailbox(THREAD, CHANNEL, 'term_mailbox_1');
 
-    expect(store.getMailbox('1751970099.000900')).toBeUndefined();
+    expect(store.getMailbox('1751970099.000900', CHANNEL)).toBeUndefined();
   });
 });
 
 const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
   msgId: 'msg_6a8c14d55c7d',
   threadTs: THREAD,
+  channelId: CHANNEL,
   taskId: 'task_13c700f151b3',
   dispatchId: 'ctx_8b685db09a47',
   workerHandle: 'term_300035ab',
@@ -437,11 +438,11 @@ describe('DelegationStore — pending_gates registry (issue #21)', () => {
     store.recordGate(gateRow({ msgId: 'msg_other', threadTs: '1751970099.000900' }));
     store.answerGate('msg_1');
 
-    expect(store.turnContextFor(THREAD).gates.map((gate) => gate.msgId)).toEqual([
+    expect(store.turnContextFor(THREAD, CHANNEL).gates.map((gate) => gate.msgId)).toEqual([
       'msg_1',
       'msg_2',
     ]);
-    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_2']);
+    expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId)).toEqual(['msg_2']);
   });
 
   it('degrades unreadable options to an empty list instead of throwing', () => {
@@ -456,6 +457,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
   const stallRow = (overrides: Partial<Parameters<DelegationStore['recordStall']>[0]> = {}) => ({
     dispatchId: 'ctx_8b685db09a47',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_300035ab',
     worktreeName: 'sandbox-21-bench',
     lastOutput: '? Overwrite existing bench.json? (y/N)',
@@ -490,7 +492,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
       status: 'pending',
       answeredAt: null,
     });
-    expect(store.turnContextFor(THREAD).stalls).toHaveLength(1);
+    expect(store.turnContextFor(THREAD, CHANNEL).stalls).toHaveLength(1);
   });
 
   it('answers a stall exactly once — the second flip reports it lost', () => {
@@ -511,11 +513,11 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
     store.recordStall(stallRow({ dispatchId: 'ctx_other', threadTs: '1751970099.000900' }));
     store.answerStall('ctx_1');
 
-    expect(store.turnContextFor(THREAD).stalls.map((stall) => stall.dispatchId)).toEqual([
+    expect(store.turnContextFor(THREAD, CHANNEL).stalls.map((stall) => stall.dispatchId)).toEqual([
       'ctx_1',
       'ctx_2',
     ]);
-    expect(store.listPendingStalls(THREAD).map((stall) => stall.dispatchId)).toEqual(['ctx_2']);
+    expect(store.listPendingStalls(THREAD, CHANNEL).map((stall) => stall.dispatchId)).toEqual(['ctx_2']);
   });
 
   it('closing the delegation settles its pending stall alert — the worker reported after all', () => {
@@ -526,7 +528,7 @@ describe('DelegationStore — stall_alerts registry (issue #22)', () => {
     store.closeDelegation('ctx_8b685db09a47', 'completed');
 
     expect(store.getStall('ctx_8b685db09a47')?.status).toBe('answered');
-    expect(store.listPendingStalls(THREAD)).toEqual([]);
+    expect(store.listPendingStalls(THREAD, CHANNEL)).toEqual([]);
   });
 
   it('lists every in-flight delegation across threads — the sweep’s inspection set', () => {
@@ -547,20 +549,20 @@ describe('DelegationStore — reconciliation fingerprints (issue #25)', () => {
   it('remembers the last posted fingerprint per thread', () => {
     const store = openStore();
 
-    expect(store.getReconcileFingerprint(THREAD)).toBeUndefined();
+    expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBeUndefined();
 
-    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
-    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=in-flight');
-    expect(store.getReconcileFingerprint('1751970099.000900')).toBeUndefined();
+    store.setReconcileFingerprint(THREAD, CHANNEL, 'ctx_a=in-flight');
+    expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_a=in-flight');
+    expect(store.getReconcileFingerprint('1751970099.000900', CHANNEL)).toBeUndefined();
   });
 
   it('replaces the fingerprint on a state change instead of stacking rows', () => {
     const store = openStore();
 
-    store.setReconcileFingerprint(THREAD, 'ctx_a=in-flight');
-    store.setReconcileFingerprint(THREAD, 'ctx_a=stalled');
+    store.setReconcileFingerprint(THREAD, CHANNEL, 'ctx_a=in-flight');
+    store.setReconcileFingerprint(THREAD, CHANNEL, 'ctx_a=stalled');
 
-    expect(store.getReconcileFingerprint(THREAD)).toBe('ctx_a=stalled');
+    expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_a=stalled');
   });
 });
 
@@ -604,7 +606,7 @@ describe('DelegationStore — gate registry hygiene (issue #46)', () => {
     );
     store.closeDelegation('ctx_done', 'completed');
 
-    expect(store.listPendingGates(THREAD).map((gate) => gate.msgId)).toEqual(['msg_live']);
+    expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId)).toEqual(['msg_live']);
     // History is never erased — every row survives with its honest status.
     expect(store.getGate('msg_stale')?.status).toBe('superseded');
     expect(store.getGate('msg_live')?.status).toBe('pending');
@@ -767,6 +769,7 @@ describe('DelegationStore — gate registry hygiene (issue #46)', () => {
         question: 'which format should the report file use?',
         status: 'pending',
         dispatchId: null,
+        channelId: null,
         supersededBy: null,
       });
       expect(store.supersedeGate('msg_d658da142a94', 'msg_reask')).toBe(true);
@@ -782,6 +785,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
   const stallRow = (overrides: Partial<Parameters<DelegationStore['recordStall']>[0]> = {}) => ({
     dispatchId: 'ctx_8b685db09a47',
     threadTs: THREAD,
+    channelId: CHANNEL,
     workerHandle: 'term_300035ab',
     worktreeName: 'sandbox-21-bench',
     lastOutput: '? Overwrite existing bench.json? (y/N)',
@@ -795,7 +799,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
     store.recordGate(gateRow());
     store.recordStall(stallRow());
 
-    expect(store.turnContextFor(THREAD)).toEqual({
+    expect(store.turnContextFor(THREAD, CHANNEL)).toEqual({
       gates: [
         {
           msgId: 'msg_6a8c14d55c7d',
@@ -827,7 +831,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
     store.recordGate(gateRow({ msgId: 'msg_no_ids', worktreeName: null, taskId: null }));
     store.recordStall(stallRow({ worktreeName: null }));
 
-    const context = store.turnContextFor(THREAD);
+    const context = store.turnContextFor(THREAD, CHANNEL);
     expect(context.gates.map((gate) => gate.ackRef)).toEqual([
       'task_13c700f151b3',
       'msg_no_ids',
@@ -848,7 +852,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
     store.recordStall(stallRow({ dispatchId: 'ctx_nudged' }));
     store.answerStall('ctx_nudged');
 
-    const context = store.turnContextFor(THREAD);
+    const context = store.turnContextFor(THREAD, CHANNEL);
     expect(context.gates.map((gate) => [gate.msgId, gate.status])).toEqual([
       ['msg_live', 'closed'],
       ['msg_answered', 'answered'],
@@ -862,6 +866,263 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
     store.recordGate(gateRow({ threadTs: '1751970099.000900' }));
     store.recordStall(stallRow({ threadTs: '1751970099.000900' }));
 
-    expect(store.turnContextFor(THREAD)).toEqual({ gates: [], stalls: [] });
+    expect(store.turnContextFor(THREAD, CHANNEL)).toEqual({ gates: [], stalls: [] });
+  });
+});
+
+describe('DelegationStore — the (thread_ts, channel_id) key (issue #93)', () => {
+  const CHANNEL_B = 'C0OTHER';
+
+  it('two same-ts threads in different channels never see each other', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordDispatch(dispatchRow({ dispatchId: 'ctx_b', taskId: 'task_b', channelId: CHANNEL_B }));
+    store.recordGate(gateRow());
+    store.recordGate(gateRow({ msgId: 'msg_b', channelId: CHANNEL_B }));
+    store.recordStall({
+      dispatchId: 'ctx_8b685db09a47',
+      threadTs: THREAD,
+      channelId: CHANNEL,
+      workerHandle: 'term_300035ab',
+      worktreeName: 'sandbox-21-bench',
+      lastOutput: 'stuck',
+      fingerprint: 'fp',
+      relayTs: null,
+    });
+
+    expect(store.listInFlightForThread(THREAD, CHANNEL).map((row) => row.dispatchId)).toEqual([
+      'ctx_8b685db09a47',
+    ]);
+    expect(store.listInFlightForThread(THREAD, CHANNEL_B).map((row) => row.dispatchId)).toEqual([
+      'ctx_b',
+    ]);
+    expect(store.listPendingGates(THREAD, CHANNEL_B).map((gate) => gate.msgId)).toEqual(['msg_b']);
+    expect(store.listPendingStalls(THREAD, CHANNEL_B)).toEqual([]);
+    expect(store.threadsWithInFlight()).toEqual([
+      { threadTs: THREAD, channelId: CHANNEL },
+      { threadTs: THREAD, channelId: CHANNEL_B },
+    ]);
+  });
+
+  it('the task-id and handle fallbacks are channel-scoped', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+
+    expect(
+      store.resolveWorkerEvent(THREAD, CHANNEL_B, { taskId: 'task_13c700f151b3' }),
+    ).toBeUndefined();
+    expect(
+      store.resolveWorkerEvent(THREAD, CHANNEL_B, { workerHandle: 'term_300035ab' }),
+    ).toBeUndefined();
+    expect(
+      store.resolveWorkerEvent(THREAD, CHANNEL, { taskId: 'task_13c700f151b3' })?.dispatchId,
+    ).toBe('ctx_8b685db09a47');
+  });
+
+  it('closing a delegation never closes a same-ts sibling channel’s gates', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow());
+    store.recordGate(gateRow({ msgId: 'msg_b', channelId: CHANNEL_B }));
+
+    store.closeDelegation('ctx_8b685db09a47', 'completed');
+
+    expect(store.getGate('msg_b')?.status).toBe('pending');
+  });
+
+  it('mailboxes and reconciliation fingerprints key on the pair', () => {
+    const store = openStore();
+    store.setMailbox(THREAD, CHANNEL, 'term_a');
+    store.setMailbox(THREAD, CHANNEL_B, 'term_b');
+    store.setReconcileFingerprint(THREAD, CHANNEL, 'ctx_a=in-flight');
+
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_a');
+    expect(store.getMailbox(THREAD, CHANNEL_B)).toBe('term_b');
+    expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_a=in-flight');
+    expect(store.getReconcileFingerprint(THREAD, CHANNEL_B)).toBeUndefined();
+  });
+
+  it('refuses a cross-channel supersede hop like a cross-thread one', () => {
+    const store = openStore();
+    store.recordGate(gateRow());
+    store.recordGate(gateRow({ msgId: 'msg_other_channel', channelId: CHANNEL_B }));
+    store.supersedeGate('msg_6a8c14d55c7d', 'msg_other_channel');
+
+    expect(store.liveGateFor('msg_6a8c14d55c7d')).toBeUndefined();
+  });
+});
+
+describe('DelegationStore — the issue #93 forward migrations', () => {
+  /** A pre-#93 database: post-#46 gates, post-#48 delegations, old keys. */
+  const seedPre93 = (dbPath: string): void => {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE delegations (
+        dispatch_id   TEXT PRIMARY KEY,
+        task_id       TEXT NOT NULL,
+        worktree_id   TEXT,
+        worktree_name TEXT,
+        worktree_path TEXT,
+        repo          TEXT,
+        issue_number  INTEGER,
+        agent         TEXT,
+        worker_handle TEXT,
+        thread_ts     TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
+        card_ts       TEXT,
+        title         TEXT,
+        status        TEXT NOT NULL DEFAULT 'dispatched'
+                      CHECK (status IN ('dispatched', 'completed', 'failed')),
+        dispatched_at TEXT NOT NULL,
+        last_bus_at   TEXT,
+        closed_at     TEXT
+      ) STRICT;
+      CREATE TABLE mailboxes (
+        thread_ts  TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        handle     TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE reconciliations (
+        thread_ts   TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        posted_at   TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE pending_gates (
+        msg_id        TEXT PRIMARY KEY,
+        thread_ts     TEXT NOT NULL,
+        task_id       TEXT,
+        dispatch_id   TEXT,
+        worker_handle TEXT,
+        worktree_name TEXT,
+        kind          TEXT NOT NULL
+                      CHECK (kind IN ('decision_gate', 'escalation')),
+        question      TEXT NOT NULL,
+        options       TEXT NOT NULL,
+        relay_ts      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'answered', 'superseded', 'closed')),
+        superseded_by TEXT,
+        relayed_at    TEXT NOT NULL,
+        answered_at   TEXT
+      ) STRICT;
+      CREATE TABLE stall_alerts (
+        dispatch_id   TEXT PRIMARY KEY,
+        thread_ts     TEXT NOT NULL,
+        worker_handle TEXT,
+        worktree_name TEXT,
+        last_output   TEXT NOT NULL,
+        fingerprint   TEXT NOT NULL,
+        relay_ts      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'answered')),
+        alerted_at    TEXT NOT NULL,
+        answered_at   TEXT
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO delegations (dispatch_id, task_id, worker_handle, thread_ts, channel_id, status, dispatched_at)
+         VALUES ('ctx_pre93', 'task_pre93', 'term_pre93', ?, ?, 'dispatched', '2026-07-08T11:00:00.000Z')`,
+      )
+      .run(THREAD, CHANNEL);
+    legacy
+      .prepare(
+        `INSERT INTO mailboxes (thread_ts, channel_id, handle, created_at)
+         VALUES (?, ?, 'term_mailbox_pre93', '2026-07-08T11:00:00.000Z')`,
+      )
+      .run(THREAD, CHANNEL);
+    legacy
+      .prepare(
+        `INSERT INTO reconciliations (thread_ts, fingerprint, posted_at)
+         VALUES (?, 'ctx_pre93=in-flight', '2026-07-08T11:00:00.000Z')`,
+      )
+      .run(THREAD);
+    legacy
+      .prepare(
+        `INSERT INTO reconciliations (thread_ts, fingerprint, posted_at)
+         VALUES ('1751970099.000900', 'ctx_orphan=unknown', '2026-07-08T11:00:00.000Z')`,
+      )
+      .run();
+    legacy
+      .prepare(
+        `INSERT INTO pending_gates
+           (msg_id, thread_ts, task_id, dispatch_id, worker_handle, kind, question, options, status, relayed_at)
+         VALUES ('msg_pre93', ?, 'task_pre93', 'ctx_pre93', 'term_pre93', 'decision_gate',
+                 'rebase or merge?', '["rebase","merge"]', 'pending', '2026-07-08T11:00:01.000Z')`,
+      )
+      .run(THREAD);
+    legacy
+      .prepare(
+        `INSERT INTO stall_alerts
+           (dispatch_id, thread_ts, worker_handle, last_output, fingerprint, status, alerted_at)
+         VALUES ('ctx_pre93', ?, 'term_pre93', 'stuck at a prompt', 'fp1', 'pending', '2026-07-08T11:00:02.000Z')`,
+      )
+      .run(THREAD);
+    legacy.close();
+  };
+
+  it('migrates every pre-#93 table forward — rows survive under the new keys', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-93-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      seedPre93(dbPath);
+      const store = new DelegationStore(dbPath);
+
+      // Mailboxes re-keyed to the pair; the stored handle still resolves.
+      expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_pre93');
+      // Reconciliations backfilled from the thread's delegations; the row
+      // with no delegations to backfill from is dropped, not misfiled.
+      expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_pre93=in-flight');
+      expect(store.getReconcileFingerprint('1751970099.000900', CHANNEL)).toBeUndefined();
+      // Legacy gate and stall rows read a NULL channel…
+      expect(store.getGate('msg_pre93')?.channelId).toBeNull();
+      expect(store.getStall('ctx_pre93')?.channelId).toBeNull();
+      // …and stay visible to thread-scoped queries under ANY channel.
+      expect(store.listPendingGates(THREAD, CHANNEL).map((gate) => gate.msgId)).toEqual([
+        'msg_pre93',
+      ]);
+      expect(store.listPendingStalls(THREAD, 'C0WHATEVER')).toHaveLength(1);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a legacy NULL-channel gate still closes with its delegation', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-93-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      seedPre93(dbPath);
+      const store = new DelegationStore(dbPath);
+
+      expect(store.closeDelegation('ctx_pre93', 'completed')).toBe(true);
+
+      expect(store.getGate('msg_pre93')?.status).toBe('closed');
+      expect(store.getStall('ctx_pre93')?.status).toBe('answered');
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the migration is idempotent — reopening the migrated database changes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-93-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      seedPre93(dbPath);
+      new DelegationStore(dbPath).close();
+      const store = new DelegationStore(dbPath);
+
+      expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_pre93');
+      expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_pre93=in-flight');
+      expect(store.getGate('msg_pre93')?.status).toBe('pending');
+      // New writes carry their channel and land beside the legacy rows.
+      store.setMailbox(THREAD, 'C0OTHER', 'term_new');
+      expect(store.getMailbox(THREAD, 'C0OTHER')).toBe('term_new');
+      expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_pre93');
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

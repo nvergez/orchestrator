@@ -42,6 +42,8 @@ export type ProcessFactory = (opts: {
   resumeSessionId: string | null;
   /** The Slack thread this session speaks for — where its 🚦 gates post. */
   threadTs: string;
+  /** The thread's channel (issue #93) — the daemon serves several. */
+  channelId: string;
 }) => OrchestratorProcess;
 
 /** The slice of `Voice` the manager drives — one instance per turn. */
@@ -50,10 +52,10 @@ export interface VoiceHandle {
   finalize(fallback?: string): Promise<void>;
 }
 
-export type VoiceFactory = (threadTs: string) => VoiceHandle;
+export type VoiceFactory = (threadTs: string, channelId: string) => VoiceHandle;
 
 /** Posts a standalone message to a thread — 💸 warnings "post the event" (spec §8). */
-export type Notifier = (threadTs: string, text: string) => Promise<void>;
+export type Notifier = (threadTs: string, channelId: string, text: string) => Promise<void>;
 
 /** A thread's FIFO carries turns and, terminally, the close command (spec §3). */
 type QueueItem = { kind: 'turn'; text: string } | { kind: 'close' };
@@ -87,14 +89,14 @@ export interface SessionManagerOptions {
   autoCloseAfterMs: number;
   /** The thread's delegations from the #19 ledger, outcomes and issue links
    * resolved — the 🔚 summary's per-delegation lines (issue #51). */
-  listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
+  listDelegations: (threadTs: string, channelId: string) => Promise<ClosingDelegation[]>;
   /** Turn-start ack (issue #49): 👀 on the root before the turn produces
    * anything — awaited ahead of the slot wait so even a queued message acks
    * within seconds. */
-  onTurnStart: (threadTs: string) => Promise<void>;
+  onTurnStart: (threadTs: string, channelId: string) => Promise<void>;
   /** Turn-end settle (issue #49): takes the 👀 back off when the turn left
    * nothing in flight and nothing pending. Runs on every outcome. */
-  onTurnEnd: (threadTs: string) => Promise<void>;
+  onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
   logger: Logger;
 }
 
@@ -107,9 +109,12 @@ export class SessionManager {
   private readonly warmTtlMs: number;
   private readonly liveSessionCap: number;
   private readonly autoCloseAfterMs: number;
-  private readonly listDelegations: (threadTs: string) => Promise<ClosingDelegation[]>;
-  private readonly onTurnStart: (threadTs: string) => Promise<void>;
-  private readonly onTurnEnd: (threadTs: string) => Promise<void>;
+  private readonly listDelegations: (
+    threadTs: string,
+    channelId: string,
+  ) => Promise<ClosingDelegation[]>;
+  private readonly onTurnStart: (threadTs: string, channelId: string) => Promise<void>;
+  private readonly onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   /**
@@ -145,7 +150,7 @@ export class SessionManager {
     // A redelivered root mention can land on an already-closed row; closed
     // is final (spec §3), so it gets the fixed line, never a fresh turn.
     if (this.store.get(threadTs, channelId)?.status === 'closed') {
-      this.postClosedLine(threadTs);
+      this.postClosedLine(threadTs, channelId);
       return;
     }
     this.enqueue(threadTs, channelId, { kind: 'turn', text });
@@ -160,7 +165,7 @@ export class SessionManager {
     const row = this.store.get(threadTs, channelId);
     if (row === undefined) return 'unregistered';
     if (row.status === 'closed') {
-      this.postClosedLine(threadTs);
+      this.postClosedLine(threadTs, channelId);
       return 'closed';
     }
     this.enqueue(threadTs, channelId, { kind: 'turn', text });
@@ -191,7 +196,7 @@ export class SessionManager {
     const row = this.store.get(threadTs, channelId);
     if (row === undefined) return 'unregistered';
     if (row.status === 'closed') {
-      this.postClosedLine(threadTs);
+      this.postClosedLine(threadTs, channelId);
       return 'closed';
     }
     this.enqueue(threadTs, channelId, { kind: 'close' });
@@ -248,8 +253,8 @@ export class SessionManager {
   }
 
   /** Closed is final (spec §3): the fixed line, no resume, no state change. */
-  private postClosedLine(threadTs: string): void {
-    this.notify(threadTs, CLOSED_THREAD_LINE).catch((error: unknown) => {
+  private postClosedLine(threadTs: string, channelId: string): void {
+    this.notify(threadTs, channelId, CLOSED_THREAD_LINE).catch((error: unknown) => {
       this.logger.warn({ err: error, threadTs }, 'closed-thread line post failed');
     });
   }
@@ -260,8 +265,9 @@ export class SessionManager {
     try {
       await this.notify(
         row.threadTs,
+        row.channelId,
         closingSummary({
-          delegations: await this.listDelegations(row.threadTs),
+          delegations: await this.listDelegations(row.threadTs, row.channelId),
           costUsd: row.costUsdTotal,
           turnCount: row.turnCount,
           dormantDays,
@@ -336,6 +342,7 @@ export class SessionManager {
     try {
       await this.notify(
         state.threadTs,
+        state.channelId,
         queuedLine(this.liveProcessCount() + this.pendingSpawns),
       );
     } catch (error) {
@@ -411,7 +418,7 @@ export class SessionManager {
     // Best-effort and independent of the summary post: a failed summary must
     // not swallow the dropped turns' fixed line, or vice versa.
     if (dropped.some((item) => item.kind === 'turn')) {
-      this.postClosedLine(state.threadTs);
+      this.postClosedLine(state.threadTs, state.channelId);
     }
   }
 
@@ -426,14 +433,14 @@ export class SessionManager {
     );
     // The channel-level "I'm on it" (issue #49) — ahead of the slot wait, so
     // a message queued at the cap still acks within seconds of arriving.
-    await this.hookSafe(this.onTurnStart, state.threadTs, 'turn-start ack failed');
+    await this.hookSafe(this.onTurnStart, state, 'turn-start ack failed');
     try {
       await this.runTurnBody(state, text, turnStartedAt);
     } finally {
       // Every outcome settles the root (issue #49): a pure Q&A turn takes
       // its 👀 back off; a turn that left work in flight leaves the root to
       // the milestone/gate/done flips that own it.
-      await this.hookSafe(this.onTurnEnd, state.threadTs, 'turn-end settle failed');
+      await this.hookSafe(this.onTurnEnd, state, 'turn-end settle failed');
     }
   }
 
@@ -447,7 +454,11 @@ export class SessionManager {
         resumeSessionId === null ? 'opening session' : 'cold-resuming session',
       );
       try {
-        state.proc = this.spawn({ resumeSessionId, threadTs: state.threadTs });
+        state.proc = this.spawn({
+          resumeSessionId,
+          threadTs: state.threadTs,
+          channelId: state.channelId,
+        });
       } finally {
         this.pendingSpawns -= 1;
         // A throwing spawn releases its reserved slot to the next in line.
@@ -455,7 +466,7 @@ export class SessionManager {
       }
     }
 
-    const voice = this.voiceFor(state.threadTs);
+    const voice = this.voiceFor(state.threadTs, state.channelId);
     let outcome: TurnOutcome;
     try {
       outcome = await state.proc.runTurn(text, {
@@ -507,14 +518,14 @@ export class SessionManager {
   /** Runs a turn-lifecycle hook; reactions are ambient state — a failing
    * hook is logged and never touches the turn (issue #49). */
   private async hookSafe(
-    hook: (threadTs: string) => Promise<void>,
-    threadTs: string,
+    hook: (threadTs: string, channelId: string) => Promise<void>,
+    state: ThreadState,
     failLine: string,
   ): Promise<void> {
     try {
-      await hook(threadTs);
+      await hook(state.threadTs, state.channelId);
     } catch (error) {
-      this.logger.warn({ err: error, threadTs }, failLine);
+      this.logger.warn({ err: error, threadTs: state.threadTs }, failLine);
     }
   }
 
@@ -535,7 +546,11 @@ export class SessionManager {
         'cost threshold crossed',
       );
       try {
-        await this.notify(state.threadTs, costWarningLine(afterUsd, threshold, next));
+        await this.notify(
+          state.threadTs,
+          state.channelId,
+          costWarningLine(afterUsd, threshold, next),
+        );
       } catch (error) {
         this.logger.warn(
           { err: error, threadTs: state.threadTs, threshold },
