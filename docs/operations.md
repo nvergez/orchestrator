@@ -127,7 +127,13 @@ What it does, in order:
    [release notes](https://github.com/nvergez/orchestrator/releases); re-run
    as `orc update --yes` once you have read them. Same-major updates apply
    without ceremony.
-4. Installs the new version, regenerates both units **via the freshly
+4. Preflights the systemd user bus **before touching npm**, whenever a unit is
+   installed. A shell that cannot reach the bus (SSH, Orca — no
+   `XDG_RUNTIME_DIR`) can regenerate no unit and restart no service, so the
+   update refuses while the install is still untouched, and tells you to
+   `export XDG_RUNTIME_DIR=/run/user/<uid>` and re-run. The ritual is
+   indivisible: it either happens whole or not at all.
+5. Installs the new version, regenerates both units **via the freshly
    installed binary** (see `docs/adr/0001`), and restarts both services —
    daemon and dashboard never skew versions. The restart is the step that
    actually swaps the running code — `service install` alone ends in

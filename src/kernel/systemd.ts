@@ -25,6 +25,31 @@ export function userBusUnreachable(error: unknown): boolean {
 }
 
 /**
+ * Why `systemctl --user` could not answer (issue #91). The two failures look
+ * alike and need opposite fixes: `unreachable` is THIS shell's problem (no
+ * XDG_RUNTIME_DIR — export it and everything works), while `absent` means the
+ * box has no systemd user manager at all and never will host a unit. Telling
+ * an unreachable-bus operator to go find another supervisor sends them down
+ * the wrong path entirely.
+ */
+export type UserBusStatus = 'reachable' | 'unreachable' | 'absent';
+
+/** The cheapest question that reaches the user manager and reads back. */
+export async function probeUserBus(run: CommandRunner): Promise<UserBusStatus> {
+  try {
+    await run('systemctl', ['--user', 'show-environment']);
+    return 'reachable';
+  } catch (error) {
+    return userBusUnreachable(error) ? 'unreachable' : 'absent';
+  }
+}
+
+/** The one-liner fix for an unreachable bus — the doctor's wording, verbatim. */
+export function userBusFixLine(uid: number): string {
+  return `export XDG_RUNTIME_DIR=/run/user/${uid} (or run from a login shell)`;
+}
+
+/**
  * The unit's ActiveState (`active`/`inactive`/`failed`) — `is-active` exits
  * non-zero for every non-active state with the state word still on stdout,
  * so both paths read it; an unreadable answer degrades to `unknown`, never

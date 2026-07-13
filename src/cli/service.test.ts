@@ -118,6 +118,7 @@ const makeDeps = (overrides: DepsOverrides = {}) => {
     unitPath: UNIT_PATH,
     dashboardUnitPath: DASHBOARD_UNIT_PATH,
     username: 'op',
+    uid: 1000,
     version: '1.2.3',
     today: '2026-07-10',
   };
@@ -158,16 +159,36 @@ describe('runServiceInstall', () => {
     expect(out.join('\n')).toContain('journalctl --user -u orchestrator-dashboard -f');
   });
 
-  it('fails fast when the systemd user manager is unreachable', async () => {
+  it('fails fast when the box has no systemd user manager at all', async () => {
     const { deps, err, written } = makeDeps({
       run: (command, args) =>
         command === 'systemctl' && args.includes('show-environment')
-          ? Promise.reject(new Error('Failed to connect to bus'))
+          ? Promise.reject(new Error('spawn systemctl ENOENT'))
           : Promise.resolve({ stdout: '' }),
     });
 
     await expect(runServiceInstall(deps)).resolves.toBe(1);
     expect(err.join('\n')).toContain('run `orc` under your own supervisor');
+    expect(written).toHaveLength(0);
+  });
+
+  // Issue #91: same preflight, opposite fix. This box HAS systemd; the shell
+  // (SSH/Orca, no XDG_RUNTIME_DIR) just cannot reach its user bus — so it must
+  // get the doctor's one-liner, never "go find another supervisor".
+  it('tells an unreachable user bus to export XDG_RUNTIME_DIR instead of blaming systemd', async () => {
+    const { deps, err, written } = makeDeps({
+      run: (command, args) =>
+        command === 'systemctl' && args.includes('show-environment')
+          ? Promise.reject(
+              Object.assign(new Error('exit 1'), { stderr: 'Failed to connect to bus: No medium found\n' }),
+            )
+          : Promise.resolve({ stdout: '' }),
+    });
+
+    await expect(runServiceInstall(deps)).resolves.toBe(1);
+    expect(err.join('\n')).toContain('export XDG_RUNTIME_DIR=/run/user/1000');
+    expect(err.join('\n')).toContain('re-run `orc service install`');
+    expect(err.join('\n')).not.toContain('your own supervisor');
     expect(written).toHaveLength(0);
   });
 

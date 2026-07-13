@@ -7,7 +7,7 @@ import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { probeOrca } from '../kernel/orca-health.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
-import { unitActiveState, userBusUnreachable } from '../kernel/systemd.ts';
+import { unitActiveState, userBusFixLine, userBusUnreachable } from '../kernel/systemd.ts';
 import { dashboardUnitPath, systemdUnitPath } from './service.ts';
 import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
@@ -137,7 +137,7 @@ function checkEnv(deps: DoctorDeps): DoctorCheck {
 function busUnreachableDetail(deps: DoctorDeps, unitPath: string): string {
   return (
     `unit file present (${unitPath}) but cannot reach the user service manager — ` +
-    `export XDG_RUNTIME_DIR=/run/user/${deps.uid} (or run from a login shell)`
+    `${userBusFixLine(deps.uid)}`
   );
 }
 

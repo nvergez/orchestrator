@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeExecFileRunner, type CommandRunner } from '../kernel/orca.ts';
+import { probeUserBus, userBusFixLine } from '../kernel/systemd.ts';
 import { readPackageMeta } from './pkg.ts';
 import { systemdUnitPath } from './service.ts';
 
@@ -38,6 +40,8 @@ export interface UpdateDeps {
   isSymlink: (path: string) => boolean | null;
   fileExists: (path: string) => boolean;
   unitPath: string;
+  /** Names this user's runtime dir in the unreachable-bus fix line. */
+  uid: number;
   /** The running node — interpreter for the freshly installed entry point. */
   execPath: string;
 }
@@ -74,6 +78,7 @@ export function realUpdateDeps(): UpdateDeps {
     },
     fileExists: existsSync,
     unitPath: systemdUnitPath(),
+    uid: userInfo().uid,
     execPath: process.execPath,
   };
 }
@@ -151,6 +156,30 @@ export async function runUpdate(deps: UpdateDeps, opts: { yes: boolean }): Promi
     if (deps.releasesUrl !== undefined) deps.err(`  read the release notes first: ${deps.releasesUrl}`);
     deps.err('  then re-run as: orc update --yes');
     return 1;
+  }
+
+  // The update is one indivisible ritual (CONTEXT.md, "Update"), so the last
+  // thing that can refuse it must refuse BEFORE npm swaps the code (issue #91):
+  // a run that cannot reach the user bus regenerates no unit and restarts no
+  // service, and would otherwise leave the new version installed while the old
+  // one keeps running under stale units. Only the installed-unit case cares —
+  // a package-only update never touches systemd.
+  if (deps.fileExists(deps.unitPath)) {
+    const bus = await probeUserBus(deps.run);
+    if (bus === 'unreachable') {
+      deps.err(
+        `✖ cannot reach the systemd user bus from this shell — nothing was installed. ` +
+          `${userBusFixLine(deps.uid)}, then re-run \`orc update\``,
+      );
+      return 1;
+    }
+    if (bus === 'absent') {
+      deps.err(
+        `✖ systemd user manager unreachable — nothing was installed. ${deps.unitPath} exists ` +
+          'but cannot be regenerated or restarted from here; update under the supervisor that runs `orc`',
+      );
+      return 1;
+    }
   }
 
   deps.out(`updating ${deps.installedVersion} → ${latest}`);
