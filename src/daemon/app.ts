@@ -85,7 +85,7 @@ export function registerHandlers(
         await app.client.chat.postMessage({
           channel: decision.channelId,
           thread_ts: decision.threadTs,
-          text: refusalLine(guard.allowedUserIds),
+          text: refusalLine(),
         });
         return;
       case 'open':
