@@ -41,10 +41,29 @@ const makeDeps = (latest = '0.1.1'): Harness => {
     isSymlink: (path) => (path === INSTALL_DIR ? false : null),
     fileExists: () => true,
     unitPath: UNIT_PATH,
+    uid: 1000,
     execPath: '/usr/bin/node',
   };
   return { deps, out, err, calls };
 };
+
+/** Did the service actually get touched? The read-only bus probe does not count. */
+const restarted = (calls: string[][]): boolean =>
+  calls.some((call) => call[0] === 'systemctl' && call.includes('restart'));
+
+/**
+ * A runner whose `show-environment` preflight fails — with `stderr` for the
+ * unreachable-bus case, bare for the no-systemd case — and answers the npm
+ * probes normally, so the refusal is the only thing under test.
+ */
+const failShowEnvironment =
+  (calls: string[][], failure: { stderr?: string }): UpdateDeps['run'] =>
+  (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'npm' && args[0] === 'root') return Promise.resolve({ stdout: `${GLOBAL_ROOT}\n` });
+    if (command === 'npm' && args[0] === 'view') return Promise.resolve({ stdout: '0.1.1\n' });
+    return Promise.reject(Object.assign(new Error('systemctl failed'), failure));
+  };
 
 describe('runUpdate', () => {
   it('runs the whole ritual in order: view, install, NEW binary service install, restart', async () => {
@@ -53,6 +72,9 @@ describe('runUpdate', () => {
     expect(calls).toEqual([
       ['npm', 'root', '-g'],
       ['npm', 'view', PKG, 'dist-tags.latest'],
+      // Issue #91: the bus preflight comes BEFORE npm — a doomed ritual must
+      // refuse while the install is still untouched.
+      ['systemctl', '--user', 'show-environment'],
       ['npm', 'install', '-g', `${PKG}@0.1.1`],
       // ADR-0001: the freshly installed entry point regenerates the unit, not
       // the old in-memory code.
@@ -126,6 +148,39 @@ describe('runUpdate', () => {
     expect(out.at(-1)).toContain('restart your daemon by hand');
   });
 
+  // Issue #91: npm install -g used to run first, so an unreachable bus left the
+  // new version on disk while the OLD code kept running under stale units.
+  it('refuses an unreachable user bus BEFORE npm installs anything, with the export fix', async () => {
+    const { deps, err, calls } = makeDeps('0.1.1');
+    deps.run = failShowEnvironment(calls, {
+      stderr: 'Failed to connect to bus: No medium found\n',
+    });
+
+    await expect(runUpdate(deps, { yes: false })).resolves.toBe(1);
+    expect(err.join('\n')).toContain('export XDG_RUNTIME_DIR=/run/user/1000');
+    expect(err.join('\n')).toContain('nothing was installed');
+    expect(err.join('\n')).toContain('re-run `orc update`');
+    expect(calls.some((call) => call[1] === 'install')).toBe(false);
+    expect(calls.at(-1)).toEqual(['systemctl', '--user', 'show-environment']);
+  });
+
+  it('refuses before npm when the unit exists but systemd itself cannot be asked', async () => {
+    const { deps, err, calls } = makeDeps('0.1.1');
+    deps.run = failShowEnvironment(calls, {});
+
+    await expect(runUpdate(deps, { yes: false })).resolves.toBe(1);
+    expect(err.join('\n')).toContain('systemd user manager unreachable');
+    expect(err.join('\n')).toContain('nothing was installed');
+    expect(calls.some((call) => call[1] === 'install')).toBe(false);
+  });
+
+  it('never probes the bus for a package-only update — no unit, no systemd', async () => {
+    const { deps, calls } = makeDeps('0.1.1');
+    deps.fileExists = () => false;
+    await expect(runUpdate(deps, { yes: false })).resolves.toBe(0);
+    expect(calls.some((call) => call[0] === 'systemctl')).toBe(false);
+  });
+
   it('propagates an npm install failure without touching the service', async () => {
     const { deps, err, calls } = makeDeps('0.1.1');
     deps.runVisible = (command, args) => {
@@ -134,7 +189,8 @@ describe('runUpdate', () => {
     };
     await expect(runUpdate(deps, { yes: false })).resolves.toBe(7);
     expect(err[0]).toContain('nothing was restarted');
-    expect(calls.some((call) => call[0] === 'systemctl' || call[2] === 'service')).toBe(false);
+    expect(restarted(calls)).toBe(false);
+    expect(calls.some((call) => call[2] === 'service')).toBe(false);
   });
 
   it('propagates a failure of the new binary’s service install, skipping the restart', async () => {
@@ -145,14 +201,18 @@ describe('runUpdate', () => {
     };
     await expect(runUpdate(deps, { yes: false })).resolves.toBe(1);
     expect(err[0]).toContain('`orc service install` exited 1');
-    expect(calls.some((call) => call[0] === 'systemctl')).toBe(false);
+    expect(restarted(calls)).toBe(false);
   });
 
   it('fails loudly when the restart fails — the old code is still running', async () => {
     const { deps, err } = makeDeps('0.1.1');
     const run = deps.run;
+    // Only the restart fails: the preflight bus probe answers, so the ritual
+    // gets all the way to the step that leaves the old code running.
     deps.run = (command, args) =>
-      command === 'systemctl' ? Promise.reject(new Error('bus down')) : run(command, args);
+      command === 'systemctl' && args.includes('restart')
+        ? Promise.reject(new Error('bus down'))
+        : run(command, args);
     await expect(runUpdate(deps, { yes: false })).resolves.toBe(1);
     expect(err[0]).toContain('OLD code is still running');
   });

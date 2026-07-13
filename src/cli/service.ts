@@ -3,6 +3,7 @@ import { homedir, userInfo } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
+import { probeUserBus, userBusFixLine } from '../kernel/systemd.ts';
 import { readPackageMeta } from './pkg.ts';
 
 /**
@@ -137,6 +138,8 @@ export interface ServiceDeps {
   unitPath: string;
   dashboardUnitPath: string;
   username: string;
+  /** Names this user's runtime dir in the unreachable-bus fix line. */
+  uid: number;
   version: string;
   today: string;
 }
@@ -161,6 +164,7 @@ export function realServiceDeps(): ServiceDeps {
     unitPath: systemdUnitPath(),
     dashboardUnitPath: dashboardUnitPath(),
     username: userInfo().username,
+    uid: userInfo().uid,
     version: readPackageMeta().version,
     today: new Date().toISOString().slice(0, 10),
   };
@@ -169,9 +173,17 @@ export function realServiceDeps(): ServiceDeps {
 export async function runServiceInstall(deps: ServiceDeps): Promise<number> {
   // Preflight (issue #74): no systemd user manager → fail fast, nothing else
   // on this box can host the unit; a missing orca CLI → a unit born broken.
-  try {
-    await deps.run('systemctl', ['--user', 'show-environment']);
-  } catch {
+  // The bus probe distinguishes the two failures (issue #91) — an SSH or Orca
+  // shell without XDG_RUNTIME_DIR has systemd, it just cannot see it from here.
+  const bus = await probeUserBus(deps.run);
+  if (bus === 'unreachable') {
+    deps.err(
+      `✖ cannot reach the systemd user bus from this shell — ${userBusFixLine(deps.uid)}, ` +
+        'then re-run `orc service install`',
+    );
+    return 1;
+  }
+  if (bus === 'absent') {
     deps.err(
       '✖ systemd user manager unreachable — systemd user services are required; ' +
         'on other platforms run `orc` under your own supervisor',
