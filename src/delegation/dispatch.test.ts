@@ -111,6 +111,8 @@ const makeCoordinator = (
     surface?: FakeSurface;
     script?: Record<string, string | Error>;
     onDispatched?: (threadTs: string, channelId: string) => void;
+    /** The resolved mailbox worktree (ADR 0007); default: the daemon checkout. */
+    mailboxHome?: () => Promise<string>;
   } = {},
 ) => {
   const store = options.store ?? new DelegationStore(':memory:');
@@ -120,7 +122,7 @@ const makeCoordinator = (
     store,
     surface: new ThreadSurface({ surface, store, logger: createLogger('silent'), run: runner.run }),
     workerCap: options.workerCap ?? 3,
-    mailboxWorktreePath: DAEMON_WT,
+    mailboxHome: options.mailboxHome ?? (() => Promise.resolve(DAEMON_WT)),
     ...(options.onDispatched !== undefined && { onDispatched: options.onDispatched }),
     logger: createLogger('silent'),
     run: runner.run,
@@ -860,5 +862,53 @@ describe('prepare — every orchestration command originates from the mailbox (A
     expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
     expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
     expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(1);
+  });
+});
+
+describe('prepare — the mailbox home (ADR 0007)', () => {
+  const REPLY_CMD = 'orca orchestration reply --id msg_1 --body "go with 2" --json';
+
+  it('creates the mailbox in the resolved home, asked once and remembered by the resolver', async () => {
+    let asked = 0;
+    const { coordinator, runner } = makeCoordinator({
+      mailboxHome: () => {
+        asked += 1;
+        return Promise.resolve('/home/op/projects/webapp');
+      },
+    });
+
+    await expect(coordinator.prepare(THREAD, CHANNEL, REPLY_CMD)).resolves.toMatchObject({ action: 'proceed' });
+
+    expect(runner.calls).toContain(
+      `terminal create --worktree path:/home/op/projects/webapp --title slack-${CHANNEL}-${THREAD} --json`,
+    );
+    expect(asked).toBe(1);
+  });
+
+  it('no home → the ⚠️ line and a denial, no terminal created — the next mailbox asks again', async () => {
+    let attempts = 0;
+    const { coordinator, store, surface, runner } = makeCoordinator({
+      mailboxHome: () => {
+        attempts += 1;
+        return attempts === 1
+          ? Promise.reject(new Error('no Orca worktree to host the thread mailboxes: /home/op is not one'))
+          : Promise.resolve(DAEMON_WT);
+      },
+    });
+
+    const denied = await coordinator.prepare(THREAD, CHANNEL, REPLY_CMD);
+
+    expect(denied).toMatchObject({ action: 'deny' });
+    expect((denied as { message: string }).message).toContain('Orca runtime unavailable');
+    expect(surface.posts.map((post) => post.text)).toEqual([
+      '⚠️ Orca runtime unavailable — the thread mailbox terminal could not be reached, so the command did not run.',
+    ]);
+    expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(0);
+    expect(store.getMailbox(THREAD, CHANNEL)).toBeUndefined();
+
+    // The resolver is asked again on the next mailbox — a fixed config or a
+    // runtime back up gets through without a daemon restart.
+    await expect(coordinator.prepare(THREAD, CHANNEL, REPLY_CMD)).resolves.toMatchObject({ action: 'proceed' });
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
   });
 });

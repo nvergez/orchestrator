@@ -89,6 +89,8 @@ The brief travels via **`dispatch --inject`** (never `--prompt` at create time �
 
 **Every `orca orchestration` command originates from the thread mailbox** ([ADR 0006](adr/0006-orchestration-commands-originate-from-the-thread-mailbox.md)). Since Orca 1.4.198 the runtime refuses a sender-less orchestration command and files tasks under the Run bound to the sender, so the daemon appends `--from <mailbox>` to each one the session runs — `task-create`, `dispatch`, `reply`, the read-only inspections alike — and denies a session-chosen `--from`. The mailbox carries one Orca Run, bound once per handle (`run-create --from <mailbox>`), remembered beside the handle, and re-bound to a recreated handle (`run-use`) so workers still in flight keep reporting into the same inbox. A mailbox from before Runs gets one bound on its next use. `check --ack` stays the daemon's alone.
 
+**Where the mailboxes live** ([ADR 0007](adr/0007-mailbox-home-is-a-resolved-orca-worktree.md)): a mailbox is an Orca terminal, so it needs an Orca worktree that always exists and never gets archived with a delegation. The packaged daemon runs from no checkout (its unit sets no `WorkingDirectory`), so the home is resolved lazily at the first mailbox, strongest first: `ORCHESTRATOR_MAILBOX_WORKTREE` when set (a value Orca does not list is a configuration error, never replaced), else the daemon's cwd when it is an Orca worktree (the checkout-run dev instance), else the default repo's registered checkout. A success is remembered for the daemon's lifetime; a failure surfaces as the ⚠️ line and is asked again at the next mailbox. `orc doctor` reports the resolved home.
+
 **Fixed briefs** live in code and are rendered into the coordinator's prompt. It copies the matching skeleton and fills in the request, a digest of thread context, the Slack permalink, and a relevant earlier answer verbatim for a follow-up Change. The permalink is built from the workspace URL returned by Slack `auth.test` and the thread's channel/timestamp.
 
 - **Question** ([ADR 0005](adr/0005-questions-are-answered-by-a-throwaway-worker.md)): fresh worktree, answer from code, change nothing — no file edits, commits, pushes or PRs. Use `/diagnosing-bugs` when available for failure diagnosis. Write Slack mrkdwn without Markdown headers, identify what could not be verified, and offer “Reply *do it* and I'll open a PR” when a fix is evident.
@@ -179,6 +181,7 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runboo
 | `CLAUDE_CODE_OAUTH_TOKEN` | daemon auth, from `claude setup-token` (#6) |
 | `LOG_LEVEL` | pino level, default `info` (#6) |
 | `ORCHESTRATOR_DB_PATH` | optional SQLite override (#6) |
+| `ORCHESTRATOR_MAILBOX_WORKTREE` | optional absolute path of the Orca worktree hosting the thread mailbox terminals (ADR 0007); unset resolves to the cwd when it is a worktree, else the default repo's checkout |
 | *(cap & threshold vars)* | live-session cap (default 5, #5); cost warning thresholds (default 5, 10 USD, #8); warmth TTL (default 30 min, #5) |
 
 ## 12. Known v1 limitations (accepted)

@@ -113,6 +113,17 @@ describe('loadConfig', () => {
     expect(config.dbPath).toBe('/var/tmp/test-orchestrator.db');
   });
 
+  it('honors ORCHESTRATOR_MAILBOX_WORKTREE as an absolute path, and leaves it unset otherwise (ADR 0007)', () => {
+    expect(loadConfig({ ...validEnv, ORCHESTRATOR_MAILBOX_WORKTREE: '/home/op/projects/orchestrator' }).mailboxWorktreePath).toBe(
+      '/home/op/projects/orchestrator',
+    );
+    expect(loadConfig(validEnv).mailboxWorktreePath).toBeUndefined();
+    expect(loadConfig({ ...validEnv, ORCHESTRATOR_MAILBOX_WORKTREE: '  ' }).mailboxWorktreePath).toBeUndefined();
+    expect(() => loadConfig({ ...validEnv, ORCHESTRATOR_MAILBOX_WORKTREE: 'projects/orchestrator' })).toThrow(
+      /ORCHESTRATOR_MAILBOX_WORKTREE must be an absolute path/,
+    );
+  });
+
   it('defaults the DB under $XDG_STATE_HOME when set (issue #70)', () => {
     const config = loadConfig({ ...validEnv, XDG_STATE_HOME: '/srv/state' });
 

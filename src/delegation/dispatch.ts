@@ -72,8 +72,10 @@ export interface DelegationCoordinatorOptions {
   surface: ThreadSurface;
   /** Global cap on concurrent workers (spec §5) — env `WORKER_CAP`. */
   workerCap: number;
-  /** The Orca worktree the mailbox terminals live in — the daemon's own checkout. */
-  mailboxWorktreePath: string;
+  /** Where the mailbox terminals are created — the resolved Orca worktree
+   * path (ADR 0007), asked lazily so a runtime that is down at boot, or a
+   * misconfigured home, surfaces at the first mailbox as the ⚠️ line. */
+  mailboxHome: () => Promise<string>;
   /** Fires after every ledgered dispatch — how the gate watcher arms (#20). */
   onDispatched?: (threadTs: string, channelId: string) => void;
   logger: Logger;
@@ -116,7 +118,7 @@ interface ThreadTracker {
 export class DelegationCoordinator implements DispatchPreparer, DispatchObserver {
   private readonly store: DelegationStore;
   private readonly surface: ThreadSurface;
-  private readonly mailboxWorktreePath: string;
+  private readonly mailboxHome: () => Promise<string>;
   private readonly onDispatched: (threadTs: string, channelId: string) => void;
   private readonly logger: Logger;
   private readonly run: CommandRunner;
@@ -128,7 +130,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
   constructor(options: DelegationCoordinatorOptions) {
     this.store = options.store;
     this.surface = options.surface;
-    this.mailboxWorktreePath = options.mailboxWorktreePath;
+    this.mailboxHome = options.mailboxHome;
     this.onDispatched = options.onDispatched ?? (() => undefined);
     this.logger = options.logger;
     this.run = options.run ?? execFileRunner;
@@ -345,7 +347,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
     const previousRun = this.store.getMailboxRun(threadTs, channelId);
     const handle = await createTerminal(this.run, {
-      worktreePath: this.mailboxWorktreePath,
+      worktreePath: await this.mailboxHome(),
       title: mailboxTitle(channelId, threadTs),
     });
     // Handle first, Run second: a bind that fails must find this very

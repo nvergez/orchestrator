@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { resolveDefaultDbPath } from './xdg.ts';
 
 /**
@@ -19,6 +20,10 @@ export interface Config {
   logLevel: string;
   /** SQLite home, `ORCHESTRATOR_DB_PATH` override (spec §9). */
   dbPath: string;
+  /** The Orca worktree hosting the thread mailbox terminals —
+   * `ORCHESTRATOR_MAILBOX_WORKTREE`, optional (ADR 0007: unset resolves to
+   * the daemon's cwd when it is a worktree, else the default repo's checkout). */
+  mailboxWorktreePath?: string;
   /** How long a finished-turn session keeps its live process (spec §3). */
   warmTtlMs: number;
   /** Per-session 💸 warning thresholds, ascending USD (spec §7: 5 then 10). */
@@ -212,6 +217,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     }
   }
 
+  const mailboxWorktreePath = env.ORCHESTRATOR_MAILBOX_WORKTREE?.trim();
+  if (mailboxWorktreePath !== undefined && mailboxWorktreePath !== '' && !isAbsolute(mailboxWorktreePath)) {
+    problems.push('ORCHESTRATOR_MAILBOX_WORKTREE must be an absolute path to a registered Orca worktree');
+  }
+
   const config: Config = {
     slackBotToken: required('SLACK_BOT_TOKEN', 'xoxb-'),
     slackAppToken: required('SLACK_APP_TOKEN', 'xapp-'),
@@ -220,6 +230,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     claudeCodeOauthToken: required('CLAUDE_CODE_OAUTH_TOKEN', 'sk-ant-'),
     logLevel: env.LOG_LEVEL ?? 'info',
     dbPath: env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(env),
+    ...(mailboxWorktreePath !== undefined && mailboxWorktreePath !== '' && { mailboxWorktreePath }),
     warmTtlMs: warmTtlMinutes * 60_000,
     costWarnThresholdsUsd,
     liveSessionCap,

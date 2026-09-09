@@ -182,7 +182,7 @@ const makeRuntime = (
         end: () => Promise.resolve(),
       });
     },
-    mailboxWorktreePath: DAEMON_WT,
+    mailboxHome: () => Promise.resolve(DAEMON_WT),
     logger: createLogger('silent'),
     run: runner.run,
     runCheck: runner.runCheck,

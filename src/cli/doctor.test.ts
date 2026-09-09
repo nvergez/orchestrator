@@ -21,12 +21,37 @@ const hint = (name: string): RepoHint => ({
   default: name === 'webapp',
 });
 
+const WEBAPP_CHECKOUT = '/home/op/projects/webapp';
+
 /** The orca CLI `repo list --json` success envelope, two repos. */
 const registryStdout = JSON.stringify({
   id: 'call-1',
   ok: true,
-  result: { repos: [{ id: 'u1', displayName: 'webapp' }, { id: 'u2', displayName: 'sandbox' }] },
+  result: {
+    repos: [
+      { id: 'u1', displayName: 'webapp', path: WEBAPP_CHECKOUT },
+      { id: 'u2', displayName: 'sandbox', path: '/home/op/projects/sandbox' },
+    ],
+  },
 });
+
+/** `worktree show --worktree path:<p>`: the registered checkouts resolve, anything else is `selector_not_found`. */
+const worktreeShow = (args: string[]): Promise<{ stdout: string }> => {
+  const path = (args[args.indexOf('--worktree') + 1] ?? '').replace(/^path:/, '');
+  if (path === WEBAPP_CHECKOUT || path === '/home/op/projects/sandbox') {
+    return Promise.resolve({ stdout: JSON.stringify({ id: 'w', ok: true, result: { worktree: { id: `u::${path}`, path } } }) });
+  }
+  return Promise.reject(
+    Object.assign(new Error('Command failed: orca worktree show'), {
+      code: 1,
+      stdout: JSON.stringify({ id: 'w', ok: false, error: { code: 'selector_not_found', message: 'selector_not_found' } }),
+    }),
+  );
+};
+
+/** The healthy orca runner: the registry, plus the worktree lookup behind the mailbox-home check. */
+const greenRunOrca: DoctorDeps['runOrca'] = (_command, args) =>
+  args[0] === 'worktree' && args[1] === 'show' ? worktreeShow(args) : Promise.resolve({ stdout: registryStdout });
 
 const ENV_FILE_PATH = '/home/op/.config/orchestrator/env';
 
@@ -62,7 +87,8 @@ const greenRunSystem: DoctorDeps['runSystem'] = (command, args) => {
 
 const greenDeps = (): DoctorDeps => ({
   env: { ...validEnv, XDG_CONFIG_HOME: '/home/op/.config' },
-  runOrca: () => Promise.resolve({ stdout: registryStdout }),
+  runOrca: greenRunOrca,
+  cwd: '/home/op',
   runSystem: greenRunSystem,
   nodeVersion: '22.18.0',
   enginesNode: '>=22.18',
@@ -90,12 +116,55 @@ describe('runDoctorChecks', () => {
       'state dir',
       'node',
       'orca',
+      'mailbox home',
       'service',
       'unit paths',
       'dashboard',
       'dashboard http',
       'linger',
     ]);
+  });
+
+  it('names the mailbox home — the default repo checkout when the cwd is no worktree (ADR 0007)', async () => {
+    const checks = await runDoctorChecks(greenDeps());
+    expect(checks.find((check) => check.label === 'mailbox home')).toEqual({
+      label: 'mailbox home',
+      ok: true,
+      detail: `${WEBAPP_CHECKOUT} (default repo "webapp" checkout)`,
+    });
+  });
+
+  it('prefers a checkout cwd, then an explicit ORCHESTRATOR_MAILBOX_WORKTREE — read from the env file too', async () => {
+    const fromCwd = greenDeps();
+    fromCwd.cwd = '/home/op/projects/sandbox';
+    expect((await runDoctorChecks(fromCwd)).find((check) => check.label === 'mailbox home')?.detail).toBe(
+      "/home/op/projects/sandbox (the daemon's working directory)",
+    );
+
+    const fromFile = greenDeps();
+    fromFile.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    fromFile.readFile = readFiles(() =>
+      envFileContent({ ...validEnv, ORCHESTRATOR_MAILBOX_WORKTREE: '/home/op/projects/sandbox' }),
+    );
+    const checks = await runDoctorChecks(fromFile);
+    expect(failures(checks)).toEqual([]);
+    expect(checks.find((check) => check.label === 'mailbox home')?.detail).toBe(
+      '/home/op/projects/sandbox (ORCHESTRATOR_MAILBOX_WORKTREE)',
+    );
+  });
+
+  it('fails the mailbox home when the configured worktree is unknown to Orca, or nothing hosts it', async () => {
+    const misconfigured = greenDeps();
+    misconfigured.env.ORCHESTRATOR_MAILBOX_WORKTREE = '/srv/nowhere';
+    const configuredChecks = await runDoctorChecks(misconfigured);
+    expect(failures(configuredChecks)).toEqual(['mailbox home']);
+    expect(configuredChecks.find((check) => check.label === 'mailbox home')?.detail).toContain('/srv/nowhere is not a worktree Orca lists');
+
+    const homeless = greenDeps();
+    homeless.loadHints = () => [];
+    const homelessChecks = await runDoctorChecks(homeless);
+    expect(homelessChecks.find((check) => check.label === 'mailbox home')).toMatchObject({ ok: false });
+    expect(homelessChecks.find((check) => check.label === 'mailbox home')?.detail).toContain('ORCHESTRATOR_MAILBOX_WORKTREE');
   });
 
   it('reports the repo count and the resolved hints path', async () => {
@@ -128,9 +197,9 @@ describe('runDoctorChecks', () => {
     });
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual([]);
-    // Consulted by the env fallback and again by the dashboard port probe —
-    // never anything but the canonical file.
-    expect(readPaths).toEqual([ENV_FILE_PATH, ENV_FILE_PATH]);
+    // Consulted by the env fallback, by the mailbox-home check and again by
+    // the dashboard port probe — never anything but the canonical file.
+    expect(readPaths).toEqual([ENV_FILE_PATH, ENV_FILE_PATH, ENV_FILE_PATH]);
     expect(checks.find((check) => check.label === 'env')?.detail).toBe(
       `required variables present with the right prefixes (from ${ENV_FILE_PATH})`,
     );
@@ -381,7 +450,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(10);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(11);
     expect(out.at(-1)).toBe('all checks passed');
   });
 

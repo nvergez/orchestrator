@@ -22,7 +22,9 @@ command of that thread is re-issued from, and the terminal the thread's
 Orca Run is bound to — the Run being the namespace its tasks live in and
 the inbox its workers report to. The handle and the Run are remembered in
 the delegation ledger; the gate watcher reads and acknowledges the Run's
-Deliveries there.
+Deliveries there. Its home — the Orca worktree the terminal is created in —
+is resolved at the first mailbox: the configured worktree, else a checkout
+cwd, else the default repo's checkout (ADR 0007).
 _Avoid_: coordinator terminal, sender, `--from` handle
 
 **Delegation ledger**:
