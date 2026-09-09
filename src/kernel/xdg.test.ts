@@ -5,6 +5,7 @@ import {
   resolveConfigDir,
   resolveDefaultDbPath,
   resolveEnvFilePath,
+  resolvePersonaPath,
   resolveRoutingHintsPath,
   resolveStateDir,
 } from './xdg.ts';
@@ -55,6 +56,16 @@ describe('resolveRoutingHintsPath', () => {
     expect(resolveRoutingHintsPath({})).toBe(
       join(homedir(), '.config', 'orchestrator', 'routing-hints.json'),
     );
+  });
+});
+
+describe('resolvePersonaPath', () => {
+  it('defaults to persona.md in the config dir, and honors the per-file override', () => {
+    expect(resolvePersonaPath({ XDG_CONFIG_HOME: '/srv/config' })).toBe(
+      '/srv/config/orchestrator/persona.md',
+    );
+    expect(resolvePersonaPath({})).toBe(join(homedir(), '.config', 'orchestrator', 'persona.md'));
+    expect(resolvePersonaPath({ ORCHESTRATOR_PERSONA_PATH: '/srv/voice.md' })).toBe('/srv/voice.md');
   });
 });
 

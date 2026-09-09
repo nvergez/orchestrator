@@ -56,14 +56,16 @@ sudo loginctl enable-linger $USER      # 6 — once
 ```
 
 1. Installs the daemon and the `orc` CLI.
-2. Creates `~/.config/orchestrator/` and scaffolds the two config files
-   (never overwrites existing ones).
+2. Creates `~/.config/orchestrator/` and scaffolds the config files — `env`,
+   `routing-hints.json` and the optional `persona.md` (never overwrites
+   existing ones).
 3. Fill in your tokens and Slack IDs in `env` (see
    [`docs/setup-slack.md`](docs/setup-slack.md)) and your delegable repos in
    `routing-hints.json`. Mark exactly one repo with `"default": true`; a
    single-repo file may omit the marker. `orc doctor` shows the Default repo.
-4. Checks the whole setup read-only — env vars, hints file, state dir, node
-   version, `orca` reachability. A non-zero exit means fix before continuing.
+4. Checks the whole setup read-only — env vars, hints file, persona, state
+   dir, node version, `orca` reachability. A non-zero exit means fix before
+   continuing.
 5. Generates and starts the systemd user unit `orchestrator.service`.
 6. One-time, and the only step needing sudo: without linger, systemd stops
    your user services at logout and does not start them at boot — **required**
@@ -76,11 +78,26 @@ sudo loginctl enable-linger $USER      # 6 — once
 | `orc` | Run the daemon in the foreground (reads config from the environment) |
 | `orc dashboard` | Run the dashboard sidecar in the foreground — the read-only web view of live state |
 | `orc --version` | Print the version and exit |
-| `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json}` |
+| `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json,persona.md}` |
 | `orc doctor` | Read-only diagnosis of the whole setup; non-zero exit on any failure |
 | `orc update` | Update to the latest release — install, unit regeneration and restart, as one step |
 | `orc service install` | Generate, enable and start both systemd user units (re-run after node upgrades) |
 | `orc service uninstall` | Stop, disable and remove both systemd user units |
+
+## Its voice
+
+`~/.config/orchestrator/persona.md` (optional, scaffolded by `orc init`,
+`ORCHESTRATOR_PERSONA_PATH` overrides the location) is free prose telling the
+bot how to sound — tone, language, pet peeves. It is appended to the session's
+system prompt, so keep it to the rules that matter: every line rides in every
+turn of every thread. HTML comments are stripped, so the untouched scaffold
+means "stock voice"; see [`persona.example.md`](persona.example.md).
+
+It shapes the bot's own words only. The fixed protocol lines (the dispatch ack,
+gate and stall acks, delegation cards) and anything relayed to a worker stay
+untouched — a human's answer always reaches the worker verbatim. The system
+prompt is fixed when a session's process starts, so restart the daemon after
+editing: `systemctl --user restart orchestrator`.
 
 ## Updating
 

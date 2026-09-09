@@ -3,9 +3,10 @@ import { isAbsolute, join } from 'node:path';
 
 /**
  * XDG base-directory resolution (issue #70): the config dir homes the
- * per-instance files (routing-hints.json, the systemd env file), the state
- * dir homes the SQLite DB. Env vars stay the only boot-config channel —
- * these helpers only decide WHERE the instance files live.
+ * per-instance files (routing-hints.json, persona.md, the systemd env
+ * file), the state dir homes the SQLite DB. Env vars stay the only
+ * boot-config channel — these helpers only decide WHERE the instance
+ * files live.
  */
 
 /** Per the XDG spec, a relative or empty base var must be ignored. */
@@ -31,6 +32,15 @@ export function resolveStateDir(env: Record<string, string | undefined>): string
  */
 export function resolveRoutingHintsPath(env: Record<string, string | undefined>): string {
   return env.ORCHESTRATOR_ROUTING_HINTS_PATH ?? join(resolveConfigDir(env), 'routing-hints.json');
+}
+
+/**
+ * Where the operator's voice file lives: the `ORCHESTRATOR_PERSONA_PATH`
+ * per-file override wins, else the XDG config dir. Unlike the hints, the
+ * file is optional — persona.ts treats a missing one as "stock voice".
+ */
+export function resolvePersonaPath(env: Record<string, string | undefined>): string {
+  return env.ORCHESTRATOR_PERSONA_PATH ?? join(resolveConfigDir(env), 'persona.md');
 }
 
 /**
