@@ -7,6 +7,7 @@ import {
   resolveEnvFilePath,
   resolvePersonaPath,
   resolveRoutingHintsPath,
+  resolveWorkerPersonaPath,
   resolveStateDir,
 } from './xdg.ts';
 
@@ -66,6 +67,17 @@ describe('resolvePersonaPath', () => {
     );
     expect(resolvePersonaPath({})).toBe(join(homedir(), '.config', 'orchestrator', 'persona.md'));
     expect(resolvePersonaPath({ ORCHESTRATOR_PERSONA_PATH: '/srv/voice.md' })).toBe('/srv/voice.md');
+  });
+});
+
+describe('resolveWorkerPersonaPath', () => {
+  it('defaults to persona-workers.md in the config dir, and honors the override', () => {
+    expect(resolveWorkerPersonaPath({ XDG_CONFIG_HOME: '/srv/config' })).toBe(
+      '/srv/config/orchestrator/persona-workers.md',
+    );
+    expect(resolveWorkerPersonaPath({ ORCHESTRATOR_WORKER_PERSONA_PATH: '/srv/wv.md' })).toBe(
+      '/srv/wv.md',
+    );
   });
 });
 

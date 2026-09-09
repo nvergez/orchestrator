@@ -13,9 +13,9 @@ import { serviceCollision } from './collision.ts';
 import { buildRuntime } from './runtime.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
 import { loadRoutingHints } from '../kernel/routing.ts';
-import { loadPersona } from '../kernel/persona.ts';
+import { loadPersona, WORKER_PERSONA_MAX_CHARS } from '../kernel/persona.ts';
 import { mailboxHomeResolver } from '../kernel/mailbox-home.ts';
-import { resolvePersonaPath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
+import { resolvePersonaPath, resolveRoutingHintsPath, resolveWorkerPersonaPath } from '../kernel/xdg.ts';
 
 /**
  * The daemon boot — what bare `orc` runs (the CLI dispatch lives in cli.ts).
@@ -75,6 +75,17 @@ export async function runDaemon(): Promise<void> {
       logger.info({ path: personaPath, chars: persona.length }, 'persona loaded — the session voice');
     }
 
+    // The worker register (persona-workers.md): the same voice, trimmed, for
+    // the prose a worker writes and the daemon posts verbatim (ADR 0005).
+    const workerPersonaPath = resolveWorkerPersonaPath(process.env);
+    const workerPersona = loadPersona(workerPersonaPath, WORKER_PERSONA_MAX_CHARS);
+    if (workerPersona !== undefined) {
+      logger.info(
+        { path: workerPersonaPath, chars: workerPersona.length },
+        'worker persona loaded — the register in every brief',
+      );
+    }
+
     const app = new App({
       token: config.slackBotToken,
       appToken: config.slackAppToken,
@@ -131,6 +142,7 @@ export async function runDaemon(): Promise<void> {
       slackScopes: auth.response_metadata?.scopes,
       hints,
       ...(persona !== undefined && { persona }),
+      ...(workerPersona !== undefined && { workerPersona }),
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
       // Mailbox terminals need an Orca worktree that always exists and never

@@ -78,7 +78,7 @@ sudo loginctl enable-linger $USER      # 6 — once
 | `orc` | Run the daemon in the foreground (reads config from the environment) |
 | `orc dashboard` | Run the dashboard sidecar in the foreground — the read-only web view of live state |
 | `orc --version` | Print the version and exit |
-| `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json,persona.md}` |
+| `orc init` | Scaffold `~/.config/orchestrator/{env,routing-hints.json,persona.md,persona-workers.md}` |
 | `orc doctor` | Read-only diagnosis of the whole setup; non-zero exit on any failure |
 | `orc update` | Update to the latest release — install, unit regeneration and restart, as one step |
 | `orc service install` | Generate, enable and start both systemd user units (re-run after node upgrades) |
@@ -98,6 +98,14 @@ gate and stall acks, delegation cards) and anything relayed to a worker stay
 untouched — a human's answer always reaches the worker verbatim. The system
 prompt is fixed when a session's process starts, so restart the daemon after
 editing: `systemctl --user restart orchestrator`.
+
+Most of what you read in a thread, though, is not the bot's prose: a Question's
+answer is the **worker's** text, posted verbatim. `persona-workers.md`
+(optional, 2 000 characters, `ORCHESTRATOR_WORKER_PERSONA_PATH`) is the register
+inlined in every brief, so workers write their answers, questions and reports
+in your register too. Keep it blunt — it must land the same way on `claude` and
+`codex`, and it is tone only: an answer still owes you its paths, its numbers
+and what it could not verify.
 
 ## Updating
 

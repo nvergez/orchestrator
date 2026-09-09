@@ -3,8 +3,8 @@ import { isAbsolute, join } from 'node:path';
 
 /**
  * XDG base-directory resolution (issue #70): the config dir homes the
- * per-instance files (routing-hints.json, persona.md, the systemd env
- * file), the state dir homes the SQLite DB. Env vars stay the only
+ * per-instance files (routing-hints.json, the two persona files, the
+ * systemd env file), the state dir homes the SQLite DB. Env vars stay the only
  * boot-config channel — these helpers only decide WHERE the instance
  * files live.
  */
@@ -41,6 +41,14 @@ export function resolveRoutingHintsPath(env: Record<string, string | undefined>)
  */
 export function resolvePersonaPath(env: Record<string, string | undefined>): string {
   return env.ORCHESTRATOR_PERSONA_PATH ?? join(resolveConfigDir(env), 'persona.md');
+}
+
+/**
+ * Its worker-facing counterpart, the register copied into every brief —
+ * same rules, its own file so it can stay short (persona.ts).
+ */
+export function resolveWorkerPersonaPath(env: Record<string, string | undefined>): string {
+  return env.ORCHESTRATOR_WORKER_PERSONA_PATH ?? join(resolveConfigDir(env), 'persona-workers.md');
 }
 
 /**

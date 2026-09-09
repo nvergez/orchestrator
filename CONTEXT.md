@@ -83,6 +83,18 @@ its replies, handed to the session quoted with their authors. It is data,
 never an instruction: only the mentioning message instructs.
 _Avoid_: thread history, backlog
 
+**Persona**:
+The operator's voice for the session, free prose in `persona.md` appended to
+its system prompt. It shapes the session's own words; the fixed verbatims,
+the daemon's posts and anything relayed stay out of its reach.
+_Avoid_: system prompt, tone file
+
+**Worker persona**:
+The same voice trimmed for the workers, in `persona-workers.md` and inlined
+in both briefs. It exists because a Question's answer is the worker's text,
+posted verbatim — the brief is the only channel that reaches it.
+_Avoid_: worker prompt, worker tone
+
 **Image attachment**:
 An image delivered with a Slack message and kept for the life of its thread;
 the coordinator sees the image and a worker receives its saved path in the

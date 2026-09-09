@@ -4,8 +4,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseRoutingHints } from '../kernel/routing.ts';
-import { loadPersona } from '../kernel/persona.ts';
-import { ENV_TEMPLATE, PERSONA_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
+import { loadPersona, WORKER_PERSONA_MAX_CHARS } from '../kernel/persona.ts';
+import {
+  ENV_TEMPLATE,
+  PERSONA_TEMPLATE,
+  ROUTING_HINTS_TEMPLATE,
+  WORKER_PERSONA_TEMPLATE,
+} from './templates.ts';
 
 describe('ROUTING_HINTS_TEMPLATE', () => {
   it('parses under the strict hints schema — init must scaffold a bootable file', () => {
@@ -74,3 +79,27 @@ describe('PERSONA_TEMPLATE', () => {
     expect(example).toBe(PERSONA_TEMPLATE);
   });
 });
+
+describe('WORKER_PERSONA_TEMPLATE', () => {
+  it('is entirely commentary, and fits the worker cap once written', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'orc-worker-tpl-')), 'persona-workers.md');
+    writeFileSync(path, WORKER_PERSONA_TEMPLATE);
+    expect(loadPersona(path, WORKER_PERSONA_MAX_CHARS)).toBeUndefined();
+    expect(WORKER_PERSONA_TEMPLATE.length).toBeLessThan(WORKER_PERSONA_MAX_CHARS);
+    rmSync(dirname(path), { recursive: true, force: true });
+  });
+
+  it('says why the second file exists and what it must not cost the answer', () => {
+    expect(WORKER_PERSONA_TEMPLATE).toMatch(/verbatim/);
+    expect(WORKER_PERSONA_TEMPLATE).toMatch(/could not verify/);
+  });
+
+  it('is byte-identical to the shipped persona-workers.example.md browsing aid', () => {
+    const example = readFileSync(
+      fileURLToPath(new URL('../../persona-workers.example.md', import.meta.url)),
+      'utf8',
+    );
+    expect(example).toBe(WORKER_PERSONA_TEMPLATE);
+  });
+});
+
