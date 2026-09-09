@@ -5,6 +5,7 @@ import { ConfigError, loadConfig, resolveDashboardAddress } from '../kernel/conf
 import { parseEnvFile } from '../kernel/env-file.ts';
 import { execFileRunner, type CommandRunner } from '../kernel/orca.ts';
 import { probeOrca } from '../kernel/orca-health.ts';
+import { describeMailboxHome, MailboxHomeError, resolveMailboxHome } from '../kernel/mailbox-home.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 import { unitActiveState, userBusFixLine, userBusUnreachable } from '../kernel/systemd.ts';
@@ -30,6 +31,8 @@ export interface DoctorDeps {
   env: Record<string, string | undefined>;
   /** The orca probe's runner — doctor reuses the boot healthcheck. */
   runOrca: CommandRunner;
+  /** The daemon's working directory — a mailbox-home candidate (ADR 0007). */
+  cwd: string;
   /** systemctl / loginctl runner for the unit + linger checks. */
   runSystem: CommandRunner;
   nodeVersion: string;
@@ -51,6 +54,7 @@ export function realDoctorDeps(): DoctorDeps {
   return {
     env: process.env,
     runOrca: execFileRunner,
+    cwd: process.cwd(),
     runSystem: execFileRunner,
     nodeVersion: process.versions.node,
     enginesNode: readPackageMeta().enginesNode,
@@ -133,6 +137,43 @@ function checkEnv(deps: DoctorDeps): DoctorCheck {
   }
 }
 
+/**
+ * Where the thread mailboxes would be created (ADR 0007) — the same
+ * resolution the daemon runs at its first mailbox, so a packaged install
+ * whose cwd is no checkout learns here, not at the first delegation, that
+ * its default repo's checkout hosts them (or that nothing does).
+ * `ORCHESTRATOR_MAILBOX_WORKTREE` is read like the env check reads: from
+ * process.env, else from the canonical env file.
+ */
+async function checkMailboxHome(deps: DoctorDeps, hints: RepoHint[]): Promise<DoctorCheck> {
+  const configured = deps.env.ORCHESTRATOR_MAILBOX_WORKTREE ?? envFileValue(deps, 'ORCHESTRATOR_MAILBOX_WORKTREE');
+  const defaultRepo = hints.find((hint) => hint.default)?.name;
+  try {
+    const home = await resolveMailboxHome(deps.runOrca, {
+      ...(configured !== undefined && configured !== '' && { configured }),
+      cwd: deps.cwd,
+      ...(defaultRepo !== undefined && { defaultRepo }),
+    });
+    return { label: 'mailbox home', ok: true, detail: describeMailboxHome(home) };
+  } catch (error) {
+    if (error instanceof MailboxHomeError) return { label: 'mailbox home', ok: false, detail: error.message };
+    return {
+      label: 'mailbox home',
+      ok: false,
+      detail: `could not ask Orca for the mailbox worktree — ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+/** One variable off the canonical env file, undefined when the file is absent. */
+function envFileValue(deps: DoctorDeps, key: string): string | undefined {
+  try {
+    return parseEnvFile(deps.readFile(resolveEnvFilePath(deps.env)))[key];
+  } catch {
+    return undefined;
+  }
+}
+
 /** What both unit checks say when systemd itself could not be asked. */
 function busUnreachableDetail(deps: DoctorDeps, unitPath: string): string {
   return (
@@ -204,8 +245,9 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
   checks.push(checkEnv(deps));
 
   const hintsPath = resolveRoutingHintsPath(deps.env);
+  let hints: RepoHint[] | undefined;
   try {
-    const hints = deps.loadHints(hintsPath);
+    hints = deps.loadHints(hintsPath);
     checks.push({
       label: 'routing hints',
       ok: true,
@@ -243,6 +285,10 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
       ? { label: 'orca', ok: true, detail: `runtime reachable — ${report.repoCount} registered repo${report.repoCount === 1 ? '' : 's'}` }
       : { label: 'orca', ok: false, detail: report.reason },
   );
+  // Only askable while Orca answers and the hints loaded — an unreachable
+  // runtime or a broken hints file is already the failure above, not a
+  // second one about the mailbox home.
+  if (report.status === 'reachable' && hints !== undefined) checks.push(await checkMailboxHome(deps, hints));
 
   // #74 addendum: unit, dashboard + linger are failures ONLY once installed.
   if (!deps.fileExists(deps.unitPath)) {

@@ -51,6 +51,11 @@ CLAUDE_CODE_OAUTH_TOKEN=
 # Optional: pino log level (default: info)
 #LOG_LEVEL=info
 
+# Optional: the Orca worktree the per-thread mailbox terminals are created
+# in (an absolute path Orca lists). Unset, the daemon uses its working
+# directory when that is an Orca worktree, else the default repo's checkout.
+#ORCHESTRATOR_MAILBOX_WORKTREE=
+
 # Optional: where the dashboard sidecar listens (defaults shown). Localhost
 # is the security boundary — expose it beyond the machine your own way
 # (Tailscale, SSH tunnel); the project ships no auth.

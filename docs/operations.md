@@ -186,6 +186,7 @@ all the systemd unit does.
 | `$XDG_STATE_HOME/orchestrator/orchestrator.db` | SQLite state (sessions, delegations, pending gates); defaults to `~/.local/state/…` |
 | `ORCHESTRATOR_ROUTING_HINTS_PATH` | Env override for the hints file location (tests, nonstandard setups) |
 | `ORCHESTRATOR_DB_PATH` | Env override for the database location |
+| `ORCHESTRATOR_MAILBOX_WORKTREE` | Absolute path of the Orca worktree the per-thread mailbox terminals are created in; unset, the daemon uses its cwd when that is a worktree, else the default repo's checkout — `orc doctor` shows which |
 | `DASHBOARD_PORT` | Dashboard sidecar port, default `8787` |
 | `DASHBOARD_BIND` | Dashboard bind address, default `127.0.0.1` — widening it is your exposure decision |
 | `LOG_LEVEL` | pino log level, default `info` |

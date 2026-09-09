@@ -52,10 +52,10 @@ export interface RuntimeOptions {
   /** Builds the per-thread session-process factory over the wired seams —
    * the SDK adapter in production (claude.ts), a scripted fake in tests. */
   createProcesses: (seams: ProcessSeams) => ProcessFactory;
-  /** The Orca worktree the mailbox terminals live in — the daemon's own
-   * checkout, the one worktree that always exists and never gets archived
-   * with a delegation. */
-  mailboxWorktreePath: string;
+  /** Where the thread mailbox terminals are created (ADR 0007): the
+   * resolved Orca worktree path — one that always exists and never gets
+   * archived with a delegation — asked lazily at the first mailbox. */
+  mailboxHome: () => Promise<string>;
   logger: Logger;
   /** Injectable for tests; defaults to the real orca CLI. */
   run?: CommandRunner;
@@ -127,7 +127,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     store: delegationStore,
     surface,
     workerCap: config.workerCap,
-    mailboxWorktreePath: options.mailboxWorktreePath,
+    mailboxHome: options.mailboxHome,
     // Evaluated at dispatch time, long after the watcher below exists.
     onDispatched: (threadTs, channelId) => {
       watcher.arm(threadTs, channelId);

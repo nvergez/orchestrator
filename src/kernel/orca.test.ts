@@ -3,6 +3,7 @@ import { createLogger } from './logger.ts';
 import {
   bindRun,
   createRun,
+  isOrcaWorktree,
   listOrchestrationTasks,
   listRegistryRepos,
   listWorktreeActivity,
@@ -34,11 +35,11 @@ const succeedWith =
     Promise.resolve({ stdout });
 
 describe('listRegistryRepos', () => {
-  it('maps the envelope to id/name pairs', async () => {
+  it('maps the envelope to id/name pairs, with the checkout path when present', async () => {
     const repos = await listRegistryRepos(
-      succeedWith(registryJson([{ id: 'u1', displayName: 'webapp', path: '/p' }])),
+      succeedWith(registryJson([{ id: 'u1', displayName: 'webapp', path: '/p' }, { id: 'u2', displayName: 'bare' }])),
     );
-    expect(repos).toEqual([{ id: 'u1', name: 'webapp' }]);
+    expect(repos).toEqual([{ id: 'u1', name: 'webapp', path: '/p' }, { id: 'u2', name: 'bare' }]);
   });
 
   it('throws on an ok:false or shapeless envelope', async () => {
@@ -392,5 +393,29 @@ describe('createRun / bindRun (ADR 0006)', () => {
     const refused = succeedWith(JSON.stringify({ id: 'c', ok: false, error: { code: 'run_required' } }));
     await expect(createRun(refused, { from: 'term_mb1', objective: 'x' })).rejects.toThrow(/run-create/);
     await expect(bindRun(refused, { from: 'term_mb1', runId: 'run_x' })).rejects.toThrow(/run-use/);
+  });
+});
+
+describe('isOrcaWorktree (ADR 0007)', () => {
+  it('asks `worktree show` by path and reads a hit', async () => {
+    const { run, calls } = recording(
+      JSON.stringify({ id: 'w', ok: true, result: { worktree: { id: 'u::/home/op/projects/webapp', path: '/home/op/projects/webapp' } } }),
+    );
+    await expect(isOrcaWorktree(run, '/home/op/projects/webapp')).resolves.toBe(true);
+    expect(calls).toEqual([['worktree', 'show', '--worktree', 'path:/home/op/projects/webapp', '--json']]);
+  });
+
+  it("reads the runtime's selector_not_found refusal as false, and lets any other failure throw", async () => {
+    const refused: CommandRunner = () =>
+      Promise.reject(
+        Object.assign(new Error('Command failed'), {
+          stdout: JSON.stringify({ id: 'w', ok: false, error: { code: 'selector_not_found', message: 'selector_not_found' } }),
+        }),
+      );
+    await expect(isOrcaWorktree(refused, '/home/op')).resolves.toBe(false);
+    const down: CommandRunner = () => Promise.reject(new Error('connect ECONNREFUSED'));
+    await expect(isOrcaWorktree(down, '/home/op')).rejects.toThrow(/ECONNREFUSED/);
+    // A success envelope without a worktree is not a hit either.
+    await expect(isOrcaWorktree(succeedWith(JSON.stringify({ ok: true, result: {} })), '/x')).resolves.toBe(false);
   });
 });

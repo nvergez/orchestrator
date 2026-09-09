@@ -11,6 +11,7 @@ import { serviceCollision } from './collision.ts';
 import { buildRuntime } from './runtime.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
 import { loadRoutingHints } from '../kernel/routing.ts';
+import { mailboxHomeResolver } from '../kernel/mailbox-home.ts';
 import { resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
 /**
@@ -116,9 +117,20 @@ export async function runDaemon(): Promise<void> {
       hints,
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
-      // Mailbox terminals live in the daemon's own checkout — the one worktree
-      // that always exists and never gets archived with a delegation.
-      mailboxWorktreePath: process.cwd(),
+      // Mailbox terminals need an Orca worktree that always exists and never
+      // gets archived with a delegation (ADR 0007): the configured one, else
+      // the cwd when it is a checkout, else the default repo's checkout.
+      mailboxHome: mailboxHomeResolver(
+        execFileRunner,
+        {
+          ...(config.mailboxWorktreePath !== undefined && { configured: config.mailboxWorktreePath }),
+          cwd: process.cwd(),
+          ...(hints.find((hint) => hint.default) !== undefined && {
+            defaultRepo: hints.find((hint) => hint.default)!.name,
+          }),
+        },
+        logger,
+      ),
       logger,
     });
     await runtime.boot();

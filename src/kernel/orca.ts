@@ -35,6 +35,9 @@ export interface RegistryRepo {
   name: string;
   /** `github.com/<owner>/<repo>` — absent on folder repos with no remote. */
   canonicalKey?: string;
+  /** The repo's main checkout (or the folder itself) — itself an Orca
+   * worktree, the fallback home for the thread mailboxes (ADR 0007). */
+  path?: string;
 }
 
 /**
@@ -69,6 +72,40 @@ export function parseOrcaErrorMessage(stdout: string): string | null {
     // fall through to null
   }
   return null;
+}
+
+/** The error's stable `code` iff `ok` is false (`selector_not_found`…), null otherwise. */
+export function parseOrcaErrorCode(stdout: string): string | null {
+  try {
+    const envelope = JSON.parse(stdout.trim()) as { ok?: unknown; error?: { code?: unknown } };
+    if (envelope.ok === false && typeof envelope.error?.code === 'string') {
+      return envelope.error.code;
+    }
+  } catch {
+    // fall through to null
+  }
+  return null;
+}
+
+/**
+ * Whether Orca lists a worktree at this path — `worktree show --worktree
+ * path:<p>`: a hit resolves true, the runtime's `selector_not_found`
+ * refusal resolves false, anything else (Orca down) throws so the caller
+ * can tell "not a worktree" from "could not ask".
+ */
+export async function isOrcaWorktree(run: CommandRunner, path: string): Promise<boolean> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run('orca', ['worktree', 'show', '--worktree', `path:${path}`, '--json']));
+  } catch (error) {
+    const failedStdout = (error as { stdout?: unknown }).stdout;
+    if (typeof failedStdout === 'string' && parseOrcaErrorCode(failedStdout) === 'selector_not_found') {
+      return false;
+    }
+    throw error;
+  }
+  const worktree = parseOrcaEnvelope(stdout)?.worktree as { id?: unknown } | undefined;
+  return typeof worktree?.id === 'string';
 }
 
 /**
@@ -107,6 +144,7 @@ export async function listRegistryRepos(run: CommandRunner): Promise<RegistryRep
     const record = repo as {
       id?: unknown;
       displayName?: unknown;
+      path?: unknown;
       gitRemoteIdentity?: { canonicalKey?: unknown };
     };
     if (typeof record.id !== 'string' || typeof record.displayName !== 'string') return [];
@@ -116,6 +154,7 @@ export async function listRegistryRepos(run: CommandRunner): Promise<RegistryRep
         id: record.id,
         name: record.displayName,
         ...(typeof canonicalKey === 'string' && { canonicalKey }),
+        ...(typeof record.path === 'string' && record.path !== '' && { path: record.path }),
       },
     ];
   });
