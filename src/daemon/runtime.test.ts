@@ -167,6 +167,7 @@ const makeRuntime = (
     logger?: ReturnType<typeof createLogger>;
     slackScopes?: string[];
     persona?: string;
+    workerPersona?: string;
     stateDir?: string;
     downloadFile?: (url: string) => Promise<Uint8Array>;
     workerCap?: number;
@@ -187,6 +188,7 @@ const makeRuntime = (
     config: { ...CONFIG, dbPath: join(stateDir, 'orchestrator.db'), ...(opts.workerCap !== undefined && { workerCap: opts.workerCap }) },
     hints: HINTS,
     ...(opts.persona !== undefined && { persona: opts.persona }),
+    ...(opts.workerPersona !== undefined && { workerPersona: opts.workerPersona }),
     surface,
     slackScopes: opts.slackScopes ?? ['files:read'],
     ...(opts.downloadFile && { downloadFile: opts.downloadFile }),
@@ -381,7 +383,18 @@ describe('Slack image attachments — runtime composition', () => {
   });
 
   it('leaves the prompt untouched when no persona is configured', () => {
-    expect(makeRuntime().seams.systemPromptAppend).not.toContain('## Voice');
+    const { seams } = makeRuntime();
+    expect(seams.systemPromptAppend).not.toContain('## Voice');
+    expect(seams.systemPromptAppend).not.toContain('Register for everything you send to Slack');
+  });
+
+  it('carries the worker register into both briefs, not into the session voice', () => {
+    const { seams } = makeRuntime({ workerPersona: 'direct, minuscules, pas de recap' });
+    expect(seams.systemPromptAppend.match(/direct, minuscules, pas de recap/g)).toHaveLength(2);
+    expect(seams.systemPromptAppend.match(/Register for everything you send to Slack/g)).toHaveLength(2);
+    // The register shapes what a worker writes; the session's own voice is
+    // the other file, and an unconfigured persona must stay unconfigured.
+    expect(seams.systemPromptAppend).not.toContain('## Voice');
   });
 
   it.each([false, true])('sends the exact Claude user-message shape with images=%s', async (withImage) => {

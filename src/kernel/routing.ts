@@ -229,10 +229,11 @@ export class RepoAllowList {
 /**
  * The system-prompt block that anchors the session's routing (issue #18):
  * rules from spec §4, the hints enumerated verbatim, and the fixed thread
- * verbatims from the UX mock. The registry stays out on purpose — the session
+ * verbatims from the UX mock. `workerPersona` rides inside the briefs it
+ * renders — the only channel to a worker's Slack-bound prose (persona.ts). The registry stays out on purpose — the session
  * loads it live with `orca repo list --json` at routing time.
  */
-export function routingInstructions(hints: RepoHint[]): string {
+export function routingInstructions(hints: RepoHint[], workerPersona?: string): string {
   const hintLines = hints
     .map((hint) => {
       const agent = hint.defaultAgent ?? `${GLOBAL_DEFAULT_AGENT} (global default)`;
@@ -278,7 +279,7 @@ Precedence, strongest first:
 
 The only agents are \`claude\` and \`codex\`. No task-type heuristics — the precedence above decides.
 
-${requestInstructions()}
+${requestInstructions(workerPersona)}
 
 ## Delegation — the dispatch sequence (spec §5)
 

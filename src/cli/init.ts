@@ -1,6 +1,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ENV_TEMPLATE, PERSONA_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
+import {
+  ENV_TEMPLATE,
+  PERSONA_TEMPLATE,
+  ROUTING_HINTS_TEMPLATE,
+  WORKER_PERSONA_TEMPLATE,
+} from './templates.ts';
 import { resolveConfigDir } from '../kernel/xdg.ts';
 
 /**
@@ -21,17 +26,20 @@ export function runInit(env: Record<string, string | undefined>, io: InitIo): nu
   const hintsPath = join(dir, 'routing-hints.json');
   const envPath = join(dir, 'env');
   const personaPath = join(dir, 'persona.md');
+  const workerPersonaPath = join(dir, 'persona-workers.md');
   scaffold(hintsPath, ROUTING_HINTS_TEMPLATE, undefined, io);
   // chmod 600 — the env file will hold live tokens (spec: issue #70).
   scaffold(envPath, ENV_TEMPLATE, 0o600, io);
-  // Scaffolded fully commented: untouched, it leaves the stock voice.
+  // Scaffolded fully commented: untouched, they leave the stock voice.
   scaffold(personaPath, PERSONA_TEMPLATE, undefined, io);
+  scaffold(workerPersonaPath, WORKER_PERSONA_TEMPLATE, undefined, io);
 
   io.out('');
   io.out('Next steps:');
   io.out(`  1. Fill in your Slack + Claude tokens: ${envPath} (keep it chmod 600)`);
   io.out(`  2. Describe your repos: ${hintsPath}`);
   io.out(`  3. Optional — teach it your voice: ${personaPath}`);
+  io.out(`     …and the workers theirs: ${workerPersonaPath}`);
   io.out('  4. Check the install: orc doctor');
   io.out('  5. Run it under systemd: orc service install');
   return 0;

@@ -1,8 +1,9 @@
 /**
  * The `orc init` scaffold templates, embedded in the compiled code (issue
  * #70): no loose JSON or dotfiles in the tarball — `files: ['dist']` stands.
- * `routing-hints.example.json` and `persona.example.md` at the repo root are
- * browsing aids pinned to their templates by tests; edit them together.
+ * `routing-hints.example.json`, `persona.example.md` and
+ * `persona-workers.example.md` at the repo root are browsing aids pinned to
+ * their templates by tests; edit them together.
  */
 
 export const ROUTING_HINTS_TEMPLATE = `{
@@ -89,5 +90,31 @@ Example — delete the markers around it, or write your own:
 Write like a senior engineer in a hurry: lower-case, no filler, no
 "Great question!". French with the team, English for anything quoted from
 code or GitHub. Say what you did, not what you are about to do.
+-->
+`;
+
+/**
+ * The worker register (persona-workers.md): same commented-scaffold trick,
+ * a much tighter budget. It is copied into every brief and read by both
+ * `claude` and `codex`, so the template asks for blunt lines, not prose.
+ */
+export const WORKER_PERSONA_TEMPLATE = `<!--
+Worker register (optional) — how the WORKERS write what lands in Slack.
+
+Why a second file: a Question's answer is the worker's own text, posted to
+the thread verbatim by the daemon. persona.md never touches it — this file
+is the only thing that does. It is copied into every brief, so it must stay
+short (2 000 characters max) and blunt enough for claude and codex alike.
+
+Tone only. Do not ask a worker to drop precision to sound casual: an answer
+still needs its paths, its numbers and its "could not verify" notes.
+
+Restart the daemon after editing (systemctl --user restart orchestrator).
+
+Example — delete the markers around it, or write your own:
+
+pas de formules d'assistant, pas de "Excellente question", pas de recap de
+la demande. direct, minuscules, phrases courtes. dis ce que tu as trouve,
+puis ce que tu n'as pas pu verifier. si un truc est casse, dis-le franchement.
 -->
 `;

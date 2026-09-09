@@ -19,7 +19,7 @@ import { execFileRunner, safeRegistryIssueUrls, type CommandRunner } from '../ke
 import { GateKeeper, type SessionGates } from './gate.ts';
 import { Voice } from './voice.ts';
 import { RepoAllowList, routingInstructions, type RepoHint } from '../kernel/routing.ts';
-import { personaInstructions } from '../kernel/persona.ts';
+import { personaInstructions, workerPersonaBrief } from '../kernel/persona.ts';
 import type { DelegationPolicy } from './permissions.ts';
 import type { Config } from '../kernel/config.ts';
 import type { Logger } from '../kernel/logger.ts';
@@ -43,8 +43,9 @@ export interface ProcessSeams {
   allowList: DelegationPolicy;
   delegations: DispatchPreparer & DispatchObserver;
   relay: SessionRelay;
-  /** The routing rules (issue #18) rendered from the hints, followed by
-   * the operator's voice when one is configured — ready to append. */
+  /** The routing rules (issue #18) rendered from the hints — worker briefs
+   * included — followed by the operator's voice when one is configured;
+   * ready to append. */
   systemPromptAppend: string;
 }
 
@@ -60,6 +61,10 @@ export interface RuntimeOptions {
   /** The operator's voice (persona.md), already loaded; absent leaves the
    * stock voice. Rendered into the system prompt by persona.ts. */
   persona?: string;
+  /** Its worker-facing counterpart (persona-workers.md): the register that
+   * rides inside both worker briefs, shaping the text the daemon posts
+   * verbatim on the worker's behalf. Absent leaves the briefs unchanged. */
+  workerPersona?: string;
   /** The raw Slack adapter (daemon.ts implements it over the Web API). */
   surface: Surface;
   /** Builds the per-thread session-process factory over the wired seams —
@@ -170,8 +175,10 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       delegations,
       relay,
       systemPromptAppend:
-        routingInstructions(hints) +
-        (options.persona === undefined ? '' : `\n\n${personaInstructions(options.persona)}`),
+        routingInstructions(
+          hints,
+          options.workerPersona === undefined ? undefined : workerPersonaBrief(options.workerPersona),
+        ) + (options.persona === undefined ? '' : `\n\n${personaInstructions(options.persona)}`),
       threadPermalink: (threadTs, channelId) => options.slackWorkspaceUrl === undefined
         ? undefined
         : new URL(`archives/${channelId}/p${threadTs.replace('.', '')}`, options.slackWorkspaceUrl).href,

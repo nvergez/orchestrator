@@ -9,7 +9,7 @@ import { probeOrca } from '../kernel/orca-health.ts';
 import { describeMailboxHome, MailboxHomeError, resolveMailboxHome } from '../kernel/mailbox-home.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
-import { loadPersona, PersonaError } from '../kernel/persona.ts';
+import { loadPersona, PersonaError, WORKER_PERSONA_MAX_CHARS } from '../kernel/persona.ts';
 import { unitActiveState, userBusFixLine, userBusUnreachable } from '../kernel/systemd.ts';
 import { dashboardUnitPath, systemdUnitPath } from './service.ts';
 import {
@@ -17,11 +17,12 @@ import {
   resolveEnvFilePath,
   resolvePersonaPath,
   resolveRoutingHintsPath,
+  resolveWorkerPersonaPath,
 } from '../kernel/xdg.ts';
 
 /**
  * `orc doctor` (issue #70 + #74 addendum): read-only diagnosis of the
- * install — env vars, routing hints, the optional persona, state dir,
+ * install — env vars, routing hints, the optional personas, state dir,
  * node version, Orca reachability, and (only once the unit is installed)
  * unit enablement, the unit's pinned ExecStart paths, and linger, so
  * doctor stays green through the pre-install phase of the golden path.
@@ -49,8 +50,9 @@ export interface DoctorDeps {
   readFile(path: string): string;
   dirWritable(dir: string): boolean;
   loadHints(path: string): RepoHint[];
-  /** The operator's voice file; `undefined` means none configured. */
-  loadPersona(path: string): string | undefined;
+  /** Either voice file; `undefined` means none configured. The cap comes
+   * from the caller, as it does in the daemon. */
+  loadPersona(path: string, maxChars?: number): string | undefined;
   username: string;
   uid: number;
   unitPath: string;
@@ -303,6 +305,22 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
   } catch (error) {
     if (!(error instanceof PersonaError)) throw error;
     checks.push({ label: 'persona', ok: false, detail: error.message });
+  }
+
+  const workerPersonaPath = resolveWorkerPersonaPath(deps.env);
+  try {
+    const workerPersona = deps.loadPersona(workerPersonaPath, WORKER_PERSONA_MAX_CHARS);
+    checks.push({
+      label: 'worker persona',
+      ok: true,
+      detail:
+        workerPersona === undefined
+          ? `none at ${workerPersonaPath} — workers keep their own register (optional)`
+          : `${workerPersona.length} characters at ${workerPersonaPath}, in every brief`,
+    });
+  } catch (error) {
+    if (!(error instanceof PersonaError)) throw error;
+    checks.push({ label: 'worker persona', ok: false, detail: error.message });
   }
 
   const dbPath = deps.env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(deps.env);

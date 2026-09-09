@@ -2,7 +2,14 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadPersona, personaInstructions, PersonaError, PERSONA_MAX_CHARS } from './persona.ts';
+import {
+  loadPersona,
+  personaInstructions,
+  workerPersonaBrief,
+  PersonaError,
+  PERSONA_MAX_CHARS,
+  WORKER_PERSONA_MAX_CHARS,
+} from './persona.ts';
 
 describe('loadPersona', () => {
   const dirs: string[] = [];
@@ -43,6 +50,12 @@ describe('loadPersona', () => {
     expect(() => loadPersona(path)).toThrow(new RegExp(`${PERSONA_MAX_CHARS + 1} characters`));
   });
 
+  it('applies the caller cap — the worker register gets a tighter one', () => {
+    const path = write('x'.repeat(WORKER_PERSONA_MAX_CHARS + 1));
+    expect(loadPersona(path)).toHaveLength(WORKER_PERSONA_MAX_CHARS + 1);
+    expect(() => loadPersona(path, WORKER_PERSONA_MAX_CHARS)).toThrow(PersonaError);
+  });
+
   it('fails the boot when the path exists but cannot be read as a file', () => {
     const dir = mkdtempSync(join(tmpdir(), 'orc-persona-'));
     dirs.push(dir);
@@ -65,3 +78,19 @@ describe('personaInstructions', () => {
     expect(block).toContain('Slack mrkdwn');
   });
 });
+
+describe('workerPersonaBrief', () => {
+  const block = workerPersonaBrief('pas de formules d\'assistant, direct, minuscules');
+
+  it('names what the register applies to — the text posted for the worker', () => {
+    expect(block).toContain('pas de formules d\'assistant, direct, minuscules');
+    expect(block).toContain('answer');
+    expect(block).toContain('final report');
+  });
+
+  it('keeps the register from costing the answer its precision', () => {
+    expect(block).toContain('tone only');
+    expect(block).toMatch(/never drop a path, a number, a caveat/);
+  });
+});
+

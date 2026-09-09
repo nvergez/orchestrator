@@ -255,3 +255,24 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('the same option substitution applies to its --text');
   });
 });
+
+describe('routingInstructions worker register', () => {
+  const hints: RepoHint[] = [
+    { name: 'webapp', description: 'The web app.', aliases: [], keywords: [], default: true },
+  ];
+
+  it('inlines the register in BOTH briefs — only the matching one is copied into --spec', () => {
+    const prompt = routingInstructions(hints, 'REGISTER BLOCK');
+    expect(prompt.match(/REGISTER BLOCK/g)).toHaveLength(2);
+    const question = prompt.indexOf('### Question brief');
+    const change = prompt.indexOf('### Change brief');
+    expect(prompt.indexOf('REGISTER BLOCK')).toBeGreaterThan(question);
+    expect(prompt.lastIndexOf('REGISTER BLOCK')).toBeGreaterThan(change);
+  });
+
+  it('leaves the briefs untouched when no register is configured', () => {
+    expect(routingInstructions(hints)).toBe(routingInstructions(hints, undefined));
+    expect(routingInstructions(hints)).not.toContain('Register for everything you send to Slack');
+  });
+});
+

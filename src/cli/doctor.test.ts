@@ -2,7 +2,7 @@ import { slackIdentity } from '../kernel/slack.ts';
 import { describe, expect, it, vi } from 'vitest';
 import { runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
 import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
-import { PersonaError } from '../kernel/persona.ts';
+import { PersonaError, WORKER_PERSONA_MAX_CHARS } from '../kernel/persona.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
 const DASHBOARD_UNIT_PATH = '/home/op/.config/systemd/user/orchestrator-dashboard.service';
@@ -167,6 +167,7 @@ describe('runDoctorChecks', () => {
       'user names',
       'routing hints',
       'persona',
+      'worker persona',
       'state dir',
       'node',
       'orca',
@@ -336,13 +337,32 @@ describe('runDoctorChecks', () => {
     );
   });
 
-  it('fails the persona when a configured one cannot be honored', async () => {
+  it('reports the worker register and the cap it is read under', async () => {
     const deps = greenDeps();
-    deps.loadPersona = () => {
-      throw new PersonaError('/x/persona.md: the persona is 9001 characters, over the 8000 cap …');
+    deps.env.ORCHESTRATOR_WORKER_PERSONA_PATH = '/srv/workers.md';
+    const caps: Array<number | undefined> = [];
+    deps.loadPersona = (_path, maxChars) => {
+      caps.push(maxChars);
+      return maxChars === undefined ? undefined : 'direct, minuscules';
     };
     const checks = await runDoctorChecks(deps);
-    expect(failures(checks)).toEqual(['persona']);
+    expect(checks.find((check) => check.label === 'worker persona')?.detail).toBe(
+      '18 characters at /srv/workers.md, in every brief',
+    );
+    expect(caps).toEqual([undefined, WORKER_PERSONA_MAX_CHARS]);
+  });
+
+  it.each([
+    ['persona.md', 'persona'],
+    ['persona-workers.md', 'worker persona'],
+  ])('fails only the %s check when that file cannot be honored', async (file, label) => {
+    const deps = greenDeps();
+    deps.loadPersona = (path) => {
+      if (!path.endsWith(file)) return undefined;
+      throw new PersonaError(`/x/${file}: the persona is 9001 characters, over the cap …`);
+    };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual([label]);
   });
 
   it('fails when the state dir is not writable', async () => {
@@ -529,7 +549,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(14);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(15);
     expect(out.at(-1)).toBe('all checks passed');
   });
 
