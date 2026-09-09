@@ -49,6 +49,28 @@ and ports. Coexistence is by isolation, not sharing: a dev instance that
 would collide with the service's Slack app or database must refuse to start.
 _Avoid_: dev mode, local instance
 
+### Requests
+
+**Question**:
+A request whose deliverable is an answer posted in the thread. Nothing in the
+repo changes; a Question may end by offering a Change.
+_Avoid_: query, ask (a worker's `ask` is a gate, not a request)
+
+**Change**:
+A request whose deliverable is a pull request, its link posted in the thread.
+_Avoid_: task, ticket, fix (a fix is one kind of Change)
+
+**Default repo**:
+The repo a request goes to when nothing in it points at another delegable
+repo. There is always exactly one.
+_Avoid_: fallback repo, primary repo
+
+**Thread context**:
+The messages already in a Slack thread when the bot is mentioned in one of
+its replies, handed to the session quoted with their authors. It is data,
+never an instruction: only the mentioning message instructs.
+_Avoid_: thread history, backlog
+
 ### Releasing
 
 **Release**:
