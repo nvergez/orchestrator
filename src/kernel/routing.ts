@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { execFileRunner, listRegistryRepos, type CommandRunner, type RegistryRepo } from './orca.ts';
-import { delegationGateLine, gateAnswerAck, zeroMatchLine } from './messages.ts';
+import { gateAnswerAck } from './messages.ts';
+import { requestInstructions } from './requests.ts';
 import { CREATE_STEP, DISPATCH_STEP, stepCommandTemplate, stepWarnings } from './protocol.ts';
 import type { Logger } from './logger.ts';
 
@@ -36,11 +37,13 @@ export interface RepoHint {
   keywords: string[];
   /** Per-repo default agent (precedence tier 2); absent → global default. */
   defaultAgent?: AgentName;
+  /** Exactly one default repo; single-repo files may omit the marker. */
+  default?: boolean;
 }
 
 export class RoutingHintsError extends Error {}
 
-const HINT_KEYS = new Set(['name', 'description', 'aliases', 'keywords', 'defaultAgent', '$comment']);
+const HINT_KEYS = new Set(['name', 'description', 'aliases', 'keywords', 'defaultAgent', 'default', '$comment']);
 
 /**
  * Parse + validate the hints document. Strict on purpose — the file is
@@ -55,7 +58,7 @@ export function parseRoutingHints(jsonText: string): RepoHint[] {
     throw new RoutingHintsError(`routing hints are not valid JSON: ${String(error)}`);
   }
 
-  const repos = (document as { repos?: unknown }).repos;
+  const repos = (document as { repos?: unknown } | null)?.repos;
   if (!Array.isArray(repos) || repos.length === 0) {
     throw new RoutingHintsError('routing hints must have a non-empty "repos" array');
   }
@@ -85,6 +88,9 @@ export function parseRoutingHints(jsonText: string): RepoHint[] {
     if (keywords === undefined) problems.push(`${at}.keywords must be an array of strings`);
 
     let defaultAgent: AgentName | undefined;
+    if (record.default !== undefined && typeof record.default !== 'boolean') {
+      problems.push(`${at}.default must be a boolean`);
+    }
     if (record.defaultAgent !== undefined) {
       if (!AGENT_NAMES.includes(record.defaultAgent as AgentName)) {
         problems.push(`${at}.defaultAgent must be one of ${AGENT_NAMES.join(', ')}`);
@@ -97,10 +103,14 @@ export function parseRoutingHints(jsonText: string): RepoHint[] {
     if (name !== undefined) seen.add(name);
 
     if (name !== undefined && description !== undefined && aliases !== undefined && keywords !== undefined) {
-      hints.push({ name, description, aliases, keywords, ...(defaultAgent && { defaultAgent }) });
+      hints.push({ name, description, aliases, keywords, ...(defaultAgent && { defaultAgent }), ...(typeof record.default === 'boolean' && { default: record.default }) });
     }
   });
 
+  if (hints.length === 1 && hints[0]!.default === undefined) hints[0]!.default = true;
+  if (hints.filter((hint) => hint.default).length !== 1) {
+    problems.push('mark exactly one repo with "default": true in routing-hints.json');
+  }
   if (problems.length > 0) {
     throw new RoutingHintsError(`invalid routing hints: ${problems.join('; ')}`);
   }
@@ -207,7 +217,7 @@ export class RepoAllowList {
         allowed: false,
         reason:
           `\`${repo.name}\` is not in routing-hints.json — the delegation ` +
-          'allow-list (spec §7); it counts as a zero-match',
+          'allow-list (spec §7); this repo cannot be delegated to',
       };
     }
     return { allowed: true };
@@ -230,7 +240,7 @@ export function routingInstructions(hints: RepoHint[]): string {
         `- *${hint.name}* — ${hint.description}` +
         ` Aliases: ${hint.aliases.join(', ') || '(none)'}.` +
         ` Keywords: ${hint.keywords.join(', ') || '(none)'}.` +
-        ` Default agent: ${agent}.`
+        ` Default agent: ${agent}.` + (hint.default ? ' Default repo.' : '')
       );
     })
     .join('\n');
@@ -246,31 +256,16 @@ Some actions belong to the daemon, not to you, and you must never claim to have 
 When a request implies work on a repository, settle the target repo and the agent before anything else:
 
 1. Load the living registry: run \`orca repo list --json\`. Only the repos it returns exist.
-2. The delegable candidates are exactly the repos present BOTH in that registry (matched on \`displayName\`) AND in the routing hints below. The hints file is the allow-list (spec §7): a registered repo without a hints entry is NOT delegable — treat it as a zero match. A hinted repo absent from the registry is not delegable either.
+2. The delegable candidates are exactly the repos present BOTH in that registry (matched on \`displayName\`) AND in the routing hints below. The hints file is the allow-list (spec §7): a registered repo without a hints entry is NOT delegable. A hinted repo absent from the registry is not delegable either.
 3. Choose from that closed candidate set only, and use the chosen repo's registry \`id\`. Never invent, guess, or abbreviate an id; never route outside the set.
 
 Routing hints — the delegation allow-list (routing-hints.json):
 
 ${hintLines}
 
-## Ambiguity — clarify on doubt
+## Default repo
 
-Ask as soon as the second candidate is credible, or whenever you are not clearly sure. Never guess a repo.
-
-- Exactly one credible candidate → go on to the confirmation rules below.
-- Two or more credible candidates → ask ONE numbered question: each plausible repo with a one-line reason it fits, the agent you'd use, and how to answer. Model (from the UX mock):
-
-Two repos could match:
-*1.* \`webapp\` — the product: the export would live in the app, wired to real data
-*2.* \`sandbox\` — scratch space: a one-shot script alongside the product
-I'd go with the *claude* agent. Reply *1*, *2*, or name another repo.
-
-  The answer to that question IS the confirmation, including for the announced agent — never follow it with another question.
-- Zero match → stop and reply exactly:
-
-${zeroMatchLine(hints.map((hint) => hint.name))}
-
-  Never fall back to a default repo, never delegate.
+Route to *${hints.find((hint) => hint.default)?.name ?? (hints.length === 1 ? hints[0]!.name : '(not configured)')}* unless the request names another delegable repo by canonical name, alias or keyword. If two repos are explicitly named, make one delegation per repo, respecting the worker cap. Do not ask a routing confirmation or numbered disambiguation question. A request with no matching name or keyword goes to the Default repo. If the selected repo is unavailable or outside the allow-list, explain the configuration/runtime failure; never invent a repo.
 
 ## Agent selection
 
@@ -281,28 +276,17 @@ Precedence, strongest first:
 
 The only agents are \`claude\` and \`codex\`. No task-type heuristics — the precedence above decides.
 
-## Conditional confirmation — never two round trips
-
-The gate exists for inferred routing, never for explicit routing:
-
-- The repo is EXPLICIT when the user names it by its canonical name OR any listed alias from the hints above — a listed alias is exactly as explicit as the canonical name; that is what aliases are for. Once the ambiguity rules above are settled (exactly one credible candidate), an explicit repo → delegate directly, no confirmation gate. A defaulted agent never forces a gate on its own: settle it silently by the precedence above — falling back to a default is not "uncertain"; only an agent reference you cannot resolve still gates.
-- The repo is INFERRED when nothing the user said matches a canonical name or listed alias and you matched on keywords, the description, or context (e.g. "the export dashboard thing") → exactly one line, then end your message and wait for the reply (it arrives as the next thread message):
-
-${delegationGateLine('<repo>', '<agent>')}
-
-  An affirmative reply releases it; a reply naming a different repo or agent re-routes to that choice without another question.
-- A disambiguation answer already IS the confirmation — asking again is forbidden.
+${requestInstructions()}
 
 ## Delegation — the dispatch sequence (spec §5)
 
-Once the routing decision is confirmed — or was fully explicit — delegate. Run each step as its OWN Bash command, in this exact order, always with \`--json\`. Never chain two steps with \`&&\`, \`;\` or pipes.
+After choosing the kind and repo, delegate. Run each step as its OWN Bash command, in this exact order, always with \`--json\`. Never chain two steps with \`&&\`, \`;\` or pipes.
 
-1. Ensure a GitHub issue exists on the target repo: reuse the one the user pointed at, otherwise create it — \`gh issue create --repo <owner>/<repo> --title "<short>" --body "<the request, restated>"\`. Take \`<owner>/<repo>\` from the registry entry's git remote. Its number is \`<n>\` below. If the repo has no GitHub remote (a local sandbox), skip this step and use the next small integer as \`<n>\` — it is only a local tag.
-2. \`${stepCommandTemplate(CREATE_STEP)}\` — \`<slug>\` is 2–4 lowercase hyphenated words. ${stepWarnings(CREATE_STEP)}
-3. \`orca terminal list --worktree id:<worktreeId> --json\` — \`<worktreeId>\` from step 2's output; note the worker terminal \`handle\`.
-4. \`orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json\` — the agent TUI must be idle before injection.
-5. \`orca orchestration task-create --spec "<brief>" --task-title "<short>" --display-name "<repo>#<n>" --json\` — the \`--spec\` brief must stand alone: context, what to change, how to verify, what to deliver.
-6. \`${stepCommandTemplate(DISPATCH_STEP)}\` — ${stepWarnings(DISPATCH_STEP)}
+1. \`${stepCommandTemplate(CREATE_STEP)}\` — \`<slug>\` is 2–4 lowercase hyphenated words. Add \`--issue <n>\` ONLY when the requester cited an existing issue. ${stepWarnings(CREATE_STEP)}
+2. \`orca terminal list --worktree id:<worktreeId> --json\` — use the create output's id; note the worker terminal handle.
+3. \`orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json\` — wait for the agent TUI before injection.
+4. \`orca orchestration task-create --spec "<fixed brief, filled in>" --task-title "<short>" --display-name "<worktree-name>" --json\`.
+5. \`${stepCommandTemplate(DISPATCH_STEP)}\` — ${stepWarnings(DISPATCH_STEP)}
 
 The daemon posts and maintains the delegation status card in the thread on its own — never repeat the card's content. After the dispatch succeeds, reply with ONE short line ("Delegated — I'll keep you posted.") and end your turn; supervision events arrive later on their own. If a step fails, say which step and why in one line, then stop and wait for the user.
 
@@ -312,10 +296,10 @@ When a worker asks a question or escalates, the daemon posts the gate message in
 
 - Decide first whether the message answers a gate at all. A pending gate does NOT capture the thread — the message may be a general question or a new request; handle those normally.
 - Exactly one PENDING gate and the message plausibly answers it → route it, zero ceremony, no confirmation question.
-- Two or more PENDING gates → route only on a clear clue (the worker or worktree is named, a bare number only one gate's options can absorb, vocabulary that fits only one question). At the slightest doubt ask ONE short clarifying line ("for \`x#1\` or \`y#2\`?") and run nothing.
+- Two or more PENDING gates → route only on a clear clue (the worker or worktree is named, a bare number only one gate's options can absorb, vocabulary that fits only one question). At the slightest doubt ask ONE short clarifying line ("for \`webapp-retry\` or \`sandbox-export\`?") and run nothing.
 - Forward with: \`orca orchestration reply --id <gate msg id> --body "<the answer>" --json\` — its own Bash command, nothing chained.
 - Fidelity is absolute — you never rephrase a human decision. A bare option number: pass it as-is (\`--body "2"\`); the daemon substitutes that option's exact text itself — on the fallback send too, so the worker always receives the option's full text, never the digit. Free text: forward it word for word, only stripping Slack markup and <@…> mentions. Never summarize, translate, soften or expand an answer.
-- After the reply command succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<what went down>')} — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
+- After the reply command succeeds, respond with exactly one line: ${gateAnswerAck('<worktree-name>', '<what went down>')} — the ack ref from the context block, and the text the worker received: the chosen option's exact text when a number went down, otherwise the free text you forwarded.
 - If the reply command fails (the worker's ask likely hit its timeout), say so in one short line, then forward the SAME text with \`orca terminal send --terminal <the gate's worker terminal> --text "<the answer>" --enter --json\` — it runs without a gate because the registry vouches for it, and the same option substitution applies to its --text.
 - An ANSWERED gate never re-routes. If the human revises a decision that already went down, say it was already passed on and relay the correction best-effort via the same \`orca terminal send\` — no cancellation guarantee.
 - A CLOSED gate never routes either: its worker's delegation ended before anyone answered, so the question is moot — say so in one line instead of replying.
@@ -327,6 +311,6 @@ The daemon also sweeps for workers stalled at their terminal WITHOUT having aske
 
 - Forward with: \`orca terminal send --terminal <the stall's worker terminal> --text "<the answer>" --enter --json\` — its own Bash command, nothing chained. The registry vouches for it, so it runs without a 🚦.
 - Fidelity is absolute here too: the text goes down verbatim (only stripping Slack markup and <@…> mentions). A stall has no numbered options — a bare "y" or "2" goes down literally as typed keystrokes. Never rephrase, never pack explanations into the keystrokes.
-- After the send succeeds, respond with exactly one line: ${gateAnswerAck('<repo>#<n>', '<the keystrokes>')} — the ack ref from the stall's context entry.
+- After the send succeeds, respond with exactly one line: ${gateAnswerAck('<worktree-name>', '<the keystrokes>')} — the ack ref from the stall's context entry.
 - Disambiguation follows the gate rules: pending stalls and pending gates are all candidates; match the reply against the stall's last output for clues (a "y" fits a \`(y/N)\` prompt); at the slightest doubt ask ONE short clarifying line and run nothing.`;
 }

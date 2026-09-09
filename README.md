@@ -3,13 +3,15 @@
 [![npm version](https://img.shields.io/npm/v/%40nvergez%2Forchestrator)](https://www.npmjs.com/package/@nvergez/orchestrator)
 [![CI](https://github.com/nvergez/orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/nvergez/orchestrator/actions/workflows/ci.yml)
 
-A Slack-driven **orchestrator-dispatcher** daemon: one Claude Code session per
-Slack thread, delegating work to Orca worktree agents.
-Mention the bot in a channel, describe what you want, and it routes the request
-to the right repo, dispatches a worker agent in its own worktree, supervises it
-(questions and escalations relayed back into the thread), and reports the
-result. Small-team by design: one workspace, the channels you configure, and
-a shared allow-list of authorized users — anyone else gets one polite refusal.
+Ask a codebase question or request a change in Slack: mention the bot at the
+channel root or in an existing thread. A Question gets an answer from a worker
+that reads the code; a Change gets a ready-for-review PR linked back to the
+thread. Reply **do it** after an answer to turn the diagnosis into a Change.
+
+The bot uses the configured Default repo unless you name another, and opens
+no GitHub issue. One persistent Claude Code session per thread coordinates
+Orca worktree agents and relays blockers. Small-team by design: one workspace,
+the channels you configure, and a shared allow-list of authorized users.
 
 ## How it works
 
@@ -58,7 +60,8 @@ sudo loginctl enable-linger $USER      # 6 — once
    (never overwrites existing ones).
 3. Fill in your tokens and Slack IDs in `env` (see
    [`docs/setup-slack.md`](docs/setup-slack.md)) and your delegable repos in
-   `routing-hints.json`.
+   `routing-hints.json`. Mark exactly one repo with `"default": true`; a
+   single-repo file may omit the marker. `orc doctor` shows the Default repo.
 4. Checks the whole setup read-only — env vars, hints file, state dir, node
    version, `orca` reachability. A non-zero exit means fix before continuing.
 5. Generates and starts the systemd user unit `orchestrator.service`.
@@ -150,8 +153,8 @@ both the sidecar and the Vite proxy, and a `.env` entry could only reach
 the sidecar), and the dev databases live under the git-ignored `.dev/`.
 
 `npm run dev:dashboard:demo` needs no daemon, no Slack app, no Orca: it
-writes demo state through the real stores — a live session, in-flight and
-failed delegations, a decision gate, an escalation, a stall — so every
+writes demo state through the real stores — a live session, a Question, Changes
+with PR links, failed delegations, a decision gate, an escalation, a stall — so every
 dashboard section renders from a bare checkout. Timestamps sit relative
 to now; reseed any time with `npm run seed:demo`. The demo database path
 is fixed (the seed ignores `ORCHESTRATOR_DB_PATH`, so ambient daemon env

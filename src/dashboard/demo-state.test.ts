@@ -51,7 +51,10 @@ describe('seedDemoState — a representative database for any clock', () => {
     const [live, orphan] = state.sessions;
     expect(live?.delegations.map((row) => row.status)).toEqual(['dispatched']);
     expect(live?.delegations[0]?.lastBusAt).not.toBeNull();
+    expect(live?.delegations[0]?.kind).toBe('change');
     expect(orphan?.delegations.map((row) => row.status)).toEqual(['dispatched']);
+    expect(orphan?.delegations[0]).toMatchObject({ kind: 'question', issueNumber: null, reference: 'sandbox-benchmark-results' });
+    expect(state.recentlyClosed.delegations.find((row) => row.status === 'completed')?.prLinks).toEqual([{ url: 'https://github.com/acme/webapp/pull/87', label: 'webapp#87' }]);
 
     // One pending decision gate and one pending escalation — the answered
     // gate must have left the pending list.

@@ -238,6 +238,7 @@ class ClaudeProcess {
 }
 
 export function createProcessFactory(opts: {
+  threadPermalink: (threadTs: string, channelId: string) => string | undefined;
   cwd: string;
   gates: SessionGates;
   allowList: DelegationPolicy;
@@ -256,7 +257,8 @@ export function createProcessFactory(opts: {
       allowList: opts.allowList,
       delegations: opts.delegations,
       relay: opts.relay,
-      systemPromptAppend: opts.systemPromptAppend,
+      systemPromptAppend: opts.systemPromptAppend + '\n\nSlack thread permalink: ' +
+        (opts.threadPermalink(threadTs, channelId) ?? 'unavailable — report this if a Change needs a PR link to the thread'),
       logger: opts.logger,
     });
 }

@@ -10,6 +10,7 @@ import {
 import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
+import { deliverQuestion } from './question-delivery.ts';
 
 /**
  * The per-thread gate watcher (spec §6, issue #20): "the daemon listens, the
@@ -20,8 +21,9 @@ import type { Logger } from '../kernel/logger.ts';
  * the window simply respawns; the loop stops on its own once the thread has
  * no in-flight work left.
  *
- * A `worker_done` closes the ledger row, hands the card flip / root reaction
- * / worktree cleanup to the thread surface, and wakes the session through
+ * A `worker_done` closes the ledger row and hands the root reaction to the
+ * thread surface. A Question delivers its durable answer directly, then
+ * finishes its card and cleanup. A Change wakes the session through
  * the SAME input pipe as a human message — the session's voice writes the
  * short summary; the daemon only posts one itself when no session can take
  * the wake. A delivered delegation's worktree is then removed (issue #43); a
@@ -129,9 +131,9 @@ export class GateWatcher {
     return this.loops.has(loopKey(threadTs, channelId));
   }
 
-  /** Boot re-arm (spec §6): one watcher per thread the ledger shows in flight. */
+  /** Boot re-arm: one watcher per thread with live work or pending answers. */
   rearmFromStore(): number {
-    const threads = this.store.threadsWithInFlight();
+    const threads = this.store.threadsNeedingWatcher();
     for (const { threadTs, channelId } of threads) this.arm(threadTs, channelId);
     return threads.length;
   }
@@ -142,6 +144,21 @@ export class GateWatcher {
     const key = loopKey(threadTs, channelId);
     this.logger.info({ threadTs, channelId }, 'gate watcher armed');
     while (true) {
+      const pending = this.store.pendingQuestionDeliveries({ threadTs, channelId });
+      let deliveryFailed = false;
+      for (const row of pending) {
+        try {
+          await deliverQuestion(row, this.store, this.surface);
+        } catch (error) {
+          this.logger.warn({ err: error, dispatchId: row.dispatchId }, 'Question answer delivery failed — retrying');
+          deliveryFailed = true;
+          break;
+        }
+      }
+      if (deliveryFailed) {
+        await sleep(this.retryDelayMs);
+        continue;
+      }
       if (this.store.listInFlightForThread(threadTs, channelId).length === 0) {
         // Un-arm in the same synchronous block as the stop decision: a
         // dispatch interleaving after this line finds the thread un-armed
@@ -286,7 +303,7 @@ export class GateWatcher {
       return;
     }
     const failed = isFailureSubject(message.subject);
-    if (!this.store.closeDelegation(row.dispatchId, failed ? 'failed' : 'completed')) {
+    if (!this.store.closeDelegation(row.dispatchId, failed ? 'failed' : 'completed', message.body)) {
       this.logger.info(
         { threadTs, dispatchId: row.dispatchId },
         'duplicate worker_done for an already-closed delegation — ignored',
@@ -298,6 +315,13 @@ export class GateWatcher {
       { threadTs: row.threadTs, dispatchId: row.dispatchId, failed },
       'delegation closed on worker_done',
     );
+
+    // Settle in bus-event order, independent of when answer posting succeeds.
+    // Deferred delivery must never overwrite a later sibling's failure.
+    if (row.kind === 'question' && !failed) {
+      await this.surface.settleWorkerDone(row.channelId, row.threadTs, false);
+      return;
+    }
 
     // Card first (the summary's "details in the card ⤴" must already be
     // true), then the root reaction, then the wake.
@@ -318,7 +342,7 @@ export class GateWatcher {
       await this.postSafe(
         row.threadTs,
         row.channelId,
-        workerDoneFallbackLine(message.subject, failed),
+        workerDoneFallbackLine(message.subject, failed, message.body),
       );
     }
     // Janitorial last — the human-facing card, reaction and wake never wait
@@ -507,11 +531,9 @@ function loopKey(threadTs: string, channelId: string): string {
 
 // ── wake texts — what the daemon feeds the session's input pipe ─────────────
 
-/** `repo#n (worktree)`, degrading to the task id — the wake texts' name for a row. */
+/** Worktree name, degrading to the task id — the wake text's reference. */
 function delegationRef(row: DelegationRow): string {
-  const ref =
-    row.repo !== null && row.issueNumber !== null ? `${row.repo}#${row.issueNumber}` : row.taskId;
-  return row.worktreeName === null ? ref : `${ref} (\`${row.worktreeName}\`)`;
+  return row.worktreeName ?? row.taskId;
 }
 
 /**
@@ -532,10 +554,10 @@ function workerDoneWakeText(
     '',
     'The daemon already closed the ledger, flipped the delegation card to its final state and ' +
       'set the root reaction. Your only job: reply with ONE short summary for the human ' +
-      `(1–2 lines of Slack mrkdwn) — start with "${failed ? '❌ Failed' : '✅ Delivered'} —", ` +
+      '(1–2 lines of Slack mrkdwn) — ' +
       (failed
-        ? 'say what went wrong, '
-        : 'say what shipped and include the PR link if the report names one, ') +
+        ? 'start with "❌ Failed —", say what went wrong, '
+        : 'start with the PR link when present, then say what changed; without a PR, give the plain report, ') +
       'and end with "Details in the card ⤴". Do not run any commands for this event.',
   ].join('\n');
 }

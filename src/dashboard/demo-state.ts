@@ -61,11 +61,12 @@ export function seedDemoState(dbPath: string, now: Date): void {
     taskId: 'task_live',
     dispatchId: 'ctx_live',
     worktreeId: '444c::/home/op/webapp::workspace:98',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     worktreePath: '/home/op/webapp',
     repo: 'webapp',
     issueNumber: 84,
     agent: 'claude',
+    kind: 'change' as const,
     workerHandle: 'term_live',
     threadTs: THREAD,
     channelId: CHANNEL,
@@ -82,9 +83,9 @@ export function seedDemoState(dbPath: string, now: Date): void {
   // Closed inside the window: one completed, one failed (with a stall that
   // the close settles). One completed before the window — must not appear.
   clock = at(hours(21));
-  delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_done', taskId: 'task_done', workerHandle: 'term_done' });
+  delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_done', taskId: 'task_done', workerHandle: 'term_done', worktreeName: 'webapp-retry-timeout', issueNumber: null });
   clock = at(hours(18));
-  delegations.closeDelegation('ctx_done', 'completed');
+  delegations.closeDelegation('ctx_done', 'completed', 'https://github.com/acme/webapp/pull/87\nFixed the retry timeout; tests pass.');
   clock = at(hours(17));
   delegations.recordDispatch({ ...dispatch, dispatchId: 'ctx_fail', taskId: 'task_fail', workerHandle: 'term_fail' });
   delegations.recordStall({
@@ -92,7 +93,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
     threadTs: THREAD,
     channelId: CHANNEL,
     workerHandle: 'term_fail',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     lastOutput: 'error: worktree dirty',
     fingerprint: 'fp-fail',
     relayTs: '1751970011.000200',
@@ -112,12 +113,13 @@ export function seedDemoState(dbPath: string, now: Date): void {
     taskId: 'task_orphan',
     workerHandle: 'term_orphan',
     threadTs: THREAD_ORPHAN,
-    worktreeName: 'sandbox-21-bench',
+    worktreeName: 'sandbox-benchmark-results',
     worktreePath: '/home/op/sandbox',
     repo: 'sandbox',
-    issueNumber: 21,
-    agent: 'codex',
-    title: 'bench harness',
+    issueNumber: null,
+    kind: 'question',
+    agent: 'claude',
+    title: 'Where are benchmark results written?',
   });
 
   // Gates: a pending decision gate, a pending escalation, an answered one.
@@ -129,7 +131,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
     taskId: null,
     dispatchId: null,
     workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     kind: 'decision_gate',
     question: 'Keep the old route alive?',
     options: ['yes', 'no'],
@@ -145,7 +147,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
     taskId: 'task_live',
     dispatchId: 'ctx_live',
     workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     kind: 'decision_gate',
     question: 'Migrations diverge — rebase or merge?',
     options: ['rebase', 'merge'],
@@ -159,7 +161,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
     taskId: 'task_live',
     dispatchId: 'ctx_live',
     workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     kind: 'escalation',
     question: 'CI is red on main — halt the merge?',
     options: [],
@@ -173,7 +175,7 @@ export function seedDemoState(dbPath: string, now: Date): void {
     threadTs: THREAD,
     channelId: CHANNEL,
     workerHandle: 'term_live',
-    worktreeName: 'webapp-84-dashboard',
+    worktreeName: 'webapp-dashboard',
     lastOutput: '… waiting at a permissions prompt',
     fingerprint: 'fp-live',
     relayTs: '1751970015.000600',

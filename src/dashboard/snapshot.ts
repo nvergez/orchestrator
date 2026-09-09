@@ -1,4 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
+import { extractPullRequestLinks } from '../kernel/messages.ts';
+import type { RequestKind } from '../kernel/requests.ts';
 
 /**
  * The dashboard read model (issue #87, ADR 0002): one snapshot of live
@@ -11,6 +13,9 @@ import { DatabaseSync } from 'node:sqlite';
 
 /** A delegation as the page shows it — in flight or recently closed. */
 export interface DelegationView {
+  reference: string;
+  kind: RequestKind | null;
+  prLinks: Array<{ url: string; label: string }>;
   dispatchId: string;
   threadTs: string;
   /** The thread's channel (issue #93) — how views group once several exist. */
@@ -203,6 +208,9 @@ function readDelegations(
 
 function toDelegationView(row: Record<string, unknown>): DelegationView {
   return {
+    reference: (row.worktree_name ?? row.task_id ?? row.dispatch_id) as string,
+    kind: row.kind === 'question' || row.kind === 'change' ? row.kind : null,
+    prLinks: extractPullRequestLinks(typeof row.result_text === 'string' ? row.result_text : ''),
     dispatchId: row.dispatch_id as string,
     threadTs: row.thread_ts as string,
     channelId: row.channel_id as string,

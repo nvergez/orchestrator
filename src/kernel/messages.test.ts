@@ -5,7 +5,6 @@ import {
   completedCard,
   costWarningLine,
   delegationCard,
-  delegationGateLine,
   extractPullRequestLinks,
   formatDuration,
   gateAnswerAck,
@@ -20,10 +19,18 @@ import {
   stalledWorkerAlert,
   workerCapLine,
   workerDoneFallbackLine,
-  zeroMatchLine,
 } from './messages.ts';
 
 describe('refusalLine', () => {
+  it('renders a Question without an issue and finishes it with its duration', () => {
+    const opts = { repo: 'webapp', worktreeName: 'webapp-retry-timeout', kind: 'question' as const, issueNumber: null, title: 'retry timeout', agent: 'claude', milestones: [] };
+    expect(delegationCard(opts)).toContain('🔎 Looking on *webapp*');
+    expect(delegationCard(opts)).not.toContain('issue');
+    const done = completedCard({ ...opts, worktreePath: '/tmp/retry', durationMs: 120000, prLinks: [] });
+    expect(done).toContain('answered in 2 min');
+    expect(done).toContain('webapp-retry-timeout');
+    expect(done).not.toContain('issue');
+  });
   it('stays generic — the allow-list is never enumerated to third parties (issue #93)', () => {
     expect(refusalLine()).toBe('Only authorized operators can drive me.');
     expect(refusalLine()).not.toContain('<@');
@@ -94,8 +101,8 @@ describe('closingSummary', () => {
 
     expect(summary).toBe(
       '🔚 Session closed.\n' +
-        '• ✅ <https://github.com/acme/webapp/issues/84|webapp#84>\n' +
-        '• ✅ <https://github.com/acme/webapp/issues/91|webapp#91>\n' +
+        '• ✅ `webapp-84-csv-export` · <https://github.com/acme/webapp/issues/84|issue>\n' +
+        '• ✅ `webapp-84-csv-export` · <https://github.com/acme/webapp/issues/91|issue>\n' +
         '• thread cost: $6.84 · 19 turns\n' +
         'Mention me on a new root message to start again.',
     );
@@ -116,9 +123,9 @@ describe('closingSummary', () => {
     });
 
     expect(summary).toContain(
-      '• ❌ <https://github.com/acme/webapp/issues/84|webapp#84>\n',
+      '• ❌ `webapp-84-csv-export` · <https://github.com/acme/webapp/issues/84|issue>\n',
     );
-    expect(summary).toContain('• ⚙️ webapp#91 — still in flight\n');
+    expect(summary).toContain('• ⚙️ `webapp-84-csv-export` — still in flight\n');
   });
 
   it('degrades to plain repo#n for a folder repo without a remote, like the card', () => {
@@ -128,7 +135,7 @@ describe('closingSummary', () => {
       turnCount: 2,
     });
 
-    expect(summary).toContain('• ✅ webapp#84\n');
+    expect(summary).toContain('• ✅ `webapp-84-csv-export`\n');
     expect(summary).not.toContain('<');
   });
 
@@ -191,23 +198,6 @@ describe('gateLine', () => {
   });
 });
 
-describe('delegationGateLine', () => {
-  it('matches the issue #10 verbatim, in Slack mrkdwn', () => {
-    expect(delegationGateLine('webapp', 'claude')).toBe(
-      "→ I'm delegating on *webapp* with *claude*. Go? (or name another repo/agent)",
-    );
-  });
-});
-
-describe('zeroMatchLine', () => {
-  it('matches the UX mock verbatim (docs/prototypes/slack-ux, "Zero match")', () => {
-    expect(zeroMatchLine(['webapp', 'orca', 'sandbox', 'orchestrator'])).toBe(
-      'No repo I drive matches. I know: `webapp`, `orca`, `sandbox`, ' +
-        '`orchestrator`. Rephrase targeting one of them.',
-    );
-  });
-});
-
 describe('delegationCard — scenario A (issue #19)', () => {
   it('renders the ⚙️ card with a rich GitHub issue link and code-formatted worktree', () => {
     expect(
@@ -224,8 +214,8 @@ describe('delegationCard — scenario A (issue #19)', () => {
         ],
       }),
     ).toBe(
-      '⚙️ *webapp#84 — CSV export of send metrics*\n' +
-        '`webapp-84-csv-export` · claude · issue ' +
+      '⚙️ *webapp-84-csv-export — CSV export of send metrics*\n' +
+        'claude · issue ' +
         '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
         '• 14:04 — issue linked, worktree ready\n' +
         '• 14:05 — brief handed off (task `t-3f81`)',
@@ -275,6 +265,7 @@ describe('orcaUnavailableLine', () => {
 
 describe('completedCard — the ✅/❌ final state (issue #20)', () => {
   const base = {
+    worktreeName: 'webapp-84-csv-export',
     repo: 'webapp',
     issueNumber: 84,
     title: 'CSV export of send metrics',
@@ -287,7 +278,7 @@ describe('completedCard — the ✅/❌ final state (issue #20)', () => {
   it('renders the mock’s delivered card: header, PR, issue, worktree', () => {
     expect(completedCard(base)).toBe(
       [
-        '✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*',
+        '✅ *webapp-84-csv-export — CSV export of send metrics — delivered in 27 min*',
         '• PR: <https://github.com/acme/webapp/pull/87|webapp#87>',
         '• issue: <https://github.com/acme/webapp/issues/84|webapp#84>',
         '• worktree: `/home/op/orca/workspaces/webapp/webapp-84-csv-export`',
@@ -297,7 +288,7 @@ describe('completedCard — the ✅/❌ final state (issue #20)', () => {
 
   it('renders a failure with the reason first, verbatim', () => {
     const card = completedCard({ ...base, failureReason: 'Failed: e2e tests break on main' });
-    expect(card).toContain('❌ *webapp#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card).toContain('❌ *webapp-84-csv-export — CSV export of send metrics — failed after 27 min*');
     expect(card.split('\n')[1]).toBe('• reason: Failed: e2e tests break on main');
   });
 
@@ -310,7 +301,7 @@ describe('completedCard — the ✅/❌ final state (issue #20)', () => {
     });
     expect(card).toBe(
       [
-        '✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*',
+        '✅ *webapp-84-csv-export — CSV export of send metrics — delivered in 27 min*',
         '• issue: webapp#84',
       ].join('\n'),
     );
@@ -560,13 +551,13 @@ describe('restartNotice (issue #25)', () => {
     expect(
       restartNotice([
         { ref: 'webapp#84', state: 'still in progress (last sign 4 min ago)' },
-        { ref: 'sandbox#21', state: '✅ completed during the outage (details in the card ⤴)' },
+        { ref: 'sandbox-21-bench', state: '✅ completed during the outage (details in the card ⤴)' },
       ]),
     ).toBe(
       [
         '⚠️ Restarted — 2 delegations were in flight:',
         '• `webapp#84` — still in progress (last sign 4 min ago)',
-        '• `sandbox#21` — ✅ completed during the outage (details in the card ⤴)',
+        '• `sandbox-21-bench` — ✅ completed during the outage (details in the card ⤴)',
         'Reply to resume supervision.',
       ].join('\n'),
     );

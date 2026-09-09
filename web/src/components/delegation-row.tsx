@@ -3,26 +3,28 @@ import { ago, durationSince } from '../lib/time';
 import { Badge } from './ui/badge';
 import { listRow } from './ui/row';
 
-/** `repo#84` as a GitHub link when the registry could derive one, plain text otherwise. */
-export function IssueRef({ delegation }: { delegation: DelegationView }) {
-  const label =
-    delegation.repo !== null && delegation.issueNumber !== null
-      ? `${delegation.repo}#${delegation.issueNumber}`
-      : (delegation.worktreeName ?? delegation.dispatchId);
-  if (delegation.issueUrl === undefined) {
-    return <span className="font-medium">{label}</span>;
-  }
+/** Worktree identity, with the delivered PRs first and a cited issue if any. */
+export function DelegationRef({ delegation }: { delegation: DelegationView }) {
+  const links = [
+    ...delegation.prLinks.map((pr) => ({ url: pr.url, label: `PR ${pr.label}` })),
+    ...(delegation.issueUrl === undefined ? [] : [{ url: delegation.issueUrl, label: 'Issue' }]),
+  ];
   return (
-    /* Underlined at rest: color alone doesn't carry "this is a link" for anyone
-       who can't see the accent hue. Hover deepens it rather than adding it. */
-    <a
-      href={delegation.issueUrl}
-      target="_blank"
-      rel="noreferrer"
-      className="rounded-xs font-medium text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
-    >
-      {label}
-    </a>
+    <>
+      <span className="font-medium">{delegation.reference}</span>
+      <Badge>{delegation.kind === 'question' ? '🔎 Question' : 'Change'}</Badge>
+      {links.map((link) => (
+        <a
+          key={link.url}
+          href={link.url}
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-xs font-medium text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent"
+        >
+          {link.label}
+        </a>
+      ))}
+    </>
   );
 }
 
@@ -33,11 +35,8 @@ export function IssueRef({ delegation }: { delegation: DelegationView }) {
 export function DelegationRow({ delegation, asOf }: { delegation: DelegationView; asOf: string }) {
   return (
     <li className={listRow}>
-      <IssueRef delegation={delegation} />
+      <DelegationRef delegation={delegation} />
       {delegation.agent !== null && <Badge variant="accent">{delegation.agent}</Badge>}
-      {delegation.worktreeName !== null && (
-        <span className="font-mono text-2xs text-muted-foreground">{delegation.worktreeName}</span>
-      )}
       {delegation.title !== null && (
         <span className="min-w-0 flex-1 truncate text-muted-foreground" title={delegation.title}>
           {delegation.title}

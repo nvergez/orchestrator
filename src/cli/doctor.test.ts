@@ -18,6 +18,7 @@ const hint = (name: string): RepoHint => ({
   description: `${name} description.`,
   aliases: [],
   keywords: [],
+  default: name === 'webapp',
 });
 
 /** The orca CLI `repo list --json` success envelope, two repos. */
@@ -102,7 +103,7 @@ describe('runDoctorChecks', () => {
     deps.env.ORCHESTRATOR_ROUTING_HINTS_PATH = '/srv/hints.json';
     const checks = await runDoctorChecks(deps);
     const hints = checks.find((check) => check.label === 'routing hints');
-    expect(hints?.detail).toBe('2 repos at /srv/hints.json');
+    expect(hints?.detail).toBe('2 repos at /srv/hints.json; default repo: webapp');
   });
 
   it('passes env from process.env without touching the env file, naming the source', async () => {

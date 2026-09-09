@@ -10,6 +10,7 @@ export const ROUTING_HINTS_TEMPLATE = `{
   "repos": [
     {
       "name": "webapp",
+      "default": true,
       "description": "The product web app — features, endpoints and dashboards wired to real data.",
       "aliases": ["the app", "the product"],
       "keywords": ["feature", "endpoint", "dashboard", "export"]

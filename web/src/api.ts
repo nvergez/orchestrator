@@ -5,6 +5,9 @@
  */
 
 export interface DelegationView {
+  reference: string;
+  kind: 'question' | 'change' | null;
+  prLinks: Array<{ url: string; label: string }>;
   dispatchId: string;
   threadTs: string;
   channelId: string;

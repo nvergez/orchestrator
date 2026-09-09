@@ -1,4 +1,4 @@
-import { commandSegments, flagValue, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
+import { commandSegments, flagCount, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
 import { CREATE_STEP, DISPATCH_STEP, flagViolation } from '../kernel/protocol.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from '../kernel/messages.ts';
 import {
@@ -9,7 +9,8 @@ import {
   parseOrcaEnvelope,
   type CommandRunner,
 } from '../kernel/orca.ts';
-import { issueFromName, repoFromName, titleFromName } from './worktree-name.ts';
+import { titleFromName } from './worktree-name.ts';
+import type { RequestKind } from '../kernel/requests.ts';
 import type { ThreadSurface } from './thread-surface.ts';
 import type { DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
@@ -76,9 +77,10 @@ interface PendingDelegation {
   worktreeId: string;
   name: string;
   path: string;
-  repo: string;
+  repo: string | null;
   issueNumber: number | null;
   agent: string | null;
+  kind: RequestKind;
   issueUrl?: string;
   title: string;
   taskId?: string;
@@ -89,6 +91,7 @@ interface PendingDelegation {
 }
 
 interface ThreadTracker {
+  preparedRepos: Map<string, { repo: string; issueUrl?: string }>;
   /** Un-dispatched delegations, keyed by worktree id. */
   pending: Map<string, PendingDelegation>;
   /** Worker terminal handle → worktree id, learned from `terminal list`. */
@@ -172,10 +175,21 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     if (violation !== undefined) return deny(violation);
     const name = flagValue(tokens, '--name');
     const issue = flagValue(tokens, '--issue');
-    if (name === undefined || issue === undefined || issueFromName(name) !== Number(issue)) {
+    const repoRef = flagValue(tokens, '--repo');
+    if (tokens.some((token) => token.includes('$')) || ['--name', '--repo', '--issue'].some((flag) => flagCount(tokens, flag) > 1)) {
+      return deny('use one literal --name, --repo and optional --issue value');
+    }
+    if (hasFlag(tokens, '--issue') && (issue === undefined || !/^[1-9]\d*$/.test(issue))) return deny('--issue must be a positive issue number');
+    let identity: { repo: string; issueUrl?: string };
+    try {
+      identity = await this.repoIdentity(repoRef, numberOrNull(issue));
+    } catch (error) {
+      return deny(`Orca target repo could not be resolved: ${String(error)}`);
+    }
+    const repo = identity.repo;
+    if (name === undefined || !name.startsWith(`${repo}-`) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name.slice(repo.length + 1))) {
       return deny(
-        'the worktree name must follow `<repo>-<issue#>-<slug>` with the same ' +
-          'issue number as --issue (spec §5) — fix the --name and retry',
+        'the worktree name must follow `<repo>-<slug>` using the selected repo name (spec §5) — fix the --name and retry',
       );
     }
 
@@ -191,6 +205,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
         return deny('the turn was interrupted while waiting for a worker slot — nothing was created');
       }
     }
+    this.tracker(threadTs, channelId).preparedRepos.set(name, identity);
     this.tracker(threadTs, channelId).looseSlots += 1;
     return { action: 'proceed', command };
   }
@@ -323,17 +338,17 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     }
 
     const name = worktree.displayName;
-    // prepare enforced --issue, so the token fallback keeps repo#n honest
-    // even when the runtime omits linkedIssue from the envelope.
-    const issueNumber =
-      typeof worktree.linkedIssue === 'number'
-        ? worktree.linkedIssue
-        : (issueFromName(name) ?? numberOrNull(flagValue(tokens, '--issue')));
-    const { repo, issueUrl } = await this.repoIdentity(
-      typeof worktree.repoId === 'string' ? worktree.repoId : undefined,
-      name,
-      issueNumber,
-    );
+    const issueNumber = numberOrNull(flagValue(tokens, '--issue'));
+    let identity: { repo: string | null; issueUrl?: string } = tracker.preparedRepos.get(name) ?? { repo: null };
+    tracker.preparedRepos.delete(name);
+    if (identity.repo === null) {
+      try {
+        identity = await this.repoIdentity(flagValue(tokens, '--repo'), issueNumber);
+      } catch (error) {
+        this.logger.warn({ err: error, name }, 'created worktree repo could not be resolved');
+      }
+    }
+    const { repo, issueUrl } = identity;
 
     const pending: PendingDelegation = {
       worktreeId: worktree.id,
@@ -342,10 +357,11 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       repo,
       issueNumber,
       agent: flagValue(tokens, '--agent') ?? null,
+      kind: flagValue(tokens, '--comment') === 'question' ? 'question' : 'change',
       issueUrl,
-      title: titleFromName(name),
+      title: titleFromName(name, repo ?? ''),
       cardTs: null,
-      milestones: [milestoneLine(this.clock(), 'issue linked, worktree ready')],
+      milestones: [milestoneLine(this.clock(), issueNumber === null ? 'worktree ready' : 'issue linked, worktree ready')],
       holdsSlot: tracker.looseSlots > 0,
     };
     if (tracker.looseSlots > 0) tracker.looseSlots -= 1;
@@ -448,6 +464,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
       repo: pending?.repo ?? null,
       issueNumber: pending?.issueNumber ?? null,
       agent: pending?.agent ?? null,
+      kind: pending?.kind ?? null,
       workerHandle,
       threadTs,
       channelId,
@@ -519,6 +536,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     let tracker = this.threads.get(key);
     if (tracker === undefined) {
       tracker = {
+        preparedRepos: new Map(),
         pending: new Map(),
         handles: new Map(),
         waited: new Set(),
@@ -530,29 +548,24 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     return tracker;
   }
 
-  /** Registry lookup for the card header — wrapped, degrading to name parsing. */
+  /** Resolve identity from the command's --repo, never from a worktree name. */
   private async repoIdentity(
-    repoId: string | undefined,
-    worktreeName: string,
+    repoRef: string | undefined,
     issueNumber: number | null,
   ): Promise<{ repo: string; issueUrl?: string }> {
-    try {
-      if (repoId === undefined) throw new Error('worktree create output carried no repoId');
-      const registry = await listRegistryRepos(this.run);
-      const repo = registry.find((candidate) => candidate.id === repoId);
-      if (repo === undefined) throw new Error(`repo ${repoId} not in the registry`);
-      const issueUrl =
-        repo.canonicalKey !== undefined && issueNumber !== null
-          ? `https://${repo.canonicalKey}/issues/${issueNumber}`
-          : undefined;
-      return { repo: repo.name, ...(issueUrl !== undefined && { issueUrl }) };
-    } catch (error) {
-      this.logger.warn(
-        { err: error, worktreeName },
-        'registry lookup for the card failed — falling back to the worktree name',
-      );
-      return { repo: repoFromName(worktreeName) };
-    }
+    if (repoRef === undefined) throw new Error('worktree create carried no --repo');
+    const registry = await listRegistryRepos(this.run);
+    const typed = /^(id|name):(.*)$/.exec(repoRef);
+    const kind = typed?.[1];
+    const ref = typed?.[2] ?? repoRef;
+    const repo = registry.find((candidate) =>
+      (kind !== 'name' && candidate.id === ref) || (kind !== 'id' && candidate.name === ref),
+    );
+    if (repo === undefined) throw new Error(`repo ${repoRef} not in the registry`);
+    const issueUrl = repo.canonicalKey !== undefined && issueNumber !== null
+      ? `https://${repo.canonicalKey}/issues/${issueNumber}`
+      : undefined;
+    return { repo: repo.name, ...(issueUrl !== undefined && { issueUrl }) };
   }
 
   private matchByDisplayName(
@@ -560,12 +573,7 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     displayName: unknown,
   ): PendingDelegation | undefined {
     if (typeof displayName !== 'string') return undefined;
-    const match = /^(.+)#(\d+)$/.exec(displayName);
-    if (match === null) return undefined;
-    for (const pending of tracker.pending.values()) {
-      if (pending.repo === match[1] && pending.issueNumber === Number(match[2])) return pending;
-    }
-    return undefined;
+    return [...tracker.pending.values()].find((pending) => pending.name === displayName);
   }
 
   private singlePending(tracker: ThreadTracker): PendingDelegation | undefined {
@@ -574,8 +582,9 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 
   private renderCard(pending: PendingDelegation): string {
     return delegationCard({
-      repo: pending.repo,
-      issueNumber: pending.issueNumber ?? 0,
+      repo: pending.repo ?? 'work',
+      issueNumber: pending.issueNumber,
+      kind: pending.kind,
       title: pending.title,
       worktreeName: pending.name,
       agent: pending.agent ?? 'claude',

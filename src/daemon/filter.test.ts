@@ -35,11 +35,13 @@ describe('classifyEvent', () => {
     });
   });
 
-  it('treats a mention inside a thread as a reply, not a new session (spec §3: open = root only)', () => {
+  it('reports the mention and author so the handler can open an unknown thread', () => {
     const inThread = { ...mention, thread_ts: '1751960000.000001' };
 
     expect(classifyEvent(inThread, guard)).toEqual({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: true,
       threadTs: '1751960000.000001',
       channelId: 'C0EXAMPLE123',
       text: 'deploy the fix',
@@ -49,6 +51,8 @@ describe('classifyEvent', () => {
   it('treats a plain thread reply from the authorized user as a reply — no re-mention needed', () => {
     expect(classifyEvent(threadReply, guard)).toEqual({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: false,
       threadTs: '1751970000.000100',
       channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',
@@ -132,11 +136,6 @@ describe('classifyEvent', () => {
       'third_party_in_thread',
     ],
     [
-      'an in-thread mention that carries no content once the tag is stripped',
-      { ...mention, thread_ts: '1751960000.000001', text: '<@U0EXAMPLEBOT>  ' },
-      'empty_text',
-    ],
-    [
       'a thread reply with no text (e.g. attachment-only) — no empty turn injected',
       { ...threadReply, text: undefined },
       'empty_text',
@@ -209,6 +208,8 @@ describe('classifyEvent', () => {
   it('a mention-less sentence containing "close" stays a reply', () => {
     expect(classifyEvent({ ...threadReply, text: 'close the PR when CI is green' }, guard)).toEqual({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: false,
       threadTs: '1751970000.000100',
       channelId: 'C0EXAMPLE123',
       text: 'close the PR when CI is green',
@@ -255,6 +256,8 @@ describe('classifyEvent', () => {
     });
     expect(classifyEvent({ ...threadReply, channel: 'C0SECOND456' }, guard)).toMatchObject({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: false,
       channelId: 'C0SECOND456',
     });
   });
@@ -340,6 +343,8 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
 
     expect(classifyEvent(event, guard)).toEqual({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: false,
       threadTs: threadReply.thread_ts,
       channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',
@@ -365,6 +370,8 @@ describe('humanText via blocks (issue #41 — client context-block footers)', ()
   it('falls back to event.text when no rich_text block exists (plain API posts)', () => {
     expect(classifyEvent(threadReply, guard)).toEqual({
       action: 'reply',
+      userId: 'U0EXAMPLE456',
+      mentioned: false,
       threadTs: threadReply.thread_ts,
       channelId: 'C0EXAMPLE123',
       text: 'yes, go ahead',

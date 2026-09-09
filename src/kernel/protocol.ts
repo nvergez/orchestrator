@@ -1,4 +1,4 @@
-import { hasFlag } from './guardrails.ts';
+import { flagCount, flagValue, hasFlag } from './guardrails.ts';
 
 /**
  * The dispatch protocol's single source of truth (spec §5). Each flag
@@ -13,9 +13,8 @@ import { hasFlag } from './guardrails.ts';
  * their machine form is not a flag rule and forcing them in would make the
  * table dishonest:
  * - one-step-per-Bash-call: prose intro + `prepare`'s segment count.
- * - the worktree `--name` shape (`<repo>-<issue#>-<slug>` bound to
- *   `--issue`): a cross-flag validator (worktree-name.ts) in
- *   `prepareCreate`; the prose carries the shape inside the command
+ * - the worktree `--name` shape (`<repo>-<slug>` bound to the resolved
+ *   `--repo`): validated in `prepareCreate`; the prose carries the shape inside the command
  *   template's fixed args.
  * - `--repo` presence: enforced by the routing allow-list (permissions.ts
  *   over `extractDelegationRepoRefs`), which fails closed on a missing ref.
@@ -33,6 +32,7 @@ export type FlagRule =
       flag: string;
       /** How the flag reads in the prose command template (`--issue <n>`). */
       placeholder?: string;
+      values?: readonly string[];
       /** Optional reason — surfaces in the deny message, not the prose. */
       why?: string;
     }
@@ -55,11 +55,11 @@ export interface ProtocolStep {
   flags: FlagRule[];
 }
 
-/** Step 2 of the sequence — `orca worktree create`. */
+/** Step 1 of the sequence — `orca worktree create`. */
 export const CREATE_STEP: ProtocolStep = {
   topic: 'worktree',
   action: 'create',
-  fixedArgs: '--repo id:<repoId> --name <repo>-<n>-<slug>',
+  fixedArgs: '--repo id:<repoId> --name <repo>-<slug>',
   flags: [
     {
       presence: 'forbidden',
@@ -68,14 +68,14 @@ export const CREATE_STEP: ProtocolStep = {
         'the brief travels with `dispatch --inject`, or the worker misses ' +
         'the coordinator preamble and never reports done',
     },
-    { presence: 'required', flag: '--agent', placeholder: '<agent>' },
-    { presence: 'required', flag: '--issue', placeholder: '<n>' },
+    { presence: 'required', flag: '--agent', placeholder: '<agent>', values: ['claude', 'codex'] },
+    { presence: 'required', flag: '--comment', placeholder: '<question|change>', values: ['question', 'change'] },
     { presence: 'required', flag: '--no-parent' },
     { presence: 'required', flag: '--json' },
   ],
 };
 
-/** Step 6 of the sequence — `orca orchestration dispatch`. */
+/** Step 5 of the sequence — `orca orchestration dispatch`. */
 export const DISPATCH_STEP: ProtocolStep = {
   topic: 'orchestration',
   action: 'dispatch',
@@ -119,6 +119,9 @@ export function stepWarnings(step: ProtocolStep): string {
  */
 export function flagViolation(step: ProtocolStep, tokens: string[]): string | undefined {
   for (const rule of step.flags) {
+    if (flagCount(tokens, rule.flag) > 1) {
+      return `${rule.flag} must appear only once (spec §5)`;
+    }
     if (rule.presence === 'forbidden' && hasFlag(tokens, rule.flag)) {
       return `never pass ${rule.flag} — ${rule.why} (spec §5)`;
     }
@@ -127,6 +130,14 @@ export function flagViolation(step: ProtocolStep, tokens: string[]): string | un
       return rule.why === undefined
         ? `${command} must carry ${rule.flag} here (spec §5) — add it and retry`
         : `${command} must carry ${rule.flag} — ${rule.why} (spec §5); add it and retry`;
+    }
+  }
+  for (const rule of step.flags) {
+    if (rule.presence === 'required' && rule.placeholder !== undefined) {
+      const value = flagValue(tokens, rule.flag);
+      if (value === undefined || value === '' || (rule.values && !rule.values.includes(value))) {
+        return `${rule.flag} must have ${rule.values ? `one of ${rule.values.join(', ')}` : 'a value'} (spec §5)`;
+      }
     }
   }
   return undefined;

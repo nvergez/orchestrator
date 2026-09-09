@@ -11,8 +11,8 @@ const CHANNEL = 'C0EXAMPLE123';
 const DAEMON_WT = '/home/op/projects/orchestrator';
 
 const CREATE_CMD =
-  'orca worktree create --repo id:repo-fwd --name webapp-84-csv-export ' +
-  '--agent claude --issue 84 --no-parent --json';
+  'orca worktree create --repo id:repo-fwd --name webapp-csv-export ' +
+  '--agent claude --comment change --issue 84 --no-parent --json';
 const DISPATCH_CMD = 'orca orchestration dispatch --task task_3f81 --to term_w1 --inject --json';
 
 /** The orca CLI `--json` envelope, as captured from the real runtime. */
@@ -22,8 +22,8 @@ const WT_CREATE_OUT = envelope({
   worktree: {
     id: 'wt-1',
     repoId: 'repo-fwd',
-    path: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
-    displayName: 'webapp-84-csv-export',
+    path: '/home/op/orca/workspaces/webapp/webapp-csv-export',
+    displayName: 'webapp-csv-export',
     linkedIssue: 84,
   },
 });
@@ -139,6 +139,14 @@ const primeWorker = async (coordinator: DelegationCoordinator, threadTs = THREAD
 };
 
 describe('prepare — pass-through and the #4 invariants', () => {
+  it('accepts an issue-less Question and requires a valid request kind', async () => {
+    const { coordinator } = makeCoordinator();
+    const command = 'orca worktree create --repo id:repo-fwd --name webapp-retry-timeout --agent claude --comment question --no-parent --json';
+    await expect(coordinator.prepare(THREAD, CHANNEL, command)).resolves.toEqual({ action: 'proceed', command });
+    for (const invalid of [command.replace('--comment question', ''), command.replace('question', 'maybe'), command + ' --comment change']) {
+      await expect(coordinator.prepare(THREAD, CHANNEL, invalid)).resolves.toMatchObject({ action: 'deny' });
+    }
+  });
   it('passes unrelated commands through untouched', async () => {
     const { coordinator, runner } = makeCoordinator();
     const command = 'orca worktree ps --json';
@@ -165,7 +173,7 @@ describe('prepare — pass-through and the #4 invariants', () => {
     expect((verdict as { message: string }).message).toContain('--inject');
   });
 
-  it.each(['--json', '--issue 84', '--agent claude', '--no-parent'])(
+  it.each(['--json', '--comment change', '--agent claude', '--no-parent'])(
     'refuses a create missing %s',
     async (required) => {
       const { coordinator } = makeCoordinator();
@@ -175,14 +183,14 @@ describe('prepare — pass-through and the #4 invariants', () => {
     },
   );
 
-  it('refuses a worktree name that does not carry the issue number', async () => {
+  it('refuses a worktree name that does not carry the selected repo', async () => {
     const { coordinator } = makeCoordinator();
     const verdict = await coordinator.prepare(
       THREAD, CHANNEL,
-      CREATE_CMD.replace('webapp-84-csv-export', 'csv-export'),
+      CREATE_CMD.replace('webapp-csv-export', 'csv-export'),
     );
     expect(verdict).toMatchObject({ action: 'deny' });
-    expect((verdict as { message: string }).message).toContain('<repo>-<issue#>-<slug>');
+    expect((verdict as { message: string }).message).toContain('<repo>-<slug>');
   });
 
   it('refuses a dispatch that carries its own --from', async () => {
@@ -495,6 +503,17 @@ describe('the worker cap — waves (spec §5)', () => {
 });
 
 describe('observe — the card, the 👀 and the ledger', () => {
+  it('ledgers an issue-less Question on a hyphenated repo using the --repo identity', async () => {
+    const { coordinator, store, surface } = makeCoordinator({ script: { 'repo list --json': envelope({ repos: [{ id: 'repo-landing', displayName: 'leadfinder-landing' }] }) } });
+    const command = 'orca worktree create --repo id:repo-landing --name leadfinder-landing-retry-timeout --agent claude --comment=question --no-parent --json';
+    await expect(coordinator.prepare(THREAD, CHANNEL, command)).resolves.toMatchObject({ action: 'proceed' });
+    await coordinator.observe(THREAD, CHANNEL, command, envelope({ worktree: { id: 'wt-1', repoId: 'wrong-envelope-id', displayName: 'leadfinder-landing-retry-timeout', path: '/w/retry' } }));
+    await primeWorker(coordinator);
+    await coordinator.observe(THREAD, CHANNEL, DISPATCH_CMD, DISPATCH_OUT);
+    expect(store.getByDispatchId('ctx_d1')).toMatchObject({ kind: 'question', repo: 'leadfinder-landing', issueNumber: null });
+    expect(surface.posts[0]?.text).toContain('🔎 Looking on *leadfinder-landing*');
+    expect(surface.posts[0]?.text).not.toContain('issue');
+  });
   const runSequence = async (coordinator: DelegationCoordinator): Promise<void> => {
     await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
     await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
@@ -521,8 +540,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
         channelId: CHANNEL,
         threadTs: THREAD,
         text:
-          '⚙️ *webapp#84 — csv export*\n' +
-          '`webapp-84-csv-export` · claude · issue ' +
+          '⚙️ *webapp-csv-export — csv export*\n' +
+          'claude · issue ' +
           '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
           '• 14:04 — issue linked, worktree ready',
       },
@@ -540,8 +559,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
         channelId: CHANNEL,
         ts: 'card-ts-1',
         text:
-          '⚙️ *webapp#84 — CSV export of send metrics*\n' +
-          '`webapp-84-csv-export` · claude · issue ' +
+          '⚙️ *webapp-csv-export — CSV export of send metrics*\n' +
+          'claude · issue ' +
           '<https://github.com/acme/webapp/issues/84|webapp#84>\n' +
           '• 14:04 — issue linked, worktree ready\n' +
           '• 14:04 — brief handed off (task `task_3f81`)',
@@ -552,8 +571,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
         taskId: 'task_3f81',
         dispatchId: 'ctx_d1',
         worktreeId: 'wt-1',
-        worktreeName: 'webapp-84-csv-export',
-        worktreePath: '/home/op/orca/workspaces/webapp/webapp-84-csv-export',
+        worktreeName: 'webapp-csv-export',
+        worktreePath: '/home/op/orca/workspaces/webapp/webapp-csv-export',
         repo: 'webapp',
         issueNumber: 84,
         agent: 'claude',
@@ -565,6 +584,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
         status: 'dispatched',
         dispatchedAt: expect.any(String) as string,
         lastBusAt: null,
+        kind: 'change',
+        resultText: null,
         closedAt: null,
       },
     ]);
@@ -586,8 +607,8 @@ describe('observe — the card, the 👀 and the ledger', () => {
   it('degrades to plain repo#n when the repo has no GitHub remote', async () => {
     const { coordinator, surface } = makeCoordinator();
     const sandboxCreate =
-      'orca worktree create --repo id:repo-sandbox --name sandbox-21-bench ' +
-      '--agent claude --issue 21 --no-parent --json';
+      'orca worktree create --repo id:repo-sandbox --name sandbox-bench ' +
+      '--agent claude --comment change --issue 21 --no-parent --json';
 
     await coordinator.prepare(THREAD, CHANNEL, sandboxCreate);
     await coordinator.observe(
@@ -598,7 +619,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
           id: 'wt-2',
           repoId: 'repo-sandbox',
           path: '/home/op/sandbox',
-          displayName: 'sandbox-21-bench',
+          displayName: 'sandbox-bench',
           linkedIssue: 21,
         },
       }),
@@ -608,7 +629,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
     expect(surface.posts[0]?.text).not.toContain('<https://');
   });
 
-  it('still identifies the repo from the worktree name when the registry is down', async () => {
+  it('keeps an unresolved repo unknown when the registry is down', async () => {
     const { coordinator, surface } = makeCoordinator({
       script: { 'repo list --json': new Error('connect ECONNREFUSED') },
     });
@@ -616,7 +637,7 @@ describe('observe — the card, the 👀 and the ledger', () => {
     await coordinator.prepare(THREAD, CHANNEL, CREATE_CMD);
     await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, WT_CREATE_OUT);
 
-    expect(surface.posts[0]?.text).toContain('⚙️ *webapp#84 — csv export*');
+    expect(surface.posts[0]?.text).toContain('⚙️ *webapp-csv-export');
     expect(surface.posts[0]?.text).not.toContain('<https://');
   });
 

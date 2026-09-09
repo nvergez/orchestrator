@@ -1,3 +1,5 @@
+import type { RequestKind } from './requests.ts';
+
 /**
  * Reference verbatims fixed by the Slack UX mock (spec §8,
  * docs/prototypes/slack-ux/conversations.md).
@@ -35,21 +37,6 @@ export function gateLine(command: string, worktree?: string): string {
 }
 
 /**
- * Issue #10 §4 — the one-line conditional routing gate, posted by the session
- * whenever repo or agent was inferred. Spec §4 shows the short form; the
- * ticket (which wins) appends the "name another" escape hatch.
- */
-export function delegationGateLine(repo: string, agent: string): string {
-  return `→ I'm delegating on *${repo}* with *${agent}*. Go? (or name another repo/agent)`;
-}
-
-/** Zero match — stop + list (scenario "Zero match" in the mock, issue #10 §2). */
-export function zeroMatchLine(repoNames: string[]): string {
-  const list = repoNames.map((name) => `\`${name}\``).join(', ');
-  return `No repo I drive matches. I know: ${list}. Rephrase targeting one of them.`;
-}
-
-/**
  * Scenario A — the delegation card (issue #19): one message per delegation,
  * posted when the worktree is ready and edited at milestones only, never a
  * token stream. GitHub links rich (`<url|repo#n>`), worktree name as code;
@@ -57,7 +44,8 @@ export function zeroMatchLine(repoNames: string[]): string {
  */
 export function delegationCard(opts: {
   repo: string;
-  issueNumber: number;
+  issueNumber: number | null;
+  kind?: RequestKind | null;
   title: string;
   worktreeName: string;
   agent: string;
@@ -66,11 +54,14 @@ export function delegationCard(opts: {
   /** Rendered milestone lines, oldest first (`• 14:04 — worktree ready`). */
   milestones: string[];
 }): string {
+  if (opts.kind === 'question') {
+    return `🔎 Looking on *${opts.repo}*…\n\`${opts.worktreeName}\``;
+  }
   const ref = `${opts.repo}#${opts.issueNumber}`;
   const issue = opts.issueUrl === undefined ? ref : `<${opts.issueUrl}|${ref}>`;
   return [
-    `⚙️ *${ref} — ${opts.title}*`,
-    `\`${opts.worktreeName}\` · ${opts.agent} · issue ${issue}`,
+    `⚙️ *${opts.worktreeName} — ${opts.title}*`,
+    `${opts.agent}${opts.issueNumber === null ? '' : ` · issue ${issue}`}`,
     ...opts.milestones,
   ].join('\n');
 }
@@ -89,7 +80,9 @@ export function milestoneLine(at: string, text: string): string {
  */
 export function completedCard(opts: {
   repo: string;
-  issueNumber: number;
+  issueNumber: number | null;
+  worktreeName: string;
+  kind?: RequestKind | null;
   title: string;
   worktreePath: string | null;
   durationMs: number;
@@ -97,16 +90,19 @@ export function completedCard(opts: {
   prLinks: Array<{ url: string; label: string }>;
   failureReason?: string;
 }): string {
-  const ref = `${opts.repo}#${opts.issueNumber}`;
+  const ref = opts.worktreeName;
   const failed = opts.failureReason !== undefined;
   const header = failed
     ? `❌ *${ref} — ${opts.title} — failed after ${formatDuration(opts.durationMs)}*`
-    : `✅ *${ref} — ${opts.title} — delivered in ${formatDuration(opts.durationMs)}*`;
+    : `✅ *${ref} — ${opts.kind === 'question' ? 'answered' : `${opts.title} — delivered`} in ${formatDuration(opts.durationMs)}*`;
   const lines = [header];
   if (opts.failureReason !== undefined) lines.push(`• reason: ${opts.failureReason}`);
   for (const pr of opts.prLinks) lines.push(`• PR: <${pr.url}|${pr.label}>`);
-  lines.push(`• issue: ${opts.issueUrl === undefined ? ref : `<${opts.issueUrl}|${ref}>`}`);
-  if (opts.worktreePath !== null) lines.push(`• worktree: \`${opts.worktreePath}\``);
+  if (opts.kind !== 'question' && opts.issueNumber !== null) {
+    const issueRef = `${opts.repo}#${opts.issueNumber}`;
+    lines.push(`• issue: ${opts.issueUrl === undefined ? issueRef : `<${opts.issueUrl}|${issueRef}>`}`);
+  }
+  if (opts.kind !== 'question' && opts.worktreePath !== null) lines.push(`• worktree: \`${opts.worktreePath}\``);
   return lines.join('\n');
 }
 
@@ -116,7 +112,10 @@ export function completedCard(opts: {
  * lands as a NEW message, never silence. When the session does wake, its
  * voice writes this line's richer sibling instead.
  */
-export function workerDoneFallbackLine(subject: string, failed: boolean): string {
+export function workerDoneFallbackLine(subject: string, failed: boolean, report = ''): string {
+  const pr = failed ? undefined : extractPullRequestLinks(report)[0];
+  if (pr) return `${pr.url}\n${subject}. Details in the card ⤴`;
+  if (!failed && report.trim() !== '') return report;
   const head = failed ? '❌ Failed' : '✅ Delivered';
   return `${head} — ${subject}. Details in the card ⤴`;
 }
@@ -364,20 +363,10 @@ const CLOSING_STATUS_ICON = { completed: '✅', failed: '❌', dispatched: '⚙�
 
 /** `• ✅ <url|repo#n>` — one delegation's line in the 🔚 summary (issue #51). */
 function closingDelegationLine(delegation: ClosingDelegation): string {
-  const plainRef =
-    delegation.repo !== null && delegation.issueNumber !== null
-      ? `${delegation.repo}#${delegation.issueNumber}`
-      : null;
-  const name =
-    plainRef !== null
-      ? delegation.issueUrl === undefined
-        ? plainRef
-        : `<${delegation.issueUrl}|${plainRef}>`
-      : delegation.worktreeName !== null
-        ? `\`${delegation.worktreeName}\``
-        : delegation.taskId;
+  const name = delegation.worktreeName === null ? delegation.taskId : `\`${delegation.worktreeName}\``;
+  const issue = delegation.issueUrl === undefined ? '' : ` · <${delegation.issueUrl}|issue>`;
   const tail = delegation.status === 'dispatched' ? ' — still in flight' : '';
-  return `• ${CLOSING_STATUS_ICON[delegation.status]} ${name}${tail}`;
+  return `• ${CLOSING_STATUS_ICON[delegation.status]} ${name}${issue}${tail}`;
 }
 
 /**

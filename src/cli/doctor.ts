@@ -209,7 +209,7 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
     checks.push({
       label: 'routing hints',
       ok: true,
-      detail: `${hints.length} repo${hints.length === 1 ? '' : 's'} at ${hintsPath}`,
+      detail: `${hints.length} repo${hints.length === 1 ? '' : 's'} at ${hintsPath}; default repo: ${hints.find((hint) => hint.default)?.name ?? (hints.length === 1 ? hints[0]!.name : 'not configured')}`,
     });
   } catch (error) {
     if (!(error instanceof RoutingHintsError)) throw error;

@@ -7,6 +7,8 @@ import type { RepoHint } from '../kernel/routing.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
 import type { DelegationStore } from '../delegation/delegations.ts';
 import type { CommandRunner } from '../kernel/orca.ts';
+import { registerHandlers, type SlackApp } from './app.ts';
+import type { IncomingEvent } from './filter.ts';
 
 /**
  * Composition tests: the REAL graph — GateKeeper, RepoAllowList, GateRelay,
@@ -27,7 +29,7 @@ const DAEMON_WT = '/home/op/projects/orchestrator';
 
 const CREATE_CMD =
   'orca worktree create --repo name:webapp --name webapp-84-csv-export ' +
-  '--agent claude --issue 84 --no-parent --json';
+  '--agent claude --comment change --issue 84 --no-parent --json';
 
 const HINTS: RepoHint[] = [
   { name: 'webapp', description: 'The web app.', aliases: [], keywords: ['csv'] },
@@ -148,6 +150,7 @@ const makeRunner = (
 
 const makeRuntime = (
   opts: {
+    turnReply?: (text: string) => string;
     workerCap?: number;
     script?: Record<string, string | Error>;
     windows?: string[];
@@ -158,14 +161,23 @@ const makeRuntime = (
   const runner = makeRunner(opts);
   const intervals: number[] = [];
   let seams: ProcessSeams | undefined;
+  const turns: string[] = [];
   const runtime = buildRuntime({
+    slackWorkspaceUrl: 'https://acme.slack.com/',
     config: { ...CONFIG, ...(opts.workerCap !== undefined && { workerCap: opts.workerCap }) },
     hints: HINTS,
     surface,
     createProcesses: (wired) => {
       seams = wired;
       return () => ({
-        runTurn: () => Promise.resolve({ status: 'process_ended' as const }),
+        runTurn: (text, events) => {
+          turns.push(text);
+          if (!opts.turnReply) return Promise.resolve({ status: 'process_ended' as const });
+          const resultText = opts.turnReply(text);
+          events.onSessionId('session-test');
+          events.onDelta(resultText);
+          return Promise.resolve({ status: 'success' as const, resultText, costUsd: 0.01 });
+        },
         end: () => Promise.resolve(),
       });
     },
@@ -178,7 +190,7 @@ const makeRuntime = (
     },
   });
   if (seams === undefined) throw new Error('buildRuntime never asked for the process factory');
-  return { runtime, surface, runner, intervals, seams };
+  return { runtime, surface, runner, intervals, seams, turns };
 };
 
 /** The enforcement hook, built over the runtime's wired seams exactly as
@@ -198,6 +210,63 @@ const callOptions = (signal: AbortSignal = new AbortController().signal) => ({
   signal,
   toolUseID: 'toolu_01',
   requestId: 'req_01',
+});
+
+describe('Slack Question and Change requests — runtime composition', () => {
+  it.each(['question', 'change'] as const)('%s opens from a reply and completes through the real graph', async (kind) => {
+    const answer = 'The retry timeout comes from `retry.ts`.\nReply *do it* and I\'ll open a PR.';
+    const report = kind === 'question' ? answer : 'https://github.com/acme/webapp/pull/108\nFixed the retry timeout. Tests pass.';
+    const done = { id: 'msg_done', type: 'worker_done', subject: 'Done', body: report, from_handle: 'term_w1', payload: JSON.stringify({ taskId: 'task_request', dispatchId: 'ctx_request' }) };
+    const { runtime, seams, turns, surface, runner } = makeRuntime({
+      windows: [envelope({ messages: [done] })],
+      script: { 'worktree rm': envelope({ removed: true }) },
+      turnReply: (text) => text.startsWith('[orchestration event') ? report : 'Working on webapp.',
+    });
+    const handlers = new Map<string, (args: { event: unknown }) => Promise<void>>();
+    const app: SlackApp = {
+      event: (name, handler) => { handlers.set(name, handler); },
+      error: () => undefined,
+      client: {
+        chat: { postMessage: async ({ channel, thread_ts, text }) => surface.post(channel, thread_ts, text) },
+        conversations: { replies: () => Promise.resolve({ ok: true, messages: [{ ts: THREAD, user: 'U_COLLEAGUE', text: 'Why do retries fail?' }] }) },
+      },
+    };
+    registerHandlers(app, { channelIds: [CHANNEL], allowedUserIds: [USER], botUserId: 'U_BOT' }, runtime.sessions, runtime.gates, runtime.relay, createLogger('silent'));
+    const mention: IncomingEvent = { type: 'app_mention', channel: CHANNEL, user: USER, ts: '1751970002.000300', thread_ts: THREAD, text: `<@U_BOT> ${kind === 'question' ? 'explain this' : 'fix this'}` };
+    await handlers.get('app_mention')!({ event: mention });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    expect(turns[0]).toContain('> <@U_COLLEAGUE>: Why do retries fail?');
+    expect(runtime.store.get(THREAD, CHANNEL)?.rootUser).toBe(USER);
+    expect(seams.threadPermalink(THREAD, CHANNEL)).toBe('https://acme.slack.com/archives/C0EXAMPLE123/p1751970000000100');
+
+    const canUseTool = canUseToolFor(seams);
+    const create = `orca worktree create --repo name:webapp --name webapp-retry-timeout --agent claude --comment ${kind} --no-parent --json`;
+    expect(await canUseTool('Bash', { command: create }, callOptions())).toMatchObject({ behavior: 'allow' });
+    await seams.delegations.observe(THREAD, CHANNEL, create, envelope({ worktree: { id: 'wt_request', displayName: 'webapp-retry-timeout', path: '/w/retry' } }));
+    await seams.delegations.observe(THREAD, CHANNEL, 'orca terminal list --worktree id:wt_request --json', envelope({ terminals: [{ handle: 'term_w1', worktreeId: 'wt_request' }] }));
+    await seams.delegations.observe(THREAD, CHANNEL, 'orca terminal wait --terminal term_w1 --for tui-idle --json', envelope({ satisfied: true }));
+    await seams.delegations.observe(THREAD, CHANNEL, 'orca orchestration task-create --spec brief --json', envelope({ task: { id: 'task_request', task_title: 'Retry timeout', display_name: 'webapp-retry-timeout' } }));
+    const dispatch = 'orca orchestration dispatch --task task_request --to term_w1 --inject --json';
+    expect(await canUseTool('Bash', { command: dispatch }, callOptions())).toMatchObject({ behavior: 'allow' });
+    await seams.delegations.observe(THREAD, CHANNEL, dispatch, envelope({ dispatch: { id: 'ctx_request', task_id: 'task_request', assignee_handle: 'term_w1' } }));
+    await vi.waitFor(() => expect(runtime.watcher.isArmed(THREAD, CHANNEL)).toBe(false));
+    expect(runtime.delegationStore.getByDispatchId('ctx_request')).toMatchObject({ kind, repo: 'webapp', issueNumber: null, status: 'completed', resultText: report });
+    expect(surface.updates.at(-1)?.text).not.toContain('issue:');
+    expect(runner.calls).toContain('worktree rm --worktree id:wt_request --json');
+
+    if (kind === 'question') {
+      expect(surface.posts.filter((post) => post.text === answer)).toHaveLength(1);
+      expect(turns).toHaveLength(1);
+      await handlers.get('message')!({ event: { ...mention, type: 'message', ts: '1751970003.000400', text: 'do it' } });
+      await vi.waitFor(() => expect(turns).toHaveLength(2));
+      expect(turns[1]).toContain(answer);
+      expect(turns[1]?.endsWith('do it')).toBe(true);
+    } else {
+      await vi.waitFor(() => expect(turns).toHaveLength(2));
+      expect(turns[1]).toContain('start with the PR link');
+      await vi.waitFor(() => expect(surface.posts.some((post) => post.text.startsWith('https://github.com/acme/webapp/pull/108'))).toBe(true));
+    }
+  });
 });
 
 const seedDispatch = (

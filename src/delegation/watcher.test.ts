@@ -50,9 +50,13 @@ class FakeSurface implements Surface {
   failPosts = false;
   /** Fail only the next N posts — a transient Slack outage. */
   failNextPosts = 0;
+  failAtPost: number | undefined;
+  postAttempts = 0;
   private counter = 0;
 
   post(channelId: string, threadTs: string, text: string): Promise<string> {
+    this.postAttempts += 1;
+    if (this.postAttempts === this.failAtPost) return Promise.reject(new Error('ratelimited'));
     if (this.failNextPosts > 0) {
       this.failNextPosts -= 1;
       return Promise.reject(new Error('slack down'));
@@ -119,6 +123,7 @@ const seedDispatch = (
 };
 
 interface HarnessOptions {
+  storeNow?: () => string;
   checks?: Array<string | Error>;
   wakeResult?: WakeResult;
   registryDown?: boolean;
@@ -128,7 +133,7 @@ interface HarnessOptions {
 
 const makeWatcher = (options: HarnessOptions = {}) => {
   // Dispatch at 14:04, worker_done handled at 14:31 — the mock's 27 min.
-  const store = new DelegationStore(':memory:', () => '2026-07-08T14:04:00.000Z');
+  const store = new DelegationStore(':memory:', options.storeNow ?? (() => '2026-07-08T14:04:00.000Z'));
   store.setMailbox(THREAD, CHANNEL, MAILBOX);
   const surface = new FakeSurface();
   const checkRunner = makeCheckRunner(options.checks ?? []);
@@ -172,6 +177,72 @@ const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
   });
 
 describe('worker_done — the happy path', () => {
+  it.each([undefined, 2])('does not let deferred Question delivery overwrite a later failure (failed post: %s)', async (failAtPost) => {
+    const answer = 'a'.repeat(7001);
+    const { watcher, store, surface } = makeWatcher({ checks: [checkOut(
+      busMessage({ body: answer }),
+      busMessage({ id: 'msg_failure', subject: 'Failed: cannot push', body: 'No credentials.', payload: JSON.stringify({ dispatchId: 'ctx_change' }) }),
+    )] });
+    seedDispatch(store, { kind: 'question', issueNumber: null });
+    seedDispatch(store, { dispatchId: 'ctx_change', kind: 'change', workerHandle: 'term_change' });
+    surface.failAtPost = failAtPost;
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+    expect(surface.posts.map((post) => post.text).join('')).toBe(answer);
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: 'x' });
+  });
+
+  it('preserves a no-PR Change report when the thread cannot take a completion wake', async () => {
+    const report = 'This needs two PRs: first extract the parser, then change the routing. No code was changed.';
+    const { watcher, store, surface } = makeWatcher({
+      checks: [checkOut(busMessage({ subject: 'Proposed split', body: report }))],
+      wakeResult: 'skipped',
+    });
+    seedDispatch(store, { kind: 'change', issueNumber: null });
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+    expect(surface.posts).toContainEqual({ channelId: CHANNEL, threadTs: THREAD, text: report });
+  });
+
+  it('retries a partially posted Question answer without repeating successful chunks', async () => {
+    const answer = 'a'.repeat(3500) + 'b'.repeat(3500) + 'Final evidence.';
+    const { watcher, store, surface, wakes } = makeWatcher({ checks: [checkOut(busMessage({ body: answer }))] });
+    seedDispatch(store, { kind: 'question', issueNumber: null });
+    surface.failAtPost = 2;
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+    expect(surface.posts.map((post) => post.text).join('')).toBe(answer);
+    expect(surface.posts).toHaveLength(3);
+    expect(wakes).toEqual([]);
+  });
+
+  it('keeps a failed Question worktree and stores the failure report', async () => {
+    const { watcher, store, surface, rmCalls } = makeWatcher({ checks: [checkOut(busMessage({ subject: 'Failed: could not read checkout', body: 'The checkout is unavailable.' }))] });
+    seedDispatch(store, { kind: 'question', issueNumber: null });
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+    expect(store.getByDispatchId('ctx_d1')).toMatchObject({ status: 'failed', resultText: 'The checkout is unavailable.' });
+    expect(surface.updates[0]?.text).toContain('❌');
+    expect(surface.updates[0]?.text).toContain('could not read checkout');
+    expect(rmCalls).toEqual([]);
+  });
+  it('posts a long Question answer verbatim in order, persists it, completes the card and cleans up without a wake', async () => {
+    const answer = 'The retry timeout is in `retry.ts`.\n' + '🔎 Evidence from the code.\n'.repeat(400) + 'Reply *do it* and I\'ll open a PR.';
+    let now = '2026-07-08T14:04:00.000Z';
+    const { watcher, store, surface, wakes, rmCalls } = makeWatcher({ checks: [checkOut(busMessage({ body: answer }))], storeNow: () => now });
+    seedDispatch(store, { kind: 'question', issueNumber: null, worktreeName: 'webapp-retry-timeout' });
+    now = '2026-07-08T14:31:00.000Z';
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+    expect(surface.posts.length).toBeGreaterThan(1);
+    expect(surface.posts.map((post) => post.text).join('')).toBe(answer);
+    expect(surface.updates[0]?.text).toContain('answered in 27 min');
+    expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'white_check_mark' });
+    expect(store.getByDispatchId('ctx_d1')).toMatchObject({ status: 'completed', resultText: answer });
+    expect(store.pendingQuestionDeliveries()).toEqual([]);
+    expect(wakes).toEqual([]);
+    expect(rmCalls).toHaveLength(1);
+  });
   it('closes the row, flips the card to ✅ with durable links, swaps 👀 for ✅, wakes the session', async () => {
     const { watcher, store, surface, checkRunner, wakes, rmCalls, slotsFreed } = makeWatcher({
       checks: [checkOut(busMessage())],
@@ -195,7 +266,7 @@ describe('worker_done — the happy path', () => {
     expect(surface.updates).toHaveLength(1);
     const card = surface.updates[0];
     expect(card?.ts).toBe('card-ts-1');
-    expect(card?.text).toContain('✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*');
+    expect(card?.text).toContain('✅ *webapp-84-csv-export — CSV export of send metrics — delivered in 27 min*');
     expect(card?.text).toContain('• PR: <https://github.com/acme/webapp/pull/87|webapp#87>');
     expect(card?.text).toContain('• issue: <https://github.com/acme/webapp/issues/84|webapp#84>');
     expect(card?.text).toContain('• worktree: `/home/op/orca/workspaces/webapp/webapp-84-csv-export`');
@@ -208,9 +279,9 @@ describe('worker_done — the happy path', () => {
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ threadTs: THREAD, channelId: CHANNEL });
     expect(wakes[0]?.text).toContain('worker_done');
-    expect(wakes[0]?.text).toContain('webapp#84');
+    expect(wakes[0]?.text).toContain('webapp-84-csv-export');
     expect(wakes[0]?.text).toContain('https://github.com/acme/webapp/pull/87');
-    expect(wakes[0]?.text).toContain('✅ Delivered');
+    expect(wakes[0]?.text).toContain('start with the PR link');
     expect(surface.posts).toEqual([]);
 
     // The delivered worktree went away, silently (issue #43).
@@ -225,7 +296,7 @@ describe('worker_done — the happy path', () => {
     await stopped(watcher);
 
     expect(surface.updates).toEqual([]);
-    expect(surface.posts.some((post) => post.text.startsWith('✅ *webapp#84'))).toBe(true);
+    expect(surface.posts.some((post) => post.text.startsWith('✅ *webapp-84-csv-export'))).toBe(true);
   });
 
   it('degrades the issue link to plain repo#n when the registry is unreachable', async () => {
@@ -253,7 +324,7 @@ describe('worker_done — the happy path', () => {
     await stopped(watcher);
 
     expect(surface.posts).toEqual([
-      { channelId: CHANNEL, threadTs: THREAD, text: '✅ Delivered — CSV export shipped. Details in the card ⤴' },
+      { channelId: CHANNEL, threadTs: THREAD, text: 'https://github.com/acme/webapp/pull/87\nCSV export shipped. Details in the card ⤴' },
     ]);
   });
 
@@ -357,7 +428,7 @@ describe('worker_done — failure', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
     const card = surface.updates[0]?.text ?? '';
-    expect(card).toContain('❌ *webapp#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card).toContain('❌ *webapp-84-csv-export — CSV export of send metrics — failed after 27 min*');
     expect(card).toContain('• reason: Failed: e2e tests break on main');
     expect(surface.reactions).toEqual([{ ts: THREAD, name: 'x' }]);
     expect(wakes[0]?.text).toContain('FAILED');

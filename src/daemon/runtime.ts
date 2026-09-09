@@ -32,6 +32,8 @@ import type { Logger } from '../kernel/logger.ts';
 /** What the session-process factory gets to build enforcement from — exactly
  * the wired objects claude.ts puts behind one `canUseTool` (spec §7). */
 export interface ProcessSeams {
+  /** Stable thread link built from the workspace URL returned by auth.test. */
+  threadPermalink: (threadTs: string, channelId: string) => string | undefined;
   gates: SessionGates;
   allowList: DelegationPolicy;
   delegations: DispatchPreparer & DispatchObserver;
@@ -41,6 +43,7 @@ export interface ProcessSeams {
 }
 
 export interface RuntimeOptions {
+  slackWorkspaceUrl?: string;
   config: Config;
   /** The routing hints — the delegation allow-list, loaded and validated. */
   hints: RepoHint[];
@@ -146,6 +149,9 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       delegations,
       relay,
       systemPromptAppend: routingInstructions(hints),
+      threadPermalink: (threadTs, channelId) => options.slackWorkspaceUrl === undefined
+        ? undefined
+        : new URL(`archives/${channelId}/p${threadTs.replace('.', '')}`, options.slackWorkspaceUrl).href,
     }),
     voiceFor: (threadTs, channelId) =>
       new Voice(
