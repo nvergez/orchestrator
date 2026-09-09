@@ -150,6 +150,7 @@ Decision [#7](https://github.com/nvergez/orchestrator/issues/7); visual referenc
 Guiding principle: **"edit the status, post the event."** Anything requiring the human (gate, escalation, done, stalled, cost threshold) = a **new message** (it notifies); anything ambient (progress, liveness) = in-place edit or reaction.
 
 - **Pure mrkdwn** — Block Kit rejected for v1 (text is the mechanism per #6-relay; buttons would add a second reply path).
+- **Operator voice**: `persona.md` in the config dir (optional, ≤ 8 000 chars) is appended to the session's system prompt after the routing rules. It restyles the session's own prose only — the fixed verbatims (dispatch ack, gate/stall acks), the daemon's own posts, and anything relayed to a worker are out of its reach (§6 fidelity). Read at boot; a change applies at the next session process start.
 - **Root reactions** = coarse state readable from the channel: 👀 in progress · ❓ blocked on the human · 🚨 attention · ✅ delivered · ❌ failed (stale one removed).
 - **One card per delegation**, posted at dispatch and edited at **milestones** only (worktree created, brief handed over, heartbeats, done) + a liveness line at most every 2 min — never a token stream. The conversational **voice** streams via post-then-edit (~1 edit/s, Tier-3 throttle).
 - **Cards**: refer to delegations by worktree name everywhere, including ack refs, restart notices and closing summaries. A Question uses a light 🔎 “Looking on *repo*” card with no issue line, completed with its duration. A Change's links put PRs first; an issue appears only when cited.
@@ -193,6 +194,7 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runboo
 | `LOG_LEVEL` | pino level, default `info` (#6) |
 | `ORCHESTRATOR_DB_PATH` | optional SQLite override (#6) |
 | `ORCHESTRATOR_MAILBOX_WORKTREE` | optional absolute path of the Orca worktree hosting the thread mailbox terminals (ADR 0007); unset resolves to the cwd when it is a worktree, else the default repo's checkout |
+| `ORCHESTRATOR_PERSONA_PATH` | optional override for the voice file, default `~/.config/orchestrator/persona.md` (§8) |
 | *(cap & threshold vars)* | live-session cap (default 5, #5); cost warning thresholds (default 5, 10 USD, #8); warmth TTL (default 30 min, #5) |
 
 ## 12. Known v1 limitations (accepted)

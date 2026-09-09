@@ -83,6 +83,7 @@ it exit non-zero. What each check means:
 |---|---|
 | Required env vars present, correct prefixes (`xoxb-`, `xapp-`, `C…`, `U…`, `sk-ant-`) | Neither `process.env` nor `~/.config/orchestrator/env` provides valid values — the env file is incomplete or a value was pasted into the wrong slot |
 | Routing hints file parses (+ repo count) | `routing-hints.json` is missing or malformed — both are boot-fatal; the error prints the path it tried |
+| Persona readable (+ size) | *(optional — "none" is green)* a `persona.md` that exists but cannot be honored: unreadable, or over the 8 000-character cap. Boot-fatal, like the hints |
 | State dir writable | The SQLite database's directory can't be created or written |
 | Node version vs `engines` | Running Node is older than the required ≥ 22.18 |
 | `orca` CLI on PATH + runtime reachable | Orca isn't installed, or the runtime isn't running — the daemon can boot but every delegation will fail |
@@ -183,8 +184,10 @@ all the systemd unit does.
 |---|---|
 | `~/.config/orchestrator/env` | Secrets + tunables (chmod 600), loaded by the unit's `EnvironmentFile` — scaffolded by `orc init` |
 | `~/.config/orchestrator/routing-hints.json` | The delegable-repo allow-list with aliases/descriptions/default agents — scaffolded by `orc init` |
+| `~/.config/orchestrator/persona.md` | Optional free prose appended to the session's system prompt: how the bot sounds. Scaffolded fully commented (untouched = stock voice); capped at 8 000 characters; applies at the next process start, so restart after editing |
 | `$XDG_STATE_HOME/orchestrator/orchestrator.db` | SQLite state (sessions, delegations, pending gates); defaults to `~/.local/state/…` |
 | `ORCHESTRATOR_ROUTING_HINTS_PATH` | Env override for the hints file location (tests, nonstandard setups) |
+| `ORCHESTRATOR_PERSONA_PATH` | Env override for the persona file location |
 | `ORCHESTRATOR_DB_PATH` | Env override for the database location |
 | `ORCHESTRATOR_MAILBOX_WORKTREE` | Absolute path of the Orca worktree the per-thread mailbox terminals are created in; unset, the daemon uses its cwd when that is a worktree, else the default repo's checkout — `orc doctor` shows which |
 | `DASHBOARD_PORT` | Dashboard sidecar port, default `8787` |

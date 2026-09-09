@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runInit } from './init.ts';
-import { ENV_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
+import { loadPersona } from '../kernel/persona.ts';
+import { ENV_TEMPLATE, PERSONA_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
 
 describe('runInit', () => {
   const tempDirs: string[] = [];
@@ -24,14 +25,22 @@ describe('runInit', () => {
     return lines;
   };
 
-  it('scaffolds the config dir with both files from the embedded templates', () => {
+  it('scaffolds the config dir with the three files from the embedded templates', () => {
     const xdgHome = freshXdgHome();
     const lines = runInto(xdgHome);
 
     const dir = join(xdgHome, 'orchestrator');
     expect(readFileSync(join(dir, 'routing-hints.json'), 'utf8')).toBe(ROUTING_HINTS_TEMPLATE);
     expect(readFileSync(join(dir, 'env'), 'utf8')).toBe(ENV_TEMPLATE);
+    expect(readFileSync(join(dir, 'persona.md'), 'utf8')).toBe(PERSONA_TEMPLATE);
     expect(lines.some((line) => line.includes('Next steps'))).toBe(true);
+  });
+
+  it('scaffolds a persona that reads as no persona until the operator writes one', () => {
+    const xdgHome = freshXdgHome();
+    runInto(xdgHome);
+
+    expect(loadPersona(join(xdgHome, 'orchestrator', 'persona.md'))).toBeUndefined();
   });
 
   it('chmods the env file to 600 — it will hold live tokens', () => {
@@ -48,12 +57,14 @@ describe('runInit', () => {
     const dir = join(xdgHome, 'orchestrator');
     writeFileSync(join(dir, 'env'), 'SLACK_BOT_TOKEN=xoxb-real\n');
     writeFileSync(join(dir, 'routing-hints.json'), '{"repos":[]}');
+    writeFileSync(join(dir, 'persona.md'), 'Write like me.');
 
     const lines = runInto(xdgHome);
 
     expect(readFileSync(join(dir, 'env'), 'utf8')).toBe('SLACK_BOT_TOKEN=xoxb-real\n');
     expect(readFileSync(join(dir, 'routing-hints.json'), 'utf8')).toBe('{"repos":[]}');
-    expect(lines.filter((line) => line.includes('left untouched'))).toHaveLength(2);
+    expect(readFileSync(join(dir, 'persona.md'), 'utf8')).toBe('Write like me.');
+    expect(lines.filter((line) => line.includes('left untouched'))).toHaveLength(3);
   });
 
   it('creates the whole directory chain when nothing exists yet', () => {

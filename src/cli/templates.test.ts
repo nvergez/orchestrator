@@ -1,8 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseRoutingHints } from '../kernel/routing.ts';
-import { ENV_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
+import { loadPersona } from '../kernel/persona.ts';
+import { ENV_TEMPLATE, PERSONA_TEMPLATE, ROUTING_HINTS_TEMPLATE } from './templates.ts';
 
 describe('ROUTING_HINTS_TEMPLATE', () => {
   it('parses under the strict hints schema — init must scaffold a bootable file', () => {
@@ -47,5 +50,27 @@ describe('ENV_TEMPLATE', () => {
 
   it('contains no live token material', () => {
     expect(ENV_TEMPLATE).not.toMatch(/=(xoxb|xapp|sk-ant)-/);
+  });
+});
+
+describe('PERSONA_TEMPLATE', () => {
+  it('is entirely commentary — an untouched scaffold must leave the stock voice', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'orc-persona-tpl-')), 'persona.md');
+    writeFileSync(path, PERSONA_TEMPLATE);
+    expect(loadPersona(path)).toBeUndefined();
+    rmSync(dirname(path), { recursive: true, force: true });
+  });
+
+  it('tells the operator what the voice cannot restyle, and that a restart applies it', () => {
+    expect(PERSONA_TEMPLATE).toMatch(/verbatim/);
+    expect(PERSONA_TEMPLATE).toMatch(/systemctl --user restart orchestrator/);
+  });
+
+  it('is byte-identical to the shipped persona.example.md browsing aid', () => {
+    const example = readFileSync(
+      fileURLToPath(new URL('../../persona.example.md', import.meta.url)),
+      'utf8',
+    );
+    expect(example).toBe(PERSONA_TEMPLATE);
   });
 });

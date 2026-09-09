@@ -11,8 +11,9 @@ import { serviceCollision } from './collision.ts';
 import { buildRuntime } from './runtime.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
 import { loadRoutingHints } from '../kernel/routing.ts';
+import { loadPersona } from '../kernel/persona.ts';
 import { mailboxHomeResolver } from '../kernel/mailbox-home.ts';
-import { resolveRoutingHintsPath } from '../kernel/xdg.ts';
+import { resolvePersonaPath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
 
 /**
  * The daemon boot — what bare `orc` runs (the CLI dispatch lives in cli.ts).
@@ -60,6 +61,17 @@ export async function runDaemon(): Promise<void> {
       { repos: hints.map((hint) => hint.name) },
       'routing hints loaded — the delegation allow-list',
     );
+
+    // The operator's voice (optional): no file means the stock voice, a
+    // file that exists but cannot be honored fails the boot like any other
+    // invalid startup config.
+    const personaPath = resolvePersonaPath(process.env);
+    const persona = loadPersona(personaPath);
+    if (persona === undefined) {
+      logger.info({ path: personaPath }, 'no persona configured — stock voice');
+    } else {
+      logger.info({ path: personaPath, chars: persona.length }, 'persona loaded — the session voice');
+    }
 
     const app = new App({
       token: config.slackBotToken,
@@ -116,6 +128,7 @@ export async function runDaemon(): Promise<void> {
       slackWorkspaceUrl: auth.url,
       slackScopes: auth.response_metadata?.scopes,
       hints,
+      ...(persona !== undefined && { persona }),
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
       // Mailbox terminals need an Orca worktree that always exists and never

@@ -9,17 +9,23 @@ import { probeOrca } from '../kernel/orca-health.ts';
 import { describeMailboxHome, MailboxHomeError, resolveMailboxHome } from '../kernel/mailbox-home.ts';
 import { readPackageMeta } from './pkg.ts';
 import { loadRoutingHints, RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
+import { loadPersona, PersonaError } from '../kernel/persona.ts';
 import { unitActiveState, userBusFixLine, userBusUnreachable } from '../kernel/systemd.ts';
 import { dashboardUnitPath, systemdUnitPath } from './service.ts';
-import { resolveDefaultDbPath, resolveEnvFilePath, resolveRoutingHintsPath } from '../kernel/xdg.ts';
+import {
+  resolveDefaultDbPath,
+  resolveEnvFilePath,
+  resolvePersonaPath,
+  resolveRoutingHintsPath,
+} from '../kernel/xdg.ts';
 
 /**
  * `orc doctor` (issue #70 + #74 addendum): read-only diagnosis of the
- * install — env vars, routing hints, state dir, node version, Orca
- * reachability, and (only once the unit is installed) unit enablement,
- * the unit's pinned ExecStart paths, and linger, so doctor stays green
- * through the pre-install phase of the golden path. Non-zero exit on any
- * failure. Nothing here writes.
+ * install — env vars, routing hints, the optional persona, state dir,
+ * node version, Orca reachability, and (only once the unit is installed)
+ * unit enablement, the unit's pinned ExecStart paths, and linger, so
+ * doctor stays green through the pre-install phase of the golden path.
+ * Non-zero exit on any failure. Nothing here writes.
  */
 
 export interface DoctorCheck {
@@ -43,6 +49,8 @@ export interface DoctorDeps {
   readFile(path: string): string;
   dirWritable(dir: string): boolean;
   loadHints(path: string): RepoHint[];
+  /** The operator's voice file; `undefined` means none configured. */
+  loadPersona(path: string): string | undefined;
   username: string;
   uid: number;
   unitPath: string;
@@ -65,6 +73,7 @@ export function realDoctorDeps(): DoctorDeps {
     readFile: (path) => readFileSync(path, 'utf8'),
     dirWritable: nearestAncestorWritable,
     loadHints: loadRoutingHints,
+    loadPersona,
     username: userInfo().username,
     uid: userInfo().uid,
     unitPath: systemdUnitPath(),
@@ -272,6 +281,24 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
   } catch (error) {
     if (!(error instanceof RoutingHintsError)) throw error;
     checks.push({ label: 'routing hints', ok: false, detail: error.message });
+  }
+
+  // Optional (persona.ts): none is a normal, green install — the check is
+  // here so a persona that IS configured proves it is being read.
+  const personaPath = resolvePersonaPath(deps.env);
+  try {
+    const persona = deps.loadPersona(personaPath);
+    checks.push({
+      label: 'persona',
+      ok: true,
+      detail:
+        persona === undefined
+          ? `none at ${personaPath} — stock voice (optional)`
+          : `${persona.length} characters at ${personaPath}`,
+    });
+  } catch (error) {
+    if (!(error instanceof PersonaError)) throw error;
+    checks.push({ label: 'persona', ok: false, detail: error.message });
   }
 
   const dbPath = deps.env.ORCHESTRATOR_DB_PATH ?? resolveDefaultDbPath(deps.env);

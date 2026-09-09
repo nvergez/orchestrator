@@ -1,8 +1,8 @@
 /**
  * The `orc init` scaffold templates, embedded in the compiled code (issue
  * #70): no loose JSON or dotfiles in the tarball — `files: ['dist']` stands.
- * `routing-hints.example.json` at the repo root is a browsing aid pinned to
- * ROUTING_HINTS_TEMPLATE by a test; edit them together.
+ * `routing-hints.example.json` and `persona.example.md` at the repo root are
+ * browsing aids pinned to their templates by tests; edit them together.
  */
 
 export const ROUTING_HINTS_TEMPLATE = `{
@@ -61,4 +61,33 @@ CLAUDE_CODE_OAUTH_TOKEN=
 # (Tailscale, SSH tunnel); the project ships no auth.
 #DASHBOARD_PORT=8787
 #DASHBOARD_BIND=127.0.0.1
+`;
+
+/**
+ * The optional voice file (persona.md): scaffolded fully commented on
+ * purpose — persona.ts strips HTML comments, so an operator who never
+ * opens it keeps the stock voice instead of inheriting an example tone.
+ */
+export const PERSONA_TEMPLATE = `<!--
+Persona (optional) — how the Slack-facing orchestrator should SOUND.
+
+Whatever you write outside these comment markers is appended to the
+session's system prompt, so keep it to the tone rules that matter: a few
+lines beat a style essay, and every line rides in every turn of every
+thread. HTML comments like this one are stripped, so an untouched file
+means "no persona" — the stock voice.
+
+It shapes the bot's own words only. The fixed protocol lines (the dispatch
+ack, gate and stall acks, delegation cards) and anything relayed to a
+worker are never restyled — a human's answer always goes down verbatim.
+
+Restart the daemon after editing: the system prompt is fixed when a
+session's process starts (systemctl --user restart orchestrator).
+
+Example — delete the markers around it, or write your own:
+
+Write like a senior engineer in a hurry: lower-case, no filler, no
+"Great question!". French with the team, English for anything quoted from
+code or GitHub. Say what you did, not what you are about to do.
+-->
 `;

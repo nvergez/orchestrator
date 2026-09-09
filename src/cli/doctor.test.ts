@@ -2,6 +2,7 @@ import { slackIdentity } from '../kernel/slack.ts';
 import { describe, expect, it, vi } from 'vitest';
 import { runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
 import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
+import { PersonaError } from '../kernel/persona.ts';
 
 const UNIT_PATH = '/home/op/.config/systemd/user/orchestrator.service';
 const DASHBOARD_UNIT_PATH = '/home/op/.config/systemd/user/orchestrator-dashboard.service';
@@ -97,6 +98,7 @@ const greenDeps = (): DoctorDeps => ({
   readFile: readFiles(noEnvFile),
   dirWritable: () => true,
   loadHints: () => [hint('webapp'), hint('sandbox')],
+  loadPersona: () => undefined,
   username: 'op',
   uid: 1000,
   unitPath: UNIT_PATH,
@@ -151,6 +153,7 @@ describe('runDoctorChecks', () => {
       'env',
       'image attachments',
       'routing hints',
+      'persona',
       'state dir',
       'node',
       'orca',
@@ -302,6 +305,31 @@ describe('runDoctorChecks', () => {
     };
     const checks = await runDoctorChecks(deps);
     expect(failures(checks)).toEqual(['routing hints']);
+  });
+
+  it('reports the persona: none by default, its size once configured', async () => {
+    const deps = greenDeps();
+    deps.env.ORCHESTRATOR_PERSONA_PATH = '/srv/persona.md';
+    const none = await runDoctorChecks(deps);
+    expect(none.find((check) => check.label === 'persona')?.detail).toBe(
+      'none at /srv/persona.md — stock voice (optional)',
+    );
+    expect(failures(none)).toEqual([]);
+
+    deps.loadPersona = () => 'Write like me.';
+    const configured = await runDoctorChecks(deps);
+    expect(configured.find((check) => check.label === 'persona')?.detail).toBe(
+      '14 characters at /srv/persona.md',
+    );
+  });
+
+  it('fails the persona when a configured one cannot be honored', async () => {
+    const deps = greenDeps();
+    deps.loadPersona = () => {
+      throw new PersonaError('/x/persona.md: the persona is 9001 characters, over the 8000 cap …');
+    };
+    const checks = await runDoctorChecks(deps);
+    expect(failures(checks)).toEqual(['persona']);
   });
 
   it('fails when the state dir is not writable', async () => {
@@ -488,7 +516,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(12);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(13);
     expect(out.at(-1)).toBe('all checks passed');
   });
 
