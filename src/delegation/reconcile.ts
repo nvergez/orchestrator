@@ -1,4 +1,4 @@
-import { formatDuration, restartNotice } from '../kernel/messages.ts';
+import { formatDuration, restartNotice, workerDoneFallbackLine } from '../kernel/messages.ts';
 import {
   execFileRunner,
   listOrchestrationTasks,
@@ -12,6 +12,7 @@ import {
 import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
+import { deliverQuestion } from './question-delivery.ts';
 
 /**
  * Boot reconciliation (spec §7, issue #25): workers are independent
@@ -110,6 +111,16 @@ export class BootReconciler {
 
   /** The whole boot pass. Never throws — a failed boot step must not crash the daemon. */
   async reconcile(): Promise<void> {
+    for (const { threadTs, channelId, status } of this.store.questionRecoveryOutcomes()) {
+      await this.surface.settleReconciled(channelId, threadTs, [status]);
+    }
+    for (const row of this.store.pendingQuestionDeliveries()) {
+      try {
+        await deliverQuestion(row, this.store, this.surface);
+      } catch (error) {
+        this.logger.warn({ err: error, dispatchId: row.dispatchId }, 'Question answer remains pending for the watcher to retry');
+      }
+    }
     const threads = this.store.threadsWithInFlight();
     if (threads.length === 0) {
       this.logger.debug('no in-flight delegations — nothing to reconcile');
@@ -163,15 +174,28 @@ export class BootReconciler {
     const closed: Array<Reconciled & { kind: 'completed' | 'failed' }> = [];
     for (const item of items) {
       if (!isTerminal(item)) continue;
-      if (!this.store.closeDelegation(item.row.dispatchId, item.kind)) continue;
+      if (!this.store.closeDelegation(item.row.dispatchId, item.kind, item.report?.body ?? null)) continue;
       closed.push(item);
       this.logger.info(
         { threadTs, dispatchId: item.row.dispatchId, kind: item.kind },
         'delegation closed by boot reconciliation',
       );
-      await this.finishCard(item);
-      if (item.kind === 'completed') {
-        await this.surface.cleanupDeliveredWorktree(item.row);
+      if (item.kind === 'completed' && item.row.kind === 'question') {
+        try {
+          await deliverQuestion(this.store.getByDispatchId(item.row.dispatchId)!, this.store, this.surface);
+        } catch (error) {
+          this.logger.warn({ err: error, dispatchId: item.row.dispatchId }, 'Question answer remains pending for retry');
+        }
+      } else {
+        await this.finishCard(item);
+        if (item.kind === 'completed' && item.report !== undefined) {
+          try {
+            await this.surface.post(channelId, threadTs, workerDoneFallbackLine(item.report.subject, false, item.report.body));
+          } catch (error) {
+            this.logger.warn({ err: error, dispatchId: item.row.dispatchId }, 'recovered Change report post failed — report remains in the ledger');
+          }
+        }
+        if (item.kind === 'completed') await this.surface.cleanupDeliveredWorktree(item.row);
       }
     }
     await this.surface.settleReconciled(channelId, threadTs, closed.map((item) => item.kind));
@@ -259,7 +283,12 @@ export class BootReconciler {
     }
 
     const status = observed.taskStatus.get(row.taskId);
-    if (status === 'completed') return { row, kind: 'completed', state: COMPLETED_STATE };
+    if (status === 'completed') {
+      // A task status cannot replace the answer. Leave the Question watched
+      // until its worker_done body is available; keep the worktree too.
+      if (row.kind === 'question') return { row, kind: 'unknown', state: 'task completed; waiting for the Question answer' };
+      return { row, kind: 'completed', state: COMPLETED_STATE };
+    }
     if (status === 'failed') {
       const reason = 'the task list marked it failed while the daemon was down';
       return { row, kind: 'failed', state: `❌ failed during the outage (${reason})`, reason };
@@ -384,11 +413,8 @@ export class BootReconciler {
 }
 
 /**
- * `repo#n`, degrading to the worktree name, then the task id — the ⚠️
- * line's name for a row (plain, per the mock; unlike the watcher's wake-text
- * ref it never appends the worktree name).
+ * Worktree name, degrading to the task id — the ⚠️ line's reference.
  */
 function noticeRef(row: DelegationRow): string {
-  if (row.repo !== null && row.issueNumber !== null) return `${row.repo}#${row.issueNumber}`;
   return row.worktreeName ?? row.taskId;
 }

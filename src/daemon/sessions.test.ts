@@ -592,9 +592,9 @@ describe('SessionManager close (spec §3)', () => {
     await flush();
 
     expect(notices.at(-1)?.text).toContain(
-      '• ✅ <https://github.com/acme/webapp/issues/84|webapp#84>\n',
+      '• ✅ `webapp-84-csv-export` · <https://github.com/acme/webapp/issues/84|issue>\n',
     );
-    expect(notices.at(-1)?.text).toContain('• ⚙️ notes#7 — still in flight\n');
+    expect(notices.at(-1)?.text).toContain('• ⚙️ task_b2 — still in flight\n');
   });
 
   it('a failing outcome read never blocks the close', async () => {

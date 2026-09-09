@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { worktreeIssueRef } from './worktree-name.ts';
+import type { RequestKind } from '../kernel/requests.ts';
 
 /** One row of the `delegations` table (spec §9) — written at dispatch. */
 export interface DelegationRow {
@@ -15,6 +15,9 @@ export interface DelegationRow {
   repo: string | null;
   issueNumber: number | null;
   agent: string | null;
+  /** Null on legacy rows, which retain Change behavior. */
+  kind: RequestKind | null;
+  resultText: string | null;
   /** The worker terminal the brief was injected into (`term_…`). */
   workerHandle: string | null;
   threadTs: string;
@@ -116,7 +119,7 @@ export interface TurnContextGate {
   options: string[];
   worktreeName: string | null;
   workerHandle: string | null;
-  /** `repo#n` from the worktree name, degrading to the task id, then the
+  /** Worktree name, degrading to the task id, then the
    * msg id — the reference the human acknowledges the question by. */
   ackRef: string;
 }
@@ -128,7 +131,7 @@ export interface TurnContextStall {
   worktreeName: string | null;
   workerHandle: string | null;
   lastOutput: string;
-  /** `repo#n` from the worktree name, degrading to the dispatch id. */
+  /** Worktree name, degrading to the dispatch id. */
   ackRef: string;
 }
 
@@ -264,16 +267,22 @@ export class DelegationStore {
   }
 
   /**
-   * Adds the issue #48 `last_bus_at` column to a pre-#48 delegations table.
-   * A plain nullable add — ALTER TABLE suffices, no rebuild; existing rows
-   * read null, so their dispatch time stays the in-flight floor.
+   * Adds nullable columns independently, tolerating any previous schema.
+   * Legacy rows keep unknown kind/result; their dispatch time remains the
+   * bus-clock floor. The delivery checkpoint is separate from row history.
    */
   private migrateDelegations(): void {
-    const schema = this.db
-      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'delegations'`)
-      .get() as { sql?: unknown } | undefined;
-    if (typeof schema?.sql !== 'string' || schema.sql.includes('last_bus_at')) return;
-    this.db.exec(`ALTER TABLE delegations ADD COLUMN last_bus_at TEXT`);
+    const columns = new Set((this.db.prepare('PRAGMA table_info(delegations)').all() as Array<{ name: string }>).map((row) => row.name));
+    if (!columns.has('last_bus_at')) this.db.exec('ALTER TABLE delegations ADD COLUMN last_bus_at TEXT');
+    if (!columns.has('kind')) this.db.exec("ALTER TABLE delegations ADD COLUMN kind TEXT CHECK (kind IN ('question', 'change'))");
+    if (!columns.has('result_text')) this.db.exec('ALTER TABLE delegations ADD COLUMN result_text TEXT');
+    // A posting checkpoint survives the close→Slack crash window, including
+    // a partially delivered answer. It does not rewrite historical rows.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS question_deliveries (
+      dispatch_id TEXT PRIMARY KEY,
+      posted_chars INTEGER NOT NULL DEFAULT 0,
+      finished_at TEXT
+    ) STRICT`);
   }
 
   /**
@@ -384,15 +393,15 @@ export class DelegationStore {
    * runtime-issued, so two rows with one id can only be the same hand-off.
    */
   recordDispatch(
-    row: Omit<DelegationRow, 'status' | 'dispatchedAt' | 'lastBusAt' | 'closedAt'>,
+    row: Omit<DelegationRow, 'status' | 'dispatchedAt' | 'lastBusAt' | 'closedAt' | 'kind' | 'resultText'> & { kind?: RequestKind | null },
   ): void {
     this.db
       .prepare(
         `INSERT OR REPLACE INTO delegations
            (dispatch_id, task_id, worktree_id, worktree_name, worktree_path,
             repo, issue_number, agent, worker_handle, thread_ts, channel_id,
-            card_ts, title, status, dispatched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatched', ?)`,
+            card_ts, title, kind, status, dispatched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatched', ?)`,
       )
       .run(
         row.dispatchId,
@@ -408,6 +417,7 @@ export class DelegationStore {
         row.channelId,
         row.cardTs,
         row.title,
+        row.kind ?? null,
         this.now(),
       );
   }
@@ -434,13 +444,13 @@ export class DelegationStore {
    * says whether this call won, so a duplicated worker_done can neither
    * double-close nor release a second worker slot.
    */
-  closeDelegation(dispatchId: string, status: 'completed' | 'failed'): boolean {
+  closeDelegation(dispatchId: string, status: 'completed' | 'failed', resultText: string | null = null): boolean {
     const { changes } = this.db
       .prepare(
-        `UPDATE delegations SET status = ?, closed_at = ?
+        `UPDATE delegations SET status = ?, closed_at = ?, result_text = ?
          WHERE dispatch_id = ? AND status = 'dispatched'`,
       )
-      .run(status, this.now(), dispatchId);
+      .run(status, this.now(), resultText, dispatchId);
     if (Number(changes) === 0) return false;
     // A closed delegation's stall alert is moot — the worker reported after
     // all. Settle it so the worker never lingers as a silent AUTO send
@@ -451,6 +461,57 @@ export class DelegationStore {
     // live gate would pollute routing disambiguation forever.
     this.closeGatesForDelegation(dispatchId);
     return true;
+  }
+
+  recentAnswersForThread(threadTs: string, channelId: string, limit = 5): DelegationRow[] {
+    return this.db.prepare(`SELECT * FROM delegations WHERE thread_ts = ? AND channel_id = ?
+      AND kind = 'question' AND status = 'completed' AND result_text IS NOT NULL
+      ORDER BY closed_at DESC, rowid DESC LIMIT ?`).all(threadTs, channelId, limit).map(toDelegationRow);
+  }
+
+  pendingQuestionDeliveries(thread?: { threadTs: string; channelId: string }): DelegationRow[] {
+    const scope = thread === undefined ? '' : 'AND d.thread_ts = ? AND d.channel_id = ?';
+    return this.db.prepare(`SELECT d.* FROM delegations d LEFT JOIN question_deliveries q USING (dispatch_id)
+      WHERE d.kind = 'question' AND d.status = 'completed' AND d.result_text IS NOT NULL
+      AND q.finished_at IS NULL ${scope} ORDER BY d.closed_at, d.rowid`)
+      .all(...(thread === undefined ? [] : [thread.threadTs, thread.channelId])).map(toDelegationRow);
+  }
+
+  /** A watcher owns both live bus events and unfinished answer delivery. */
+  threadsNeedingWatcher(): Array<{ threadTs: string; channelId: string }> {
+    const rows = this.db.prepare(`SELECT DISTINCT d.thread_ts, d.channel_id FROM delegations d
+      LEFT JOIN question_deliveries q USING (dispatch_id)
+      WHERE d.status = 'dispatched' OR (d.kind = 'question' AND d.status = 'completed'
+        AND d.result_text IS NOT NULL AND q.finished_at IS NULL)
+      ORDER BY d.thread_ts, d.channel_id`).all() as Array<{ thread_ts: string; channel_id: string }>;
+    return rows.map((row) => ({ threadTs: row.thread_ts, channelId: row.channel_id }));
+  }
+
+  /** Boot's recovery batch begins at the oldest unposted answer. A failure
+   * in that window wins, but historical failures must not stain newer work. */
+  questionRecoveryOutcomes(): Array<{ threadTs: string; channelId: string; status: 'completed' | 'failed' }> {
+    const rows = this.db.prepare(`WITH pending AS (
+      SELECT d.thread_ts, d.channel_id, MIN(d.closed_at) AS since
+      FROM delegations d LEFT JOIN question_deliveries q USING (dispatch_id)
+      WHERE d.kind = 'question' AND d.status = 'completed' AND d.result_text IS NOT NULL
+        AND q.finished_at IS NULL GROUP BY d.thread_ts, d.channel_id
+    ) SELECT p.thread_ts, p.channel_id,
+      CASE WHEN MAX(d.status = 'failed') THEN 'failed' ELSE 'completed' END AS status
+      FROM pending p JOIN delegations d ON d.thread_ts = p.thread_ts AND d.channel_id = p.channel_id
+        AND d.closed_at >= p.since
+      GROUP BY p.thread_ts, p.channel_id`).all() as Array<{ thread_ts: string; channel_id: string; status: 'completed' | 'failed' }>;
+    return rows.map((row) => ({ threadTs: row.thread_ts, channelId: row.channel_id, status: row.status }));
+  }
+
+  questionDeliveryProgress(dispatchId: string): { postedChars: number; finished: boolean } {
+    const row = this.db.prepare('SELECT * FROM question_deliveries WHERE dispatch_id = ?').get(dispatchId);
+    return { postedChars: Number(row?.posted_chars ?? 0), finished: row?.finished_at != null };
+  }
+
+  recordQuestionDelivery(dispatchId: string, postedChars: number, finished = false): void {
+    this.db.prepare(`INSERT INTO question_deliveries (dispatch_id, posted_chars, finished_at) VALUES (?, ?, ?)
+      ON CONFLICT(dispatch_id) DO UPDATE SET posted_chars = excluded.posted_chars, finished_at = excluded.finished_at`)
+      .run(dispatchId, postedChars, finished ? this.now() : null);
   }
 
   /**
@@ -792,7 +853,7 @@ export class DelegationStore {
           worktreeName: gate.worktreeName,
           workerHandle: gate.workerHandle,
           ackRef:
-            (gate.worktreeName === null ? null : worktreeIssueRef(gate.worktreeName)) ??
+            gate.worktreeName ??
             gate.taskId ??
             gate.msgId,
         }),
@@ -805,7 +866,7 @@ export class DelegationStore {
         workerHandle: stall.workerHandle,
         lastOutput: stall.lastOutput,
         ackRef:
-          (stall.worktreeName === null ? null : worktreeIssueRef(stall.worktreeName)) ??
+          stall.worktreeName ??
           stall.dispatchId,
       }),
     );
@@ -959,6 +1020,8 @@ function toDelegationRow(row: Record<string, unknown>): DelegationRow {
     repo: row.repo as string | null,
     issueNumber: row.issue_number === null ? null : Number(row.issue_number),
     agent: row.agent as string | null,
+    kind: (row.kind ?? null) as RequestKind | null,
+    resultText: (row.result_text ?? null) as string | null,
     workerHandle: row.worker_handle as string | null,
     threadTs: row.thread_ts as string,
     channelId: row.channel_id as string,

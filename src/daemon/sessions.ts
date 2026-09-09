@@ -168,7 +168,7 @@ export class SessionManager {
       this.postClosedLine(threadTs, channelId);
       return 'closed';
     }
-    this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    if (text.trim() !== '') this.enqueue(threadTs, channelId, { kind: 'turn', text });
     return 'turn';
   }
 

@@ -22,7 +22,7 @@ import type { Logger } from '../kernel/logger.ts';
  * daemon serves several channels); `ts === threadTs` addresses the root. */
 export interface Surface {
   /** chat.postMessage into the thread; resolves with the message ts. */
-  post(channelId: string, threadTs: string, text: string): Promise<string>;
+  post(channelId: string, threadTs: string, text: string, clientMessageId?: string): Promise<string>;
   /** chat.update on an earlier message. */
   update(channelId: string, ts: string, text: string): Promise<void>;
   /** reactions.add on a message. */
@@ -93,8 +93,8 @@ export class ThreadSurface {
 
   /** chat.postMessage into the thread; resolves with the message ts. Throws
    * on a Slack failure — callers own their fallbacks. */
-  post(channelId: string, threadTs: string, text: string): Promise<string> {
-    return this.surface.post(channelId, threadTs, text);
+  post(channelId: string, threadTs: string, text: string, clientMessageId?: string): Promise<string> {
+    return this.surface.post(channelId, threadTs, text, clientMessageId);
   }
 
   /** chat.update on an earlier message. Throws on a Slack failure. */
@@ -254,7 +254,9 @@ export class ThreadSurface {
   ): Promise<void> {
     const text = completedCard({
       repo: row.repo ?? 'work',
-      issueNumber: row.issueNumber ?? 0,
+      issueNumber: row.issueNumber,
+      kind: row.kind,
+      worktreeName: row.worktreeName ?? row.taskId,
       title: row.title ?? row.taskId,
       worktreePath: row.worktreePath,
       durationMs: opts.durationMs,

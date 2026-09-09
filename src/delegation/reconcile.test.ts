@@ -171,6 +171,71 @@ const restartPosts = (surface: FakeSurface): string[] =>
   surface.posts.filter((post) => post.text.startsWith('⚠️ Restarted')).map((post) => post.text);
 
 describe('BootReconciler — completions missed during the outage', () => {
+  it('surfaces the no-PR Change report recovered from an outage', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store, { kind: 'change', issueNumber: null });
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const report = 'No code change is needed: the setting already exists. Use RETRY_TIMEOUT_MS.';
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'completed' }),
+      ps: psOut(),
+      checks: { [MAILBOX]: checkOut(workerDone({ subject: 'No change needed', body: report })) },
+    });
+    await reconciler.reconcile();
+    expect(surface.posts).toContainEqual({ threadTs: THREAD, text: report });
+  });
+
+  it('recovers a Question closed before its answer was posted, without requiring Orca to be reachable', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store, { kind: 'question', issueNumber: null });
+    store.closeDelegation('ctx_d1', 'completed', 'The exact answer.\n*Evidence*');
+    const { reconciler, surface, calls } = makeReconciler(store, {});
+    await reconciler.reconcile();
+    expect(surface.posts.map((post) => post.text)).toEqual(['The exact answer.\n*Evidence*']);
+    expect(surface.updates[0]?.text).toContain('answered in');
+    expect(surface.reactions).toEqual([{ ts: THREAD, name: 'white_check_mark' }]);
+    expect(calls.filter((args) => args[1] === 'rm')).toHaveLength(1);
+    await reconciler.reconcile();
+    expect(surface.posts).toHaveLength(1);
+  });
+  it.each(['before', 'after'])('restores pending-answer reactions without confusing a failure %s the recovery window', async (order) => {
+    let now = '2026-07-08T12:00:00.000Z';
+    const store = new DelegationStore(':memory:', () => now);
+    seedDispatch(store, { kind: 'question', issueNumber: null });
+    seedDispatch(store, { dispatchId: 'ctx_failure', kind: 'change' });
+    if (order === 'before') store.closeDelegation('ctx_failure', 'failed', 'Cannot push.');
+    now = '2026-07-08T12:01:00.000Z';
+    store.closeDelegation('ctx_d1', 'completed', 'The answer.');
+    now = '2026-07-08T12:02:00.000Z';
+    if (order === 'after') store.closeDelegation('ctx_failure', 'failed', 'Cannot push.');
+    const { reconciler, surface } = makeReconciler(store, {});
+    await reconciler.reconcile();
+    expect(surface.reactions.at(-1)).toEqual({ ts: THREAD, name: order === 'after' ? 'x' : 'white_check_mark' });
+  });
+  it('does not mark recovered answers all-clear while a sibling remains in flight', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store, { kind: 'question' });
+    seedDispatch(store, { dispatchId: 'ctx_running', kind: 'change' });
+    store.closeDelegation('ctx_d1', 'completed', 'The answer.');
+    const { reconciler, surface } = makeReconciler(store, {});
+    await reconciler.reconcile();
+    expect(surface.posts).toContainEqual({ threadTs: THREAD, text: 'The answer.' });
+    expect(surface.reactions).toEqual([]);
+  });
+  it('keeps a completed Question task watched until its actual answer arrives', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store, { kind: 'question' });
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface, calls } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'completed' }),
+      ps: psOut(),
+      checks: { [MAILBOX]: checkOut() },
+    });
+    await reconciler.reconcile();
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    expect(surface.posts[0]?.text).toContain('waiting for the Question answer');
+    expect(calls.filter((args) => args[1] === 'rm')).toEqual([]);
+  });
   it('closes the row, flips the card and reports ✅ from a peeked worker_done', async () => {
     const store = new DelegationStore(':memory:');
     seedDispatch(store);
@@ -192,13 +257,13 @@ describe('BootReconciler — completions missed during the outage', () => {
     // The card flipped to its final ✅ state with the report's PR link.
     expect(surface.updates).toHaveLength(1);
     expect(surface.updates[0]?.ts).toBe('card-ts-1');
-    expect(surface.updates[0]?.text).toContain('✅ *sandbox#21 — bench harness');
+    expect(surface.updates[0]?.text).toContain('✅ *sandbox-21-bench — bench harness');
     expect(surface.updates[0]?.text).toContain('https://github.com/acme/sandbox/pull/22');
     // Exactly one ⚠️ line, truthful about the completion.
     const notices = restartPosts(surface);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toBe(
-      '⚠️ Restarted — `sandbox#21` was in flight: ✅ completed during the outage ' +
+      '⚠️ Restarted — `sandbox-21-bench` was in flight: ✅ completed during the outage ' +
         '(details in the card ⤴). Reply to resume supervision.',
     );
     // Root reaction flips to ✅ — nothing else is in flight.
@@ -220,7 +285,7 @@ describe('BootReconciler — completions missed during the outage', () => {
     await reconciler.reconcile();
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
-    expect(surface.updates[0]?.text).toContain('❌ *sandbox#21 — bench harness');
+    expect(surface.updates[0]?.text).toContain('❌ *sandbox-21-bench — bench harness');
     expect(surface.updates[0]?.text).toContain('Failed: bench deps will not install');
     expect(restartPosts(surface)[0]).toContain(
       '❌ failed during the outage — Failed: bench deps will not install',
@@ -329,7 +394,7 @@ describe('BootReconciler — workers still out there', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(restartPosts(surface)).toEqual([
-      '⚠️ Restarted — `sandbox#21` was in flight: still in progress (last sign 4 min ago). ' +
+      '⚠️ Restarted — `sandbox-21-bench` was in flight: still in progress (last sign 4 min ago). ' +
         'Reply to resume supervision.',
     ]);
     // No card edit, no reaction change — the worker was never touched.
@@ -470,8 +535,8 @@ describe('BootReconciler — one ⚠️ per thread, idempotence', () => {
     expect(notices[0]).toBe(
       [
         '⚠️ Restarted — 2 delegations were in flight:',
-        '• `sandbox#21` — ✅ completed during the outage (details in the card ⤴)',
-        '• `sandbox#22` — still in progress (last sign 4 min ago)',
+        '• `sandbox-21-bench` — ✅ completed during the outage (details in the card ⤴)',
+        '• `sandbox-22-docs` — still in progress (last sign 4 min ago)',
         'Reply to resume supervision.',
       ].join('\n'),
     );
@@ -595,7 +660,7 @@ describe('BootReconciler — degraded runtimes', () => {
 
     expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
     expect(restartPosts(first.surface)).toEqual([
-      '⚠️ Restarted — `sandbox#21` was in flight: state unknown (Orca runtime unavailable). ' +
+      '⚠️ Restarted — `sandbox-21-bench` was in flight: state unknown (Orca runtime unavailable). ' +
         'Reply to resume supervision.',
     ]);
 

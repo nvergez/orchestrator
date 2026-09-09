@@ -37,10 +37,17 @@ const failWith =
     Promise.reject(error);
 
 describe('parseRoutingHints', () => {
+  it('requires one default, with an implicit default for a single repo', () => {
+    expect(parseRoutingHints(hintsJson([hint('webapp')]))[0]?.default).toBe(true);
+    expect(parseRoutingHints(hintsJson([hint('webapp', { default: true }), hint('sandbox')]))[0]?.default).toBe(true);
+    expect(() => parseRoutingHints(hintsJson([hint('webapp'), hint('sandbox')]))).toThrow(/exactly one.*default/);
+    expect(() => parseRoutingHints(hintsJson([hint('webapp', { default: true }), hint('sandbox', { default: true })]))).toThrow(/exactly one.*default/);
+    expect(() => parseRoutingHints(hintsJson([{ ...hint('webapp'), default: 'yes' }]))).toThrow(/default must be a boolean/);
+  });
   it('parses a valid document, preserving entry order', () => {
     const hints = parseRoutingHints(
       hintsJson([
-        { name: 'webapp', description: 'The product.', aliases: ['fwd'], keywords: ['export'] },
+        { name: 'webapp', default: true, description: 'The product.', aliases: ['fwd'], keywords: ['export'] },
         {
           name: 'sandbox',
           description: 'Sandbox.',
@@ -171,7 +178,7 @@ describe('RepoAllowList', () => {
 
 describe('routingInstructions', () => {
   const hints = [
-    hint('webapp', { aliases: ['fwd', 'the product'], keywords: ['export', 'metrics'] }),
+    hint('webapp', { default: true, aliases: ['fwd', 'the product'], keywords: ['export', 'metrics'] }),
     hint('sandbox', { defaultAgent: 'codex' }),
   ];
   const prompt = routingInstructions(hints);
@@ -194,40 +201,27 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('Default agent: codex.');
   });
 
-  it('fixes the zero-match verbatim over the hinted names', () => {
-    expect(prompt).toContain(
-      'No repo I drive matches. I know: `webapp`, `sandbox`. Rephrase targeting one of them.',
-    );
+  it('routes to the configured default without the old routing round trip', () => {
+    expect(prompt).toContain('Route to *webapp* unless');
+    expect(prompt).toContain('canonical name, alias or keyword');
+    expect(prompt).toContain('one delegation per repo');
+    expect(prompt).not.toContain('No repo I drive matches');
+    expect(prompt).not.toContain('Go? (or name another repo/agent)');
+    expect(prompt).not.toContain('Two repos could match:');
   });
 
-  it('fixes the one-line conditional confirmation verbatim (issue #10 §4)', () => {
-    expect(prompt).toContain(
-      "→ I'm delegating on *<repo>* with *<agent>*. Go? (or name another repo/agent)",
-    );
-    expect(prompt).toContain('never two round trips');
-  });
-
-  it('treats a repo named by canonical name or any listed alias as explicit — no gate (issue #52)', () => {
-    expect(prompt).toContain('canonical name OR any listed alias');
-    expect(prompt).toContain('exactly as explicit as the canonical name');
-    expect(prompt).toContain('delegate directly, no confirmation gate');
-    // The direct path never short-circuits the two-candidate disambiguation.
-    expect(prompt).toContain('Once the ambiguity rules above are settled');
-  });
-
-  it('keeps the gate for keyword-only/inferred matches (issue #52)', () => {
-    expect(prompt).toContain('matched on keywords, the description, or context');
-    // Contiguous on purpose: the gate consequence must live in the INFERRED bullet itself.
-    expect(prompt).toContain('(e.g. "the export dashboard thing") → exactly one line');
-  });
-
-  it('never lets a defaulted agent force a gate — precedence settles it silently (issue #52)', () => {
-    expect(prompt).toContain('A defaulted agent never forces a gate on its own');
-    expect(prompt).toContain('only an agent reference you cannot resolve still gates');
-  });
-
-  it('keeps the numbered disambiguation for two credible candidates (issue #52)', () => {
-    expect(prompt).toContain('Two or more credible candidates → ask ONE numbered question');
+  it('defines Question and Change with fixed briefs and continuity', () => {
+    expect(prompt).toContain('in doubt, Question');
+    expect(prompt).toContain('Question brief');
+    expect(prompt).toContain('no file edits, commits, pushes or PRs');
+    expect(prompt).toContain('Change brief');
+    expect(prompt).toContain('/tdd');
+    expect(prompt).toContain('/code-review before committing');
+    expect(prompt).toContain('ready-for-review PR (not a draft)');
+    expect(prompt).toContain('starts with the PR URL');
+    expect(prompt).toContain('Question answer VERBATIM');
+    expect(prompt).toContain('Never merge');
+    expect(prompt).not.toContain('gh issue create');
   });
 
   it('states the agent precedence with claude as the global default', () => {
@@ -236,7 +230,7 @@ describe('routingInstructions', () => {
 
   it('spells out the dispatch sequence in order, with the #4 invariants', () => {
     expect(prompt).toMatch(
-      /gh issue create[\s\S]*worktree create[\s\S]*terminal list[\s\S]*terminal wait[\s\S]*task-create[\s\S]*dispatch/,
+      /worktree create[\s\S]*terminal list[\s\S]*terminal wait[\s\S]*task-create[\s\S]*dispatch/,
     );
     expect(prompt).toContain('NEVER pass `--prompt`');
     expect(prompt).toContain('--inject');

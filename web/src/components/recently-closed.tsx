@@ -1,6 +1,6 @@
 import type { ClosedSessionView, DelegationView } from '../api';
 import { ago } from '../lib/time';
-import { IssueRef } from './delegation-row';
+import { DelegationRef } from './delegation-row';
 import { Badge } from './ui/badge';
 import { listRow } from './ui/row';
 
@@ -35,7 +35,7 @@ export function RecentlyClosed({
             ) : (
               <Badge variant="good">✓ completed</Badge>
             )}
-            <IssueRef delegation={delegation} />
+            <DelegationRef delegation={delegation} />
             {delegation.title !== null && (
               <span className="min-w-0 flex-1 truncate" title={delegation.title}>
                 {delegation.title}

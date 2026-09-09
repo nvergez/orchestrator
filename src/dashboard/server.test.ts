@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SessionStore } from '../daemon/db.ts';
 import { DelegationStore } from '../delegation/delegations.ts';
@@ -110,6 +111,29 @@ const populatedDb = (): string => {
 };
 
 describe('GET /api/state — live state off a daemon-written database', () => {
+  it('reads an older database without request kind or result columns', async () => {
+    const path = populatedDb();
+    const legacy = new DatabaseSync(path);
+    legacy.exec('ALTER TABLE delegations DROP COLUMN kind; ALTER TABLE delegations DROP COLUMN result_text');
+    legacy.close();
+    const { baseUrl } = await serve(snapshotDeps(path));
+    const response = await fetch(`${baseUrl}/api/state`);
+    expect(response.status).toBe(200);
+    const state = await response.json() as StateSnapshot;
+    expect(state.sessions[0]?.delegations[0]).toMatchObject({ reference: 'webapp-dashboard', kind: null, prLinks: [] });
+    expect(state.recentlyClosed.delegations[1]).toMatchObject({ reference: 'webapp-retry-timeout', kind: null, prLinks: [] });
+  });
+  it('exposes a worktree reference, request kind and PR links without an invented issue', async () => {
+    const dbPath = populatedDb();
+    const store = new DelegationStore(dbPath, () => NOW);
+    store.recordDispatch({ taskId: 'task_new', dispatchId: 'ctx_new', worktreeId: 'wt_new', worktreeName: 'webapp-retry-timeout', worktreePath: '/tmp/worktree', repo: 'webapp', issueNumber: null, agent: 'claude', kind: 'change', workerHandle: 'term_new', threadTs: THREAD, channelId: CHANNEL, cardTs: null, title: 'Fix retry timeout' });
+    store.closeDelegation('ctx_new', 'completed', 'https://github.com/acme/webapp/pull/99\nFixed the retry timeout.');
+    store.close();
+    const { baseUrl } = await serve(snapshotDeps(dbPath));
+    const state = await (await fetch(`${baseUrl}/api/state`)).json() as StateSnapshot;
+    expect(state.recentlyClosed.delegations[0]).toMatchObject({ reference: 'webapp-retry-timeout', kind: 'change', issueNumber: null, prLinks: [{ url: 'https://github.com/acme/webapp/pull/99', label: 'webapp#99' }] });
+    expect(state.recentlyClosed.delegations[0]?.issueUrl).toBeUndefined();
+  });
   it('snapshots sessions, in-flight delegations, gates verbatim, stalls and the 48h window', async () => {
     const { baseUrl } = await serve(snapshotDeps(populatedDb()));
 
@@ -133,12 +157,15 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           delegations: [
             {
               dispatchId: 'ctx_live',
+              reference: 'webapp-dashboard',
+              kind: 'change',
+              prLinks: [],
               threadTs: THREAD,
               channelId: CHANNEL,
               repo: 'webapp',
               issueNumber: 84,
               agent: 'claude',
-              worktreeName: 'webapp-84-dashboard',
+              worktreeName: 'webapp-dashboard',
               title: 'Dashboard read-only web view',
               status: 'dispatched',
               dispatchedAt: '2026-07-10T09:00:00.000Z',
@@ -160,13 +187,16 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           delegations: [
             {
               dispatchId: 'ctx_orphan',
+              reference: 'sandbox-benchmark-results',
+              kind: 'question',
+              prLinks: [],
               threadTs: THREAD_ORPHAN,
               channelId: CHANNEL,
               repo: 'sandbox',
-              issueNumber: 21,
-              agent: 'codex',
-              worktreeName: 'sandbox-21-bench',
-              title: 'bench harness',
+              issueNumber: null,
+              agent: 'claude',
+              worktreeName: 'sandbox-benchmark-results',
+              title: 'Where are benchmark results written?',
               status: 'dispatched',
               dispatchedAt: '2026-07-10T10:00:00.000Z',
               lastBusAt: null,
@@ -183,7 +213,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           kind: 'decision_gate',
           question: 'Migrations diverge — rebase or merge?',
           options: ['rebase', 'merge'],
-          worktreeName: 'webapp-84-dashboard',
+          worktreeName: 'webapp-dashboard',
           relayedAt: '2026-07-10T11:00:00.000Z',
         },
         {
@@ -193,7 +223,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           kind: 'escalation',
           question: 'CI is red on main — halt the merge?',
           options: [],
-          worktreeName: 'webapp-84-dashboard',
+          worktreeName: 'webapp-dashboard',
           relayedAt: '2026-07-10T11:30:00.000Z',
         },
       ],
@@ -202,7 +232,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           dispatchId: 'ctx_live',
           threadTs: THREAD,
           channelId: CHANNEL,
-          worktreeName: 'webapp-84-dashboard',
+          worktreeName: 'webapp-dashboard',
           lastOutput: '… waiting at a permissions prompt',
           alertedAt: '2026-07-10T11:45:00.000Z',
         },
@@ -211,12 +241,15 @@ describe('GET /api/state — live state off a daemon-written database', () => {
         delegations: [
           {
             dispatchId: 'ctx_fail',
+            reference: 'webapp-dashboard',
+            kind: 'change',
+            prLinks: [],
             threadTs: THREAD,
             channelId: CHANNEL,
             repo: 'webapp',
             issueNumber: 84,
             agent: 'claude',
-            worktreeName: 'webapp-84-dashboard',
+            worktreeName: 'webapp-dashboard',
             title: 'Dashboard read-only web view',
             status: 'failed',
             dispatchedAt: '2026-07-09T19:00:00.000Z',
@@ -225,12 +258,15 @@ describe('GET /api/state — live state off a daemon-written database', () => {
           },
           {
             dispatchId: 'ctx_done',
+            reference: 'webapp-retry-timeout',
+            kind: 'change',
+            prLinks: [{ url: 'https://github.com/acme/webapp/pull/87', label: 'webapp#87' }],
             threadTs: THREAD,
             channelId: CHANNEL,
             repo: 'webapp',
-            issueNumber: 84,
+            issueNumber: null,
             agent: 'claude',
-            worktreeName: 'webapp-84-dashboard',
+            worktreeName: 'webapp-retry-timeout',
             title: 'Dashboard read-only web view',
             status: 'completed',
             dispatchedAt: '2026-07-09T15:00:00.000Z',
@@ -276,7 +312,7 @@ describe('GET /api/state — live state off a daemon-written database', () => {
     expect(state.sessions[1]?.delegations[0]?.issueUrl).toBeUndefined();
     expect(state.recentlyClosed.delegations.map((row) => row.issueUrl)).toEqual([
       'https://github.com/acme/webapp/issues/84',
-      'https://github.com/acme/webapp/issues/84',
+      undefined,
     ]);
   });
 

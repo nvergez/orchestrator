@@ -361,7 +361,7 @@ describe('finishCard — the ✅/❌ flip', () => {
     expect(surface.updates).toHaveLength(1);
     const card = surface.updates[0];
     expect(card?.ts).toBe('card-ts-1');
-    expect(card?.text).toContain('✅ *webapp#84 — CSV export of send metrics — delivered in 27 min*');
+    expect(card?.text).toContain('✅ *webapp-84-csv-export — CSV export of send metrics — delivered in 27 min*');
     expect(card?.text).toContain('• PR: <https://github.com/acme/webapp/pull/87|webapp#87>');
     expect(card?.text).toContain('• issue: <https://github.com/acme/webapp/issues/84|webapp#84>');
     expect(card?.text).toContain('• worktree: `/home/op/orca/workspaces/webapp/webapp-84-csv-export`');
@@ -374,7 +374,7 @@ describe('finishCard — the ✅/❌ flip', () => {
     await threadSurface.finishCard(row(store), cardOpts);
 
     expect(surface.updates).toEqual([]);
-    expect(surface.posts.some((post) => post.text.startsWith('✅ *webapp#84'))).toBe(true);
+    expect(surface.posts.some((post) => post.text.startsWith('✅ *webapp-84-csv-export'))).toBe(true);
   });
 
   it('renders ❌ with the reason when a failureReason rides along', async () => {
@@ -388,7 +388,7 @@ describe('finishCard — the ✅/❌ flip', () => {
     });
 
     const card = surface.updates[0]?.text ?? '';
-    expect(card).toContain('❌ *webapp#84 — CSV export of send metrics — failed after 27 min*');
+    expect(card).toContain('❌ *webapp-84-csv-export — CSV export of send metrics — failed after 27 min*');
     expect(card).toContain('• reason: Failed: e2e tests break on main');
   });
 

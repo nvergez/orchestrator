@@ -76,7 +76,7 @@ export type Decision =
   /** Root @mention by an allowed user — register the thread, first turn. */
   | { action: 'open'; threadTs: string; channelId: string; userId: string; text: string }
   /** Allowed-user message inside a thread — a turn iff the thread is registered. */
-  | { action: 'reply'; threadTs: string; channelId: string; text: string }
+  | { action: 'reply'; threadTs: string; channelId: string; text: string; userId: string; mentioned: boolean }
   /** `@orchestrator close` inside a thread — the explicit close command (spec §3). */
   | { action: 'close'; threadTs: string; channelId: string }
   /** Root @mention by a third party — one polite fixed line (UX mock G1). */
@@ -127,7 +127,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (isCloseCommand(replyText)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText, userId: event.user, mentioned: false };
   }
 
   // app_mention from here on.
@@ -143,13 +143,10 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
 
   const text = spokenText.replaceAll(botTag, '').trim();
   if (event.thread_ts !== undefined) {
-    if (text === '') {
-      return { action: 'ignore', reason: 'empty_text' };
-    }
     if (isCloseCommand(text)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, channelId, text };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text, userId: event.user, mentioned: true };
   }
   // A bare root mention is still an Open (spec §3: a root @mention is the one
   // and only opener) — substitute a fixed prompt rather than an empty turn.

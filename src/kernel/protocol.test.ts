@@ -12,7 +12,7 @@ const CREATE_TOKENS = [
   '--repo', 'id:uuid-webapp',
   '--name', 'webapp-84-csv-export',
   '--agent', 'claude',
-  '--issue', '84',
+  '--comment', 'change',
   '--no-parent', '--json',
 ];
 
@@ -26,8 +26,8 @@ const DISPATCH_TOKENS = [
 describe('stepCommandTemplate', () => {
   it('renders the create step — fixed args, then the required flags with placeholders', () => {
     expect(stepCommandTemplate(CREATE_STEP)).toBe(
-      'orca worktree create --repo id:<repoId> --name <repo>-<n>-<slug> ' +
-        '--agent <agent> --issue <n> --no-parent --json',
+      'orca worktree create --repo id:<repoId> --name <repo>-<slug> ' +
+        '--agent <agent> --comment <question|change> --no-parent --json',
     );
   });
 

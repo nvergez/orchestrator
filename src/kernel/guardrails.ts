@@ -136,7 +136,11 @@ export function isOrcaCommand(tokens: string[], topic: string, action: string): 
 }
 
 export function hasFlag(tokens: string[], flag: string): boolean {
-  return tokens.some((token) => token === flag || token.startsWith(`${flag}=`));
+  return flagCount(tokens, flag) > 0;
+}
+
+export function flagCount(tokens: string[], flag: string): number {
+  return tokens.filter((token) => token === flag || token.startsWith(`${flag}=`)).length;
 }
 
 export function flagValue(tokens: string[], flag: string): string | undefined {

@@ -89,6 +89,19 @@ const seedStall = (
 };
 
 describe('decorateReply — the registry as turn context', () => {
+  it('carries recent Question answers newest first into a follow-up Change', () => {
+    const { relay, store } = makeRelay();
+    for (const id of ['first', 'second']) {
+      store.recordDispatch({ taskId: id, dispatchId: id, worktreeId: null, worktreeName: `webapp-${id}`, worktreePath: null, repo: 'webapp', issueNumber: null, agent: 'claude', kind: 'question', workerHandle: null, threadTs: THREAD, channelId: CHANNEL, cardTs: null, title: id });
+      store.closeDelegation(id, 'completed', `Answer ${id}.\nEvidence.`);
+    }
+    const text = relay.decorateReply(THREAD, CHANNEL, 'do it');
+    expect(text).toContain('embed the relevant answer verbatim');
+    expect(text.indexOf('Answer second.')).toBeLessThan(text.indexOf('Answer first.'));
+    expect(text).toContain('webapp-second');
+    expect(text.endsWith('do it')).toBe(true);
+    expect(relay.decorateReply(THREAD, 'OTHER', 'do it')).toBe('do it');
+  });
   it('passes a gate-less thread through untouched', () => {
     const { relay } = makeRelay();
     expect(relay.decorateReply(THREAD, CHANNEL, 'hello')).toBe('hello');
@@ -103,7 +116,7 @@ describe('decorateReply — the registry as turn context', () => {
     const decorated = relay.decorateReply(THREAD, CHANNEL, 'the human words');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
     expect(decorated).toContain(`[PENDING] ❓ question ${GATE} from \`sandbox-21-bench\``);
-    expect(decorated).toContain('ack ref: sandbox#21');
+    expect(decorated).toContain('ack ref: sandbox-21-bench');
     expect(decorated).toContain(`worker terminal ${WORKER}`);
     expect(decorated).toContain('asked: "Which lint config is authoritative for CI?"');
     expect(decorated).toContain('options: 1) root · 2) app/ · 3) merge both into flat config');
@@ -120,7 +133,7 @@ describe('decorateReply — the registry as turn context', () => {
     const decorated = relay.decorateReply(THREAD, CHANNEL, 'y');
     expect(decorated).toContain('[relayed worker gates & watchdog stall alerts — daemon context');
     expect(decorated).toContain('[PENDING] ⚠️ stall from `sandbox-21-bench`');
-    expect(decorated).toContain('ack ref: sandbox#21');
+    expect(decorated).toContain('ack ref: sandbox-21-bench');
     expect(decorated).toContain(`worker terminal ${WORKER}`);
     expect(decorated).toContain('last output: "? Overwrite existing bench.json? (y/N)"');
     expect(decorated).toContain(

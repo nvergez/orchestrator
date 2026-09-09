@@ -3,6 +3,9 @@ import type { DelegationView, StateSnapshot } from '../api';
 import { deriveOverviewStats } from './stats';
 
 const delegation = (over: Partial<DelegationView>): DelegationView => ({
+  reference: 'webapp-dashboard',
+  kind: 'change',
+  prLinks: [],
   dispatchId: 'ctx_a',
   threadTs: '1751970000.000100',
   channelId: 'C0EXAMPLE123',

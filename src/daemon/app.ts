@@ -3,6 +3,7 @@ import { refusalLine } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from '../kernel/logger.ts';
 import type { CloseResult, ReplyResult } from './sessions.ts';
+import { readThreadContext } from './thread-context.ts';
 
 /**
  * The slice of the Bolt App the router registers on — event subscription,
@@ -17,6 +18,15 @@ export interface SlackApp {
   ): void;
   error(handler: (error: Error) => Promise<void>): void;
   client: {
+    conversations: {
+      replies(args: { channel: string; ts: string; latest: string; inclusive: boolean; limit: number; cursor?: string }): Promise<{
+        ok?: boolean;
+        error?: string;
+        messages?: Array<{ ts?: string; user?: string; text?: string }>;
+        has_more?: boolean;
+        response_metadata?: { next_cursor?: string };
+      }>;
+    };
     chat: {
       postMessage(args: {
         channel: string;
@@ -96,6 +106,9 @@ export function registerHandlers(
         sessions.open(decision.threadTs, decision.channelId, decision.userId, decision.text);
         return;
       case 'reply': {
+        // A bare re-mention in an existing thread remains an empty no-op.
+        // Only an unknown thread receives the "handle this thread" instruction.
+        const replyText = decision.text;
         // A pending 🚦 gate eats the reply (spec §7): it resolves the
         // suspended tool call instead of becoming a new session turn. The
         // filter already guarantees only the authorized user gets here;
@@ -112,8 +125,24 @@ export function registerHandlers(
         const result = sessions.reply(
           decision.threadTs,
           decision.channelId,
-          relay.decorateReply(decision.threadTs, decision.channelId, decision.text),
+          relay.decorateReply(decision.threadTs, decision.channelId, replyText),
         );
+        if (result === 'unregistered' && decision.mentioned) {
+          let context = '';
+          try {
+            context = await readThreadContext(app.client.conversations, decision.channelId, decision.threadTs, incoming.ts, guard.botUserId);
+          } catch (error) {
+            logger.warn({ err: error, threadTs: decision.threadTs }, 'earlier thread messages could not be read');
+            // Open even if posting the notice also fails.
+            await app.client.chat.postMessage({
+              channel: decision.channelId,
+              thread_ts: decision.threadTs,
+              text: '⚠️ Earlier messages could not be read; continuing with your mention alone.',
+            }).catch((err: unknown) => logger.warn({ err }, 'thread context notice failed'));
+          }
+          sessions.open(decision.threadTs, decision.channelId, decision.userId,
+            context + (decision.text || 'Handle this thread.'));
+        }
         // Fixed-line posts are user-visible events (info); the rest is
         // ambient routing (debug).
         if (result === 'closed') {
@@ -144,8 +173,19 @@ export function registerHandlers(
     }
   };
 
-  app.event('app_mention', handle);
-  app.event('message', handle);
+  // Thread reads are async; queue same-thread events so a second mention or
+  // reply cannot overtake the opener before the session is registered.
+  const pending = new Map<string, Promise<void>>();
+  const ordered = (args: { event: unknown }): Promise<void> => {
+    const event = args.event as IncomingEvent;
+    const key = `${event.channel}:${event.thread_ts ?? event.ts}`;
+    const next = (pending.get(key) ?? Promise.resolve()).catch(() => undefined).then(() => handle(args));
+    pending.set(key, next);
+    void next.finally(() => { if (pending.get(key) === next) pending.delete(key); }).catch(() => undefined);
+    return next;
+  };
+  app.event('app_mention', ordered);
+  app.event('message', ordered);
   app.error((error) => {
     logger.error({ err: error }, 'unhandled Bolt error');
     return Promise.resolve();

@@ -87,11 +87,12 @@ export async function runDaemon(): Promise<void> {
     // gates, voices, reactions — channel-addressed like the Web API itself
     // (issue #93: the daemon serves several channels).
     const surface: Surface = {
-      post: async (channelId, threadTs, text) => {
+      post: async (channelId, threadTs, text, clientMessageId) => {
         const result = await app.client.chat.postMessage({
           channel: channelId,
           thread_ts: threadTs,
           text,
+          ...(clientMessageId && { client_msg_id: clientMessageId }),
         });
         if (result.ts === undefined) {
           throw new Error('chat.postMessage returned no ts');
@@ -111,6 +112,7 @@ export async function runDaemon(): Promise<void> {
 
     const runtime = buildRuntime({
       config,
+      slackWorkspaceUrl: auth.url,
       hints,
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),

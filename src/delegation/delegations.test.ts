@@ -31,6 +31,67 @@ const dispatchRow = (overrides: Partial<Parameters<DelegationStore['recordDispat
 });
 
 describe('DelegationStore — delegations ledger', () => {
+  it('owns thread-scoped pending answers and the deduplicated set needing watchers', () => {
+    const store = openStore();
+    store.recordDispatch(dispatchRow({ dispatchId: 'running' }));
+    for (const [dispatchId, channelId] of [['q1', CHANNEL], ['q2', CHANNEL], ['q3', 'OTHER']] as const) {
+      store.recordDispatch(dispatchRow({ dispatchId, channelId, kind: 'question' }));
+      store.closeDelegation(dispatchId, 'completed', `Answer ${dispatchId}`);
+    }
+    expect(store.pendingQuestionDeliveries({ threadTs: THREAD, channelId: CHANNEL }).map((row) => row.dispatchId)).toEqual(['q1', 'q2']);
+    expect(store.threadsNeedingWatcher()).toEqual([
+      { threadTs: THREAD, channelId: CHANNEL },
+      { threadTs: THREAD, channelId: 'OTHER' },
+    ]);
+    store.recordQuestionDelivery('q3', 9, true);
+    expect(store.threadsNeedingWatcher()).toEqual([{ threadTs: THREAD, channelId: CHANNEL }]);
+  });
+
+  it('migrates a pre-#107 database with a bus clock and preserves durable answers and posting progress across reopen', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-kinds-'));
+    const path = join(dir, 'test.db');
+    try {
+      const before = new DelegationStore(path);
+      before.recordDispatch(dispatchRow());
+      before.close();
+      const legacy = new DatabaseSync(path);
+      legacy.exec('ALTER TABLE delegations DROP COLUMN kind; ALTER TABLE delegations DROP COLUMN result_text; DROP TABLE question_deliveries');
+      legacy.close();
+      const migrated = new DelegationStore(path);
+      expect(migrated.getByDispatchId('ctx_8b685db09a47')).toMatchObject({ kind: null, resultText: null, status: 'dispatched' });
+      migrated.recordDispatch(dispatchRow({ dispatchId: 'q', kind: 'question', issueNumber: null }));
+      migrated.closeDelegation('q', 'completed', 'The full answer.');
+      migrated.recordQuestionDelivery('q', 4);
+      migrated.close();
+      const reopened = new DelegationStore(path);
+      expect(reopened.recentAnswersForThread(THREAD, CHANNEL)[0]?.resultText).toBe('The full answer.');
+      expect(reopened.pendingQuestionDeliveries().map((row) => row.dispatchId)).toEqual(['q']);
+      expect(reopened.questionDeliveryProgress('q')).toEqual({ postedChars: 4, finished: false });
+      reopened.close();
+      const inspect = new DatabaseSync(path, { readOnly: true });
+      expect(inspect.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
+      inspect.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('keeps Question answers newest first within their thread, excluding failures and Changes', () => {
+    const store = openStore();
+    for (const [dispatchId, kind, status, channelId] of [
+      ['q1', 'question', 'completed', CHANNEL],
+      ['q2', 'question', 'completed', CHANNEL],
+      ['c1', 'change', 'completed', CHANNEL],
+      ['q3', 'question', 'failed', CHANNEL],
+      ['q4', 'question', 'completed', 'OTHER'],
+    ] as const) {
+      store.recordDispatch(dispatchRow({ dispatchId, kind, channelId }));
+      store.closeDelegation(dispatchId, status, `Answer ${dispatchId}`);
+    }
+    expect(store.recentAnswersForThread(THREAD, CHANNEL).map((row) => row.resultText)).toEqual(['Answer q2', 'Answer q1']);
+    expect(store.getByDispatchId('c1')?.resultText).toBe('Answer c1');
+    expect(store.closeDelegation('q1', 'completed', 'duplicate')).toBe(false);
+    expect(store.getByDispatchId('q1')?.resultText).toBe('Answer q1');
+  });
   it('records a dispatch with every identifier and reads it back', () => {
     const store = openStore();
 
@@ -43,6 +104,8 @@ describe('DelegationStore — delegations ledger', () => {
         dispatchedAt: '2026-07-08T12:00:00.000Z',
         lastBusAt: null,
         closedAt: null,
+        kind: null,
+        resultText: null,
       },
     ]);
   });
@@ -137,6 +200,8 @@ describe('DelegationStore — delegations ledger', () => {
         taskId: 'task_pre48',
         status: 'dispatched',
         lastBusAt: null,
+        kind: null,
+        resultText: null,
       });
       expect(store.recordBusActivity('ctx_pre48')).toBe(true);
       expect(store.getByDispatchId('ctx_pre48')?.lastBusAt).not.toBeNull();
@@ -809,7 +874,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
           options: ['root', 'app/', 'merge both'],
           worktreeName: 'sandbox-21-bench',
           workerHandle: 'term_300035ab',
-          ackRef: 'sandbox#21',
+          ackRef: 'sandbox-21-bench',
         },
       ],
       stalls: [
@@ -819,7 +884,7 @@ describe('DelegationStore — turnContextFor (the session’s turn context)', ()
           worktreeName: 'sandbox-21-bench',
           workerHandle: 'term_300035ab',
           lastOutput: '? Overwrite existing bench.json? (y/N)',
-          ackRef: 'sandbox#21',
+          ackRef: 'sandbox-21-bench',
         },
       ],
     });
