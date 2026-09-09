@@ -256,6 +256,20 @@ describe('routingInstructions', () => {
   });
 });
 
+describe('routingInstructions announce line', () => {
+  const hints: RepoHint[] = [
+    { name: 'webapp', description: 'The web app.', aliases: [], keywords: [], default: true },
+  ];
+
+  it('asks for the kind and the repo without dictating the wording — the voice owns it', () => {
+    const prompt = routingInstructions(hints);
+    expect(prompt).toContain('Announce the kind and repo in one line before dispatch, in your own words');
+    // A quoted template would beat any persona: the model copies it.
+    expect(prompt).not.toContain('🔎 Question on');
+    expect(prompt).not.toContain('🔧 Change on');
+  });
+});
+
 describe('routingInstructions worker register', () => {
   const hints: RepoHint[] = [
     { name: 'webapp', description: 'The web app.', aliases: [], keywords: [], default: true },
