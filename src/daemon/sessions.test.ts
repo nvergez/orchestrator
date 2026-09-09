@@ -6,6 +6,7 @@ import {
   SessionManager,
   type Notifier,
   type OrchestratorProcess,
+  type SessionTurn,
   type TurnEvents,
   type TurnOutcome,
 } from './sessions.ts';
@@ -28,7 +29,7 @@ class FakeProcess implements OrchestratorProcess {
     this.script = script;
   }
 
-  runTurn(text: string, events: TurnEvents): Promise<TurnOutcome> {
+  runTurn({ text }: SessionTurn, events: TurnEvents): Promise<TurnOutcome> {
     if (this.script) return Promise.resolve(this.script(text, events));
     return new Promise((resolve) => this.turns.push({ text, events, resolve }));
   }
@@ -112,6 +113,8 @@ const makeHarness = (
         turnStarts.push(threadTs);
         return Promise.resolve();
       }),
+    isPreparingTurn: () => false,
+    onClose: () => Promise.resolve(),
     onTurnEnd:
       options.onTurnEnd ??
       ((threadTs) => {
@@ -244,6 +247,8 @@ describe('SessionManager', () => {
       autoCloseAfterMs: 7 * DAY,
       listDelegations: () => Promise.resolve([]),
       onTurnStart: () => Promise.resolve(),
+      isPreparingTurn: () => false,
+      onClose: () => Promise.resolve(),
       onTurnEnd: () => Promise.resolve(),
       logger: createLogger('silent'),
     });

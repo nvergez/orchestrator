@@ -25,6 +25,36 @@ const threadReply = {
 };
 
 describe('classifyEvent', () => {
+  it.each(['a sentence', '', undefined])('accepts a file_share reply with text %s', (text) => {
+    const files = [{ id: 'F_SCREEN', name: 'screen.png', mimetype: 'image/png' }];
+    expect(classifyEvent({ ...threadReply, subtype: 'file_share', text, files }, guard)).toMatchObject({
+      action: 'reply', text: text ?? '', files, mentioned: false,
+    });
+  });
+
+  it.each([undefined, '1751960000.000001'])('carries mention images at root or in thread %s without substituting a greeting', (thread_ts) => {
+    const files = [{ id: 'F_SCREEN' }];
+    expect(classifyEvent({ ...mention, thread_ts, text: '<@U0EXAMPLEBOT>', files }, guard)).toMatchObject({
+      action: thread_ts ? 'reply' : 'open', text: '', files,
+    });
+  });
+
+  it.each([
+    [{ ...threadReply, user: 'U0THIRDPARTY' }, 'third_party_in_thread'],
+    [{ ...threadReply, thread_ts: undefined }, 'not_a_mention'],
+    [{ ...threadReply, text: '<@U0EXAMPLEBOT> look' }, 'mention_duplicate'],
+    [{ ...threadReply, subtype: 'message_changed' }, 'subtype'],
+    [{ ...threadReply, subtype: 'message_deleted' }, 'subtype'],
+  ] as const)('keeps file events behind the existing guards: %s', (event, reason) => {
+    expect(classifyEvent({ subtype: 'file_share', ...event, files: [{ id: 'F_SCREEN' }] }, guard)).toEqual({ action: 'ignore', reason });
+  });
+
+  it('a close with an image is still a text-only close', () => {
+    expect(classifyEvent({ ...threadReply, subtype: 'file_share', text: 'close', files: [{ id: 'F_SCREEN' }] }, guard)).toEqual({
+      action: 'close', channelId: threadReply.channel, threadTs: threadReply.thread_ts,
+    });
+  });
+
   it('opens a session on a root @mention from the authorized user, mention stripped', () => {
     expect(classifyEvent(mention, guard)).toEqual({
       action: 'open',
@@ -136,7 +166,7 @@ describe('classifyEvent', () => {
       'third_party_in_thread',
     ],
     [
-      'a thread reply with no text (e.g. attachment-only) — no empty turn injected',
+      'a thread reply with no text or files — no empty turn injected',
       { ...threadReply, text: undefined },
       'empty_text',
     ],

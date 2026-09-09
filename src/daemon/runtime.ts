@@ -1,3 +1,7 @@
+import { dirname } from 'node:path';
+import { Attachments } from './attachments.ts';
+import { slackFileDownloader, type FileDownloader } from './slack-download.ts';
+import { imageAttachmentsEnabled } from '../kernel/slack.ts';
 import { SessionStore } from './db.ts';
 import { DelegationStore } from '../delegation/delegations.ts';
 import {
@@ -44,6 +48,10 @@ export interface ProcessSeams {
 
 export interface RuntimeOptions {
   slackWorkspaceUrl?: string;
+  /** Granted bot scopes from the Slack identity check. */
+  slackScopes?: readonly string[];
+  /** Slack file network boundary; the default streams authenticated downloads. */
+  downloadFile?: FileDownloader;
   config: Config;
   /** The routing hints — the delegation allow-list, loaded and validated. */
   hints: RepoHint[];
@@ -69,6 +77,7 @@ export interface RuntimeOptions {
 
 /** The wired graph, plus the boot sequence and sweep arming as callable steps. */
 export interface Runtime {
+  attachments: Attachments;
   store: SessionStore;
   delegationStore: DelegationStore;
   gates: GateKeeper;
@@ -97,6 +106,13 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       setInterval(task, intervalMs).unref();
     });
 
+  const attachments = new Attachments({
+    stateDir: dirname(config.dbPath),
+    enabled: imageAttachmentsEnabled(options.slackScopes),
+    download: options.downloadFile ?? slackFileDownloader(config.slackBotToken),
+    logger,
+    notify: (channelId, threadTs, text) => slack.post(channelId, threadTs, text),
+  });
   const store = new SessionStore(config.dbPath);
   const delegationStore = new DelegationStore(config.dbPath);
   // Boot rule (spec §3): rows survive the restart, every session comes back
@@ -176,6 +192,8 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     // The turn-lifecycle root ack (issue #49): 👀 the moment any turn starts
     // — session open included — and off again when the turn ends with no
     // delegation in flight and nothing pending.
+    isPreparingTurn: (threadTs, channelId) => attachments.isPreparing(threadTs, channelId),
+    onClose: (threadTs, channelId) => attachments.remove(threadTs, channelId),
     onTurnStart: (threadTs, channelId) => surface.ackWorking(channelId, threadTs),
     onTurnEnd: (threadTs, channelId) =>
       surface.settleTurnEnd(channelId, threadTs, delegations.hasUndispatched(threadTs, channelId)),
@@ -222,12 +240,14 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   };
 
   const boot = async (): Promise<void> => {
+    if (!imageAttachmentsEnabled(options.slackScopes)) logger.warn('image attachments disabled — bot token lacks files:read; add the scope and reinstall the app');
     // Boot reconciliation (spec §7, issue #25): crash recovery without waking
     // sessions — dispatched rows reconciled against task-list + worktree ps,
     // one truthful ⚠️ line per affected thread, completions missed during the
     // outage closed right here. Deliberately BEFORE the watcher re-arm (so a
     // closed row never arms a watcher that would double-report it as a wake);
     // the worker cap needs no ordering — it reads the ledger live.
+    await attachments.sweep((threadTs, channelId) => store.get(threadTs, channelId)?.status === 'open');
     await reconciler.reconcile();
 
     // Boot re-arm (spec §6): the ledger, not process memory, says which
@@ -257,6 +277,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   };
 
   return {
+    attachments,
     store,
     delegationStore,
     gates,

@@ -1,9 +1,10 @@
-import { classifyEvent, type Guard, type IncomingEvent } from './filter.ts';
+import type { Attachments } from './attachments.ts';
+import { classifyEvent, type Guard, type IncomingEvent, type SlackFile } from './filter.ts';
 import { refusalLine } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from '../kernel/logger.ts';
-import type { CloseResult, ReplyResult } from './sessions.ts';
-import { readThreadContext } from './thread-context.ts';
+import type { CloseResult, ReplyResult, SessionTurn } from './sessions.ts';
+import { readThreadContext, renderThreadContext, type ThreadContext } from './thread-context.ts';
 
 /**
  * The slice of the Bolt App the router registers on — event subscription,
@@ -22,7 +23,7 @@ export interface SlackApp {
       replies(args: { channel: string; ts: string; latest: string; inclusive: boolean; limit: number; cursor?: string }): Promise<{
         ok?: boolean;
         error?: string;
-        messages?: Array<{ ts?: string; user?: string; text?: string }>;
+        messages?: Array<{ ts?: string; user?: string; text?: string; files?: SlackFile[] }>;
         has_more?: boolean;
         response_metadata?: { next_cursor?: string };
       }>;
@@ -39,8 +40,9 @@ export interface SlackApp {
 
 /** The slice of SessionManager the event handlers drive. */
 export interface SessionGateway {
-  open(threadTs: string, channelId: string, rootUser: string, text: string): void;
-  reply(threadTs: string, channelId: string, text: string): ReplyResult;
+  status(threadTs: string, channelId: string): 'open' | 'closed' | 'unregistered';
+  open(threadTs: string, channelId: string, rootUser: string, turn: SessionTurn): void;
+  reply(threadTs: string, channelId: string, turn: SessionTurn): ReplyResult;
   close(threadTs: string, channelId: string): CloseResult;
 }
 
@@ -75,6 +77,7 @@ export function registerHandlers(
   gates: GateResolver,
   relay: ReplyDecorator,
   logger: Logger,
+  attachments?: Attachments,
 ): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
     // Slack's payload types for `message` are a union over subtypes, so field
@@ -82,6 +85,17 @@ export function registerHandlers(
     // whatever fields are absent.
     const incoming = event as IncomingEvent;
     const decision = classifyEvent(incoming, guard);
+
+    const prepare = async (text: string, userId: string, files = incoming.files, context?: ThreadContext): Promise<SessionTurn> => {
+      if (!attachments) return { text: renderThreadContext(context) + text, images: [] };
+      const threadTs = incoming.thread_ts ?? incoming.ts;
+      const channelId = incoming.channel!;
+      const turn = await attachments.prepare(threadTs, channelId, userId, text, files, context);
+      // A close already in the session FIFO can finish during this download.
+      // Closed is final: its cleanup must not be undone by a late write.
+      if (sessions.status(threadTs, channelId) === 'closed') await attachments.remove(threadTs, channelId);
+      return turn;
+    };
 
     switch (decision.action) {
       case 'ignore':
@@ -99,16 +113,20 @@ export function registerHandlers(
         });
         return;
       case 'open':
+        if (sessions.status(decision.threadTs, decision.channelId) === 'closed') {
+          sessions.open(decision.threadTs, decision.channelId, decision.userId, { text: decision.text, images: [] });
+          return;
+        }
         logger.info(
           { threadTs: decision.threadTs, channelId: decision.channelId },
           'root mention — opening session',
         );
-        sessions.open(decision.threadTs, decision.channelId, decision.userId, decision.text);
+        sessions.open(decision.threadTs, decision.channelId, decision.userId, await prepare(decision.text, decision.userId, decision.files));
         return;
       case 'reply': {
         // A bare re-mention in an existing thread remains an empty no-op.
         // Only an unknown thread receives the "handle this thread" instruction.
-        const replyText = decision.text;
+        const turn = { text: decision.text, images: [] } as SessionTurn;
         // A pending 🚦 gate eats the reply (spec §7): it resolves the
         // suspended tool call instead of becoming a new session turn. The
         // filter already guarantees only the authorized user gets here;
@@ -120,15 +138,18 @@ export function registerHandlers(
           logger.info({ threadTs: decision.threadTs }, 'thread reply resolved a pending 🚦 gate');
           return;
         }
+        if (sessions.status(decision.threadTs, decision.channelId) === 'open') {
+          Object.assign(turn, await prepare(decision.text, decision.userId, decision.files));
+        }
         // A thread that relayed worker gates carries its registry into the
         // turn (spec §6): the session routes the reply anchored on it.
         const result = sessions.reply(
           decision.threadTs,
           decision.channelId,
-          relay.decorateReply(decision.threadTs, decision.channelId, replyText),
+          { ...turn, text: relay.decorateReply(decision.threadTs, decision.channelId, turn.text) },
         );
         if (result === 'unregistered' && decision.mentioned) {
-          let context = '';
+          let context: ThreadContext | undefined;
           try {
             context = await readThreadContext(app.client.conversations, decision.channelId, decision.threadTs, incoming.ts, guard.botUserId);
           } catch (error) {
@@ -141,7 +162,7 @@ export function registerHandlers(
             }).catch((err: unknown) => logger.warn({ err }, 'thread context notice failed'));
           }
           sessions.open(decision.threadTs, decision.channelId, decision.userId,
-            context + (decision.text || 'Handle this thread.'));
+            await prepare(decision.text || (decision.files?.length ? '' : 'Handle this thread.'), decision.userId, decision.files, context));
         }
         // Fixed-line posts are user-visible events (info); the rest is
         // ambient routing (debug).

@@ -7,7 +7,7 @@ import { DelegationStore } from '../delegation/delegations.ts';
 import { createLogger } from '../kernel/logger.ts';
 import { refusalLine } from '../kernel/messages.ts';
 import type { Guard, IncomingEvent } from './filter.ts';
-import type { CloseResult, ReplyResult } from './sessions.ts';
+import type { CloseResult, ReplyResult, SessionTurn } from './sessions.ts';
 
 /**
  * Routing tests over registerHandlers: a captured fake Bolt app drives the
@@ -86,12 +86,16 @@ class FakeSessions implements SessionGateway {
   replies: Array<{ threadTs: string; channelId: string; text: string }> = [];
   closes: Array<{ threadTs: string; channelId: string }> = [];
 
-  open(threadTs: string, channelId: string, rootUser: string, text: string): void {
+  status(): 'open' | 'closed' | 'unregistered' {
+    return this.replyResult === 'turn' ? 'open' : this.replyResult;
+  }
+
+  open(threadTs: string, channelId: string, rootUser: string, { text }: SessionTurn): void {
     this.opened.push({ threadTs, channelId, rootUser, text });
     this.replyResult = 'turn';
   }
 
-  reply(threadTs: string, channelId: string, text: string): ReplyResult {
+  reply(threadTs: string, channelId: string, { text }: SessionTurn): ReplyResult {
     this.replies.push({ threadTs, channelId, text });
     return this.replyResult;
   }

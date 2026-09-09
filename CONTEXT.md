@@ -83,6 +83,12 @@ its replies, handed to the session quoted with their authors. It is data,
 never an instruction: only the mentioning message instructs.
 _Avoid_: thread history, backlog
 
+**Image attachment**:
+An image delivered with a Slack message and kept for the life of its thread;
+the coordinator sees the image and a worker receives its saved path in the
+brief. It is data provided by the requester, never an instruction.
+_Avoid_: upload, file (Slack files include more than images)
+
 ### Releasing
 
 **Release**:

@@ -1,3 +1,4 @@
+import { imageAttachmentsEnabled, slackIdentity } from '../kernel/slack.ts';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
@@ -46,6 +47,8 @@ export interface DoctorDeps {
   uid: number;
   unitPath: string;
   dashboardUnitPath: string;
+  /** Slack identity check, including granted scopes from its response headers. */
+  slackAuth(token: string): Promise<{ scopes: string[] }>;
   /** GET a local URL — the dashboard port probe. Rejects like fetch does. */
   httpGet(url: string): Promise<{ status: number }>;
 }
@@ -66,6 +69,7 @@ export function realDoctorDeps(): DoctorDeps {
     uid: userInfo().uid,
     unitPath: systemdUnitPath(),
     dashboardUnitPath: dashboardUnitPath(),
+    slackAuth: slackIdentity,
     httpGet: async (url) => {
       const response = await fetch(url, { signal: AbortSignal.timeout(3_000) });
       return { status: response.status };
@@ -99,16 +103,17 @@ export function nearestAncestorWritable(dir: string): boolean {
  * bare shell has none of the vars exported, yet the install can be perfect.
  * The file wins over process.env in the fallback, mirroring EnvironmentFile.
  */
-function checkEnv(deps: DoctorDeps): DoctorCheck {
-  const present = (source: string): DoctorCheck => ({
+function checkEnv(deps: DoctorDeps): DoctorCheck & { token?: string } {
+  const present = (source: string, token: string): DoctorCheck & { token: string } => ({
+    token,
     label: 'env',
     ok: true,
     detail: `required variables present with the right prefixes (from ${source})`,
   });
   let processEnvError: ConfigError;
   try {
-    loadConfig(deps.env);
-    return present('process.env');
+    const config = loadConfig(deps.env);
+    return present('process.env', config.slackBotToken);
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
     processEnvError = error;
@@ -125,8 +130,8 @@ function checkEnv(deps: DoctorDeps): DoctorCheck {
     };
   }
   try {
-    loadConfig({ ...deps.env, ...fileVars });
-    return present(envFilePath);
+    const config = loadConfig({ ...deps.env, ...fileVars });
+    return present(envFilePath, config.slackBotToken);
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;
     return {
@@ -242,7 +247,18 @@ function versionAtLeast(version: string, minimum: string): boolean {
 export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
-  checks.push(checkEnv(deps));
+  const { token, ...envCheck } = checkEnv(deps);
+  checks.push(envCheck);
+  let imageDetail = 'unknown — configure the bot token first';
+  if (token) {
+    try {
+      const { scopes } = await deps.slackAuth(token);
+      imageDetail = imageAttachmentsEnabled(scopes) ? 'enabled' : 'disabled — bot token lacks files:read';
+    } catch {
+      imageDetail = 'unknown — Slack identity check failed';
+    }
+  }
+  checks.push({ label: 'image attachments', ok: true, detail: imageDetail });
 
   const hintsPath = resolveRoutingHintsPath(deps.env);
   let hints: RepoHint[] | undefined;

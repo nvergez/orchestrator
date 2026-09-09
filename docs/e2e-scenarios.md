@@ -42,6 +42,19 @@ all fixed and redeployed the same day).
 | S14 | Question restart recovery | In a dev instance interrupt after saving a Question result, or after its first long-answer chunk | Restart delivers the remaining answer from the ledger, edits the card, settles root and cleans up; no coordinator wake. A task marked completed without an answer remains watched |
 | S15 | Default validation | Run doctor with one repo and no marker, multiple repos and no marker, then two defaults | Single repo is implicit default; other two configurations fail with an actionable message; init example shows `default` |
 
+| S16 | Image mention and image-only reply | Root `@bot why does this look wrong?` + PNG; follow with an image-only `file_share`, then `@bot` + another screenshot | One turn per message, 👀 sets/clears, coordinator acknowledges the picture; root image-only mention opens on the image instead of greeting |
+| S17 | Context images and ordering | Colleague posts screenshots in a human thread; mention the bot with a before/after pair; separately use more than eight images | Instructing images keep Slack order, context is newest first with author labels and quoted as data; older excess images are noted silently; re-mention in a served thread reads only its own images |
+| S18 | Image rejection and scope diagnostics | Send PDF/SVG, over-5-MiB or over-8,000-px images, then simulate failed downloads in the isolated dev app; repeat before granting `files:read` | One visible skip line per instructing message; words still run; context skips stay silent; missing-scope line says to reinstall; doctor is informational and boot logs one warning |
+| S19 | Worker evidence and follow-up | Ask a Question with a screenshot, then `do it` to request a Change in the test repo | Each worker reads the same saved absolute path before working, treats image contents as evidence, and acknowledges the picture; no copy into or commit from a worktree |
+| S20 | Attachment lifetime | Restart a dev instance with an image thread open; resume, then close; seed an orphan attachment directory while stopped and boot again | Open-thread files and paths survive restart; explicit/7-day close removes them after summary; boot removes closed/unknown directories without waking sessions |
+
+**Image integration checks (#109):** capture an actual dev-app mention with a
+screenshot and verify the acting `app_mention` has `files`. If it does not,
+the design needs the bounded single-message history fallback described in the
+issue. Verify that each worker sandbox permits reading the absolute state-dir
+path. These checks require an isolated Slack app and worker; do not substitute
+production credentials, or copy images into a worktree to hide a sandbox denial.
+
 Not drivable single-user: third-party filter (G1/G2), the ⏳ session-cap queue, $5/$10 cost warnings
 (would need real spend). Covered by unit tests instead.
 
