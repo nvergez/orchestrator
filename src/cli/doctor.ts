@@ -1,4 +1,4 @@
-import { imageAttachmentsEnabled, slackIdentity } from '../kernel/slack.ts';
+import { imageAttachmentsEnabled, slackIdentity, userNamesEnabled } from '../kernel/slack.ts';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
@@ -259,15 +259,19 @@ export async function runDoctorChecks(deps: DoctorDeps): Promise<DoctorCheck[]> 
   const { token, ...envCheck } = checkEnv(deps);
   checks.push(envCheck);
   let imageDetail = 'unknown — configure the bot token first';
+  let namesDetail = 'unknown — configure the bot token first';
   if (token) {
     try {
       const { scopes } = await deps.slackAuth(token);
       imageDetail = imageAttachmentsEnabled(scopes) ? 'enabled' : 'disabled — bot token lacks files:read';
+      namesDetail = userNamesEnabled(scopes) ? 'enabled' : 'disabled — bot token lacks users:read';
     } catch {
       imageDetail = 'unknown — Slack identity check failed';
+      namesDetail = 'unknown — Slack identity check failed';
     }
   }
   checks.push({ label: 'image attachments', ok: true, detail: imageDetail });
+  checks.push({ label: 'user names', ok: true, detail: namesDetail });
 
   const hintsPath = resolveRoutingHintsPath(deps.env);
   let hints: RepoHint[] | undefined;

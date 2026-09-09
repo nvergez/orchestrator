@@ -122,6 +122,17 @@ describe('runDoctorChecks', () => {
     expect(failures(checks)).toEqual([]);
   });
 
+  it.each([
+    [['users:read', 'chat:write'], 'enabled'],
+    [['chat:write'], 'disabled — bot token lacks users:read'],
+  ])('reports user-name availability without failing the check: %s', async (scopes, detail) => {
+    const deps = greenDeps();
+    deps.slackAuth = () => Promise.resolve({ scopes });
+    const checks = await runDoctorChecks(deps);
+    expect(checks.find((check) => check.label === 'user names')).toEqual({ label: 'user names', ok: true, detail });
+    expect(failures(checks)).toEqual([]);
+  });
+
   it('reads granted scopes from the identity response header using the configured env-file token', async () => {
     const deps = greenDeps();
     deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
@@ -143,6 +154,7 @@ describe('runDoctorChecks', () => {
     deps.slackAuth = () => Promise.reject(new Error('offline'));
     const checks = await runDoctorChecks(deps);
     expect(checks.find((check) => check.label === 'image attachments')).toEqual({ label: 'image attachments', ok: true, detail: 'unknown — Slack identity check failed' });
+    expect(checks.find((check) => check.label === 'user names')).toEqual({ label: 'user names', ok: true, detail: 'unknown — Slack identity check failed' });
     expect(failures(checks)).toEqual([]);
   });
 
@@ -152,6 +164,7 @@ describe('runDoctorChecks', () => {
     expect(checks.map((check) => check.label)).toEqual([
       'env',
       'image attachments',
+      'user names',
       'routing hints',
       'persona',
       'state dir',
@@ -516,7 +529,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(13);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(14);
     expect(out.at(-1)).toBe('all checks passed');
   });
 

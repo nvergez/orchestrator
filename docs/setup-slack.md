@@ -48,6 +48,7 @@ review the summarized scopes and events → **Create**.
                 "channels:history",
                 "groups:history",
                 "files:read",
+                "users:read",
                 "chat:write",
                 "reactions:write"
             ]
@@ -71,10 +72,11 @@ review the summarized scopes and events → **Create**.
 Rename the app freely — the daemon discovers its own identity at boot, so
 nothing depends on the literal name. What the manifest configures:
 
-- **6 bot scopes** — exactly what the code uses: read mentions
+- **7 bot scopes** — exactly what the code uses: read mentions
   (`app_mentions:read`), read thread replies in public or private channels
   (`channels:history`, `groups:history`), post and edit messages
-  (`chat:write`), download image attachments (`files:read`), add/remove the status reactions (`reactions:write`).
+  (`chat:write`), download image attachments (`files:read`), turn mention ids
+  into people's names (`users:read`), add/remove the status reactions (`reactions:write`).
 - **3 event subscriptions** — `app_mention` plus both `message.channels`
   (public channels) and `message.groups` (private channels). The channel's
   privacy decides which `message.*` event Slack emits; subscribing to both
@@ -104,19 +106,23 @@ authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
 
-### Existing installs: enable image attachments
+### Existing installs: enable image attachments and user names
 
-After updating with `orc update`, add **`files:read`** under **OAuth &
-Permissions → Bot Token Scopes** (or apply the manifest above), then
-**Reinstall to Workspace** and authorize it once. Adding the scope alone
-does not grant it to the installed token. If Slack supplies a replacement
-bot token, update `SLACK_BOT_TOKEN` in the env file; restart the daemon so
-its boot identity check sees the new scopes.
+After updating with `orc update`, add **`files:read`** and **`users:read`**
+under **OAuth & Permissions → Bot Token Scopes** (or apply the manifest
+above), then **Reinstall to Workspace** and authorize them once. Adding a
+scope alone does not grant it to the installed token. If Slack supplies a
+replacement bot token, update `SLACK_BOT_TOKEN` in the env file; restart the
+daemon so its boot identity check sees the new scopes.
 
 `orc doctor` reports `image attachments: enabled`, or
 `image attachments: disabled — bot token lacks files:read`. Missing scope
 is informational: text requests keep working. The daemon logs one warning
 at boot and explains the missing scope when it skips an image.
+
+It reports `user names: enabled` the same way. Without `users:read` the
+daemon never learns who `<@U08…>` is, so the bot can only refer to people in
+the thread by their raw Slack id — everything else keeps working.
 
 No new event subscription is needed. The existing `app_mention` and
 `message.*` events carry Slack files; `file_share` is accepted.
