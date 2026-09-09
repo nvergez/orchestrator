@@ -236,6 +236,12 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('--inject');
     expect(prompt).toContain('NEVER pass `--from`');
     expect(prompt).toContain('--no-parent');
+    // Step 4 renders from the protocol table too (ADR 0006), and the rule
+    // is stated once for every orchestration command, not just the dispatch.
+    expect(prompt).toContain(
+      'orca orchestration task-create --spec "<fixed brief, filled in>" --task-title "<short>" --display-name "<worktree-name>" --json',
+    );
+    expect(prompt).toContain('NEVER pass `--from` yourself, on any of them');
   });
 
   it('tells the session the daemon owns the card and to end its turn after dispatch', () => {

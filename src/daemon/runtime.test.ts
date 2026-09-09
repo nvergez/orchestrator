@@ -123,6 +123,7 @@ const makeRunner = (
     'repo list --json': REPO_LIST_OUT,
     'terminal list --json': envelope({ terminals: [] }),
     'terminal create': envelope({ terminal: { handle: 'term_mb1' } }),
+    'orchestration run-create': envelope({ run: { id: 'run_mb1' } }),
     ...opts.script,
   };
   const run: CommandRunner = (_command, args) => {
@@ -472,10 +473,14 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
       { command: 'orca orchestration reply --id msg_1 --body 2 --json' },
       callOptions(),
     );
+    // The relay's fidelity rewrite, then the coordinator's origin: the reply
+    // goes down from the thread mailbox like every orchestration command
+    // (ADR 0006), and the mailbox's Run was bound on the way.
     expect(result).toEqual({
       behavior: 'allow',
-      updatedInput: { command: 'orca orchestration reply --id msg_1 --body lib/ --json' },
+      updatedInput: { command: 'orca orchestration reply --id msg_1 --body lib/ --json --from term_mb1' },
     });
+    expect(runtime.delegationStore.getMailboxRun(THREAD, CHANNEL)).toBe('run_mb1');
     // AUTO tier end to end: no 🚦 for a registry-anchored reply.
     expect(surface.posts).toEqual([]);
   });
@@ -497,7 +502,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
 
 describe('buildRuntime — the boot sequence', () => {
   const bootScript = (worktrees: object[], tasks: object[]) => ({
-    'orchestration task-list --json': envelope({ tasks }),
+    'orchestration task-list': envelope({ tasks }),
     'worktree ps': envelope({ worktrees }),
     'orchestration check --all': envelope({ messages: [] }),
     'worktree rm': envelope({ removed: true }),
@@ -547,11 +552,15 @@ describe('buildRuntime — the boot sequence', () => {
     // The order itself: reconcile's reads all land before the first re-armed
     // window opens, which lands before the watchdog's boot sweep.
     const firstWait = runner.calls.findIndex((call) => call.startsWith('orchestration check --wait'));
-    const taskList = runner.calls.indexOf('orchestration task-list --json');
+    const taskList = runner.calls.findIndex((call) => call.startsWith('orchestration task-list'));
     const watchdogPs = runner.calls.lastIndexOf('worktree ps --limit 1000 --json');
     expect(taskList).toBeGreaterThanOrEqual(0);
     expect(taskList).toBeLessThan(firstWait);
     expect(firstWait).toBeLessThan(watchdogPs);
+    // Each thread asked for ITS task list from its own mailbox — the Run
+    // bound to the sender scopes what task-list returns (ADR 0006).
+    expect(runner.calls).toContain('orchestration task-list --from term_mb_a --json');
+    expect(runner.calls).toContain('orchestration task-list --from term_mb_b --json');
 
     // The worker cap reads the ledger reconcile just cleaned: with cap 2 and
     // one survivor in flight, a new create proceeds with no ⏳ wave wait.

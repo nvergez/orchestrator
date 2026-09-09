@@ -75,17 +75,33 @@ export const CREATE_STEP: ProtocolStep = {
   ],
 };
 
+/**
+ * The one rule every `orca orchestration` command shares (ADR 0006): the
+ * session never names a sender terminal — the daemon re-issues each such
+ * command from the thread's mailbox, the terminal its Run is bound to, so a
+ * worker's reports can only ever land in this thread's inbox.
+ */
+export const MAILBOX_FROM_RULE: FlagRule = {
+  presence: 'forbidden',
+  flag: '--from',
+  why: 'the daemon supplies the thread mailbox terminal itself',
+};
+
+/** Step 4 of the sequence — `orca orchestration task-create`. */
+export const TASK_CREATE_STEP: ProtocolStep = {
+  topic: 'orchestration',
+  action: 'task-create',
+  fixedArgs: '--spec "<fixed brief, filled in>" --task-title "<short>" --display-name "<worktree-name>"',
+  flags: [MAILBOX_FROM_RULE, { presence: 'required', flag: '--json' }],
+};
+
 /** Step 5 of the sequence — `orca orchestration dispatch`. */
 export const DISPATCH_STEP: ProtocolStep = {
   topic: 'orchestration',
   action: 'dispatch',
   fixedArgs: '--task <taskId> --to <handle>',
   flags: [
-    {
-      presence: 'forbidden',
-      flag: '--from',
-      why: 'the daemon supplies the thread mailbox terminal itself',
-    },
+    MAILBOX_FROM_RULE,
     {
       presence: 'required',
       flag: '--inject',

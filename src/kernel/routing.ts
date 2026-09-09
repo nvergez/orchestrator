@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { execFileRunner, listRegistryRepos, type CommandRunner, type RegistryRepo } from './orca.ts';
 import { gateAnswerAck } from './messages.ts';
 import { requestInstructions } from './requests.ts';
-import { CREATE_STEP, DISPATCH_STEP, stepCommandTemplate, stepWarnings } from './protocol.ts';
+import { CREATE_STEP, DISPATCH_STEP, TASK_CREATE_STEP, stepCommandTemplate, stepWarnings } from './protocol.ts';
 import type { Logger } from './logger.ts';
 
 /**
@@ -280,12 +280,12 @@ ${requestInstructions()}
 
 ## Delegation — the dispatch sequence (spec §5)
 
-After choosing the kind and repo, delegate. Run each step as its OWN Bash command, in this exact order, always with \`--json\`. Never chain two steps with \`&&\`, \`;\` or pipes.
+After choosing the kind and repo, delegate. Run each step as its OWN Bash command, in this exact order, always with \`--json\`. Never chain two steps with \`&&\`, \`;\` or pipes. Every \`orca orchestration\` command you run is re-issued by the daemon from this thread's mailbox terminal — NEVER pass \`--from\` yourself, on any of them.
 
 1. \`${stepCommandTemplate(CREATE_STEP)}\` — \`<slug>\` is 2–4 lowercase hyphenated words. Add \`--issue <n>\` ONLY when the requester cited an existing issue. ${stepWarnings(CREATE_STEP)}
 2. \`orca terminal list --worktree id:<worktreeId> --json\` — use the create output's id; note the worker terminal handle.
 3. \`orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json\` — wait for the agent TUI before injection.
-4. \`orca orchestration task-create --spec "<fixed brief, filled in>" --task-title "<short>" --display-name "<worktree-name>" --json\`.
+4. \`${stepCommandTemplate(TASK_CREATE_STEP)}\` — ${stepWarnings(TASK_CREATE_STEP)}
 5. \`${stepCommandTemplate(DISPATCH_STEP)}\` — ${stepWarnings(DISPATCH_STEP)}
 
 The daemon posts and maintains the delegation status card in the thread on its own — never repeat the card's content. After the dispatch succeeds, reply with ONE short line ("Delegated — I'll keep you posted.") and end your turn; supervision events arrive later on their own. If a step fails, say which step and why in one line, then stop and wait for the user.

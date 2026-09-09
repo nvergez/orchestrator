@@ -1,7 +1,15 @@
 import { commandSegments, flagCount, flagValue, hasFlag, isOrcaCommand, shellQuote } from '../kernel/guardrails.ts';
-import { CREATE_STEP, DISPATCH_STEP, flagViolation } from '../kernel/protocol.ts';
+import {
+  CREATE_STEP,
+  DISPATCH_STEP,
+  MAILBOX_FROM_RULE,
+  TASK_CREATE_STEP,
+  flagViolation,
+} from '../kernel/protocol.ts';
 import { delegationCard, milestoneLine, orcaUnavailableLine, workerCapLine } from '../kernel/messages.ts';
 import {
+  bindRun,
+  createRun,
   createTerminal,
   execFileRunner,
   listLiveTerminalHandles,
@@ -25,9 +33,10 @@ import type { Logger } from '../kernel/logger.ts';
  *   concurrent-worker cap — an over-cap `worktree create` suspends until a
  *   slot frees, so multi-repo fan-out proceeds in waves — pins the #4 flag
  *   invariants from the protocol table (kernel/protocol.ts, the same table
- *   the routing prose renders from), and rewrites the dispatch to carry the
- *   thread's mailbox terminal as `--from` (lazily created, SQLite-persisted,
- *   reused — issue #9).
+ *   the routing prose renders from), and rewrites EVERY `orca orchestration`
+ *   command to originate from the thread's mailbox terminal as `--from`
+ *   (lazily created, SQLite-persisted, reused — issue #9), the terminal the
+ *   thread's Orca Run is bound to (ADR 0006).
  * - `observe` (from the PostToolUse hook, after a command ran): reads the
  *   `--json` envelopes the sequence produces, posts the one delegation card
  *   per hand-off and edits it at milestones only, puts 👀 on the root
@@ -143,24 +152,26 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
     const creates = segments.filter((tokens) =>
       isOrcaCommand(tokens, CREATE_STEP.topic, CREATE_STEP.action),
     );
-    const dispatches = segments.filter((tokens) =>
-      isOrcaCommand(tokens, DISPATCH_STEP.topic, DISPATCH_STEP.action),
-    );
-    if (creates.length === 0 && dispatches.length === 0) {
+    const orchestrations = segments.filter(isOrchestrationCommand);
+    if (creates.length === 0 && orchestrations.length === 0) {
       return { action: 'proceed', command };
     }
     // One step per command: the observer maps one --json envelope to one
     // segment, and the --from rewrite must know exactly what it appends to.
     if (segments.length > 1) {
       return deny(
-        'run `orca worktree create` / `orca orchestration dispatch` as its own ' +
+        'run `orca worktree create` and every `orca orchestration …` step as its own ' +
           'command — one delegation step per Bash call, nothing chained around it',
       );
     }
     if (creates.length === 1) {
       return this.prepareCreate(threadTs, channelId, command, creates[0] as string[], signal);
     }
-    return this.prepareDispatch(threadTs, channelId, dispatches[0] as string[]);
+    const tokens = orchestrations[0] as string[];
+    if (isOrcaCommand(tokens, DISPATCH_STEP.topic, DISPATCH_STEP.action)) {
+      return this.prepareDispatch(threadTs, channelId, tokens);
+    }
+    return this.prepareOrchestration(threadTs, channelId, tokens);
   }
 
   /** Pins the #4 create invariants, then takes a worker slot — waiting its wave. */
@@ -243,26 +254,75 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
           'first, so the injection lands on an idle prompt (spec §5 order)',
       );
     }
+    return this.originateFromMailbox(threadTs, channelId, tokens, 'nothing was dispatched');
+  }
+
+  /**
+   * Every other `orca orchestration` command the session runs — `task-create`
+   * (step 4), the gate `reply`, the read-only inspections — originates from
+   * the mailbox too (ADR 0006): the runtime refuses a sender-less command
+   * and files a task under the sender's Run, so a session-chosen `--from`
+   * would detach the worker's reports from this thread. The mailbox's
+   * Delivery acknowledgements belong to the gate watcher alone.
+   */
+  private async prepareOrchestration(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+  ): Promise<PrepareVerdict> {
+    const action = orchestrationAction(tokens);
+    if (action === TASK_CREATE_STEP.action) {
+      const violation = flagViolation(TASK_CREATE_STEP, tokens);
+      if (violation !== undefined) return deny(violation);
+    } else if (hasFlag(tokens, MAILBOX_FROM_RULE.flag)) {
+      return deny(`never pass ${MAILBOX_FROM_RULE.flag} — ${MAILBOX_FROM_RULE.why} (spec §5)`);
+    }
+    if (action === 'check' && hasFlag(tokens, '--ack')) {
+      return deny(
+        'never acknowledge a mailbox Delivery yourself — the daemon owns `check --ack` ' +
+          "for this thread's mailbox, and an early ack would lose worker events",
+      );
+    }
+    return this.originateFromMailbox(threadTs, channelId, tokens, 'the command did not run');
+  }
+
+  /**
+   * The tail every orchestration command shares: rebuilt from the
+   * quote-stripped tokens with the thread mailbox as `--from`, so the flag
+   * lands on the command itself — never glued onto a trailing quote or
+   * comment — and the runtime files the call under the mailbox's Run.
+   * `consequence` is what the ⚠️ line and the deny say did not happen.
+   */
+  private async originateFromMailbox(
+    threadTs: string,
+    channelId: string,
+    tokens: string[],
+    consequence: string,
+  ): Promise<PrepareVerdict> {
     let mailbox: string;
     try {
       mailbox = await this.ensureMailbox(threadTs, channelId);
     } catch (error) {
-      this.logger.warn({ err: error, threadTs }, 'mailbox terminal unavailable — dispatch denied');
+      this.logger.warn(
+        { err: error, threadTs, step: orchestrationAction(tokens) },
+        'mailbox terminal unavailable — orchestration command denied',
+      );
       await this.postSafe(
         threadTs,
         channelId,
-        orcaUnavailableLine('the thread mailbox terminal could not be reached, so nothing was dispatched.'),
+        orcaUnavailableLine(`the thread mailbox terminal could not be reached, so ${consequence}.`),
       );
       return deny(
         'Orca runtime unavailable — the thread mailbox terminal could not be created, ' +
-          'so the dispatch was not run. The user already sees a ⚠️ line; ' +
+          `so ${consequence}. The user already sees a ⚠️ line; ` +
           'acknowledge briefly and do not retry until asked.',
       );
     }
-    // Rebuilt from the quote-stripped tokens so the --from lands on the
-    // dispatch itself — never glued onto a trailing quote or comment.
     const rewritten = [...tokens, '--from', mailbox].map(shellQuote).join(' ');
-    this.logger.info({ threadTs, mailbox }, 'dispatch rewritten to origin from the thread mailbox');
+    this.logger.info(
+      { threadTs, mailbox, step: orchestrationAction(tokens) },
+      'orchestration command rewritten to originate from the thread mailbox',
+    );
     return { action: 'proceed', command: rewritten };
   }
 
@@ -271,21 +331,56 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
    * #9): reused from SQLite when the handle is still live, lazily
    * (re)created otherwise. The title carries the channel (issue #93) so two
    * same-ts threads in different channels never share one; pre-#93 handles
-   * keep their old title and keep working. Throws when Orca is unreachable
-   * — the caller turns that into the ⚠️ line.
+   * keep their old title and keep working. Since Orca 1.4.198 the mailbox
+   * also carries the thread's Run (ADR 0006): bound once per handle and
+   * remembered beside it, re-bound to a recreated handle so workers still
+   * in flight keep reporting into the same inbox. Throws when Orca is
+   * unreachable — the caller turns that into the ⚠️ line.
    */
   private async ensureMailbox(threadTs: string, channelId: string): Promise<string> {
     const stored = this.store.getMailbox(threadTs, channelId);
     if (stored !== undefined && (await listLiveTerminalHandles(this.run)).has(stored)) {
+      await this.ensureRun(threadTs, channelId, stored);
       return stored;
     }
+    const previousRun = this.store.getMailboxRun(threadTs, channelId);
     const handle = await createTerminal(this.run, {
       worktreePath: this.mailboxWorktreePath,
-      title: `slack-${channelId}-${threadTs}`,
+      title: mailboxTitle(channelId, threadTs),
     });
+    // Handle first, Run second: a bind that fails must find this very
+    // terminal again on the retry, not leak one more per attempt.
     this.store.setMailbox(threadTs, channelId, handle);
     this.logger.info({ threadTs, channelId, handle }, 'mailbox terminal created and persisted');
+    if (previousRun !== undefined) {
+      try {
+        await bindRun(this.run, { from: handle, runId: previousRun });
+        this.store.setMailboxRun(threadTs, channelId, previousRun);
+        this.logger.info(
+          { threadTs, channelId, handle, runId: previousRun },
+          'recreated mailbox re-bound to its Run — in-flight workers still reach it',
+        );
+        return handle;
+      } catch (error) {
+        this.logger.warn(
+          { err: error, threadTs, runId: previousRun },
+          'previous Run could not be re-bound to the recreated mailbox — binding a fresh one',
+        );
+      }
+    }
+    await this.ensureRun(threadTs, channelId, handle);
     return handle;
+  }
+
+  /** Binds the mailbox's Run once (ADR 0006), remembering it beside the handle. */
+  private async ensureRun(threadTs: string, channelId: string, mailbox: string): Promise<void> {
+    if (this.store.getMailboxRun(threadTs, channelId) !== undefined) return;
+    const runId = await createRun(this.run, {
+      from: mailbox,
+      objective: mailboxTitle(channelId, threadTs),
+    });
+    this.store.setMailboxRun(threadTs, channelId, runId);
+    this.logger.info({ threadTs, channelId, mailbox, runId }, 'Run bound to the thread mailbox and persisted');
   }
 
   // ── observe: the PostToolUse seam ──────────────────────────────────────────
@@ -611,6 +706,32 @@ export class DelegationCoordinator implements DispatchPreparer, DispatchObserver
 /** The (channel, thread) pair flattened for the tracker map (issue #93). */
 function trackerKey(threadTs: string, channelId: string): string {
   return `${channelId}:${threadTs}`;
+}
+
+/** The mailbox terminal's title — and its Run's objective (issue #93, ADR 0006). */
+function mailboxTitle(channelId: string, threadTs: string): string {
+  return `slack-${channelId}-${threadTs}`;
+}
+
+/** Any `orca orchestration …` segment — every one originates from the mailbox. */
+function isOrchestrationCommand(tokens: string[]): boolean {
+  return orchestrationIndex(tokens) !== -1;
+}
+
+/** The `<action>` after `orchestration` — `task-create`, `reply`, `check`… */
+function orchestrationAction(tokens: string[]): string | undefined {
+  const index = orchestrationIndex(tokens);
+  return index === -1 ? undefined : tokens[index + 1];
+}
+
+/** Where the `orchestration` topic sits in an orca segment — the word as a
+ * flag's value (`terminal send --text orchestration`) is not the topic. */
+function orchestrationIndex(tokens: string[]): number {
+  if (tokens[0] !== 'orca') return -1;
+  return tokens.findIndex(
+    (token, index) =>
+      index > 0 && token === 'orchestration' && !(tokens[index - 1] as string).startsWith('--'),
+  );
 }
 
 /**

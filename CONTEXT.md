@@ -15,6 +15,16 @@ lifecycle (`src/delegation/thread-surface.ts`). Every emoji and final-card
 decision goes through it; nothing else touches root reactions.
 _Avoid_: reaction helpers, watcher utils
 
+**Thread mailbox**:
+The lightweight Orca terminal the daemon keeps per Slack thread
+(`slack-<channel_id>-<thread_ts>`), the sender every `orca orchestration`
+command of that thread is re-issued from, and the terminal the thread's
+Orca Run is bound to — the Run being the namespace its tasks live in and
+the inbox its workers report to. The handle and the Run are remembered in
+the delegation ledger; the gate watcher reads and acknowledges the Run's
+Deliveries there.
+_Avoid_: coordinator terminal, sender, `--from` handle
+
 **Delegation ledger**:
 The persistent record of every delegation's lifecycle and the single source
 of truth for what is in flight (`src/delegation/delegations.ts`). The worker

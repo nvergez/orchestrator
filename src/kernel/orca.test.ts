@@ -1,15 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import { createLogger } from './logger.ts';
 import {
+  bindRun,
+  createRun,
   listOrchestrationTasks,
   listRegistryRepos,
   listWorktreeActivity,
   listWorktreeProcesses,
+  readCheckMessages,
   readTerminalTail,
   registryIssueUrl,
   safeRegistryIssueUrls,
   type CommandRunner,
 } from './orca.ts';
+
+/** A runner that records its argv and answers every call the same way. */
+const recording = (stdout: string) => {
+  const calls: string[][] = [];
+  const run: CommandRunner = (_command, args) => {
+    calls.push(args);
+    return Promise.resolve({ stdout });
+  };
+  return { run, calls };
+};
 
 /** Canned `orca repo list --json` payload (real CLI envelope shape). */
 const registryJson = (repos: unknown[]): string =>
@@ -296,5 +309,88 @@ describe('readTerminalTail (issue #22)', () => {
     await expect(
       readTerminalTail(succeedWith(envelope({ terminal: {} })), 'term_1', 40),
     ).rejects.toThrow(/unexpected `orca terminal read` response shape/);
+  });
+});
+
+describe('listOrchestrationTasks --from (ADR 0006)', () => {
+  it('asks from the given mailbox — the Run bound to it scopes the list', async () => {
+    const { run, calls } = recording(JSON.stringify({ id: 'c', ok: true, result: { tasks: [] } }));
+    await listOrchestrationTasks(run, 'term_mb1');
+    expect(calls).toEqual([['orchestration', 'task-list', '--from', 'term_mb1', '--json']]);
+  });
+});
+
+describe('readCheckMessages (ADR 0006)', () => {
+  const checkJson = (result: object): string => JSON.stringify({ id: 'c', ok: true, result });
+  const message = (over: Record<string, unknown> = {}): object => ({
+    id: 'msg_e4f1',
+    run_id: 'run_eda2',
+    from_handle: 'term_w1',
+    to_handle: 'run:run_eda2',
+    subject: 'done',
+    body: 'one. two. three.',
+    type: 'worker_done',
+    payload: JSON.stringify({ taskId: 'task_8393', dispatchId: 'ctx_1', outcome: 'failed' }),
+    read: 0,
+    ...over,
+  });
+
+  it('reads the Delivery id beside the messages, and the worker outcome off the payload', () => {
+    const read = readCheckMessages(
+      checkJson({ runId: 'run_eda2', deliveryId: 'delivery_2f2f', messages: [message()], count: 1, acknowledged: null }),
+    );
+    expect(read.deliveryId).toBe('delivery_2f2f');
+    expect(read.messages).toEqual([
+      {
+        id: 'msg_e4f1',
+        type: 'worker_done',
+        subject: 'done',
+        body: 'one. two. three.',
+        fromHandle: 'term_w1',
+        payload: { taskId: 'task_8393', dispatchId: 'ctx_1', outcome: 'failed' },
+      },
+    ]);
+  });
+
+  it('carries no Delivery id on a timeout, a peek or an older runtime — and no outcome for an unknown verdict', () => {
+    expect(readCheckMessages(checkJson({ deliveryId: null, messages: [], count: 0, timedOut: true })).deliveryId).toBeUndefined();
+    expect(readCheckMessages(checkJson({ messages: [], count: 0 })).deliveryId).toBeUndefined();
+    const read = readCheckMessages(
+      checkJson({ messages: [message({ payload: JSON.stringify({ taskId: 'task_8393', outcome: 'maybe' }) })], count: 1 }),
+    );
+    expect(read.messages[0]?.payload).toEqual({ taskId: 'task_8393' });
+  });
+
+  it('throws on a shapeless envelope and drops unreadable entries, keeping the raw count', () => {
+    expect(() => readCheckMessages(JSON.stringify({ ok: false }))).toThrow(
+      /unexpected `orca orchestration check` response shape/,
+    );
+    const read = readCheckMessages(checkJson({ messages: [{ subject: 'no id' }, message()], count: 2 }));
+    expect(read.messages).toHaveLength(1);
+    expect(read.raw).toHaveLength(2);
+  });
+});
+
+describe('createRun / bindRun (ADR 0006)', () => {
+  it('run-create binds a fresh Run to the mailbox and resolves with its id', async () => {
+    const { run, calls } = recording(
+      JSON.stringify({ id: 'c', ok: true, result: { run: { id: 'run_d86a', coordinator_handle: 'term_mb1' } } }),
+    );
+    await expect(createRun(run, { from: 'term_mb1', objective: 'slack-C1-1.2' })).resolves.toBe('run_d86a');
+    expect(calls).toEqual([
+      ['orchestration', 'run-create', '--objective', 'slack-C1-1.2', '--from', 'term_mb1', '--json'],
+    ]);
+  });
+
+  it('run-use re-binds an existing Run to a fresh mailbox', async () => {
+    const { run, calls } = recording(JSON.stringify({ id: 'c', ok: true, result: { run: { id: 'run_d86a' } } }));
+    await expect(bindRun(run, { from: 'term_mb2', runId: 'run_d86a' })).resolves.toBeUndefined();
+    expect(calls).toEqual([['orchestration', 'run-use', '--id', 'run_d86a', '--from', 'term_mb2', '--json']]);
+  });
+
+  it('both throw on a refusal — the caller turns it into the ⚠️ line', async () => {
+    const refused = succeedWith(JSON.stringify({ id: 'c', ok: false, error: { code: 'run_required' } }));
+    await expect(createRun(refused, { from: 'term_mb1', objective: 'x' })).rejects.toThrow(/run-create/);
+    await expect(bindRun(refused, { from: 'term_mb1', runId: 'run_x' })).rejects.toThrow(/run-use/);
   });
 });

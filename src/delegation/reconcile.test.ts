@@ -743,3 +743,62 @@ describe('BootReconciler — worktree matching', () => {
     expect(restartPosts(second.surface)[0]).toContain('still in progress');
   });
 });
+
+describe('BootReconciler — the task list per mailbox (ADR 0006)', () => {
+  it('asks each thread for its task list from its own mailbox, and a mailbox-less thread the flag-less way', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    seedDispatch(store, { dispatchId: 'ctx_b', taskId: 'task_b', threadTs: THREAD_B, cardTs: 'card-b' });
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, calls } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'dispatched' }),
+      ps: psOut(psWorktree()),
+      checks: { [MAILBOX]: checkOut() },
+    });
+
+    await reconciler.reconcile();
+
+    const lists = calls.filter((args) => args[1] === 'task-list').map((args) => args.join(' '));
+    expect(lists).toContain(`orchestration task-list --from ${MAILBOX} --json`);
+    expect(lists).toContain('orchestration task-list --json');
+  });
+
+  it('classifies from the bus peek and worktree liveness when the task list fails while Orca is up', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: new Error('run_required'),
+      ps: psOut(psWorktree()),
+      checks: { [MAILBOX]: checkOut() },
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('dispatched');
+    expect(restartPosts(surface)[0]).toContain('still in progress');
+  });
+
+  it('reads the worker outcome off a peeked report — an explicit failure with a plain subject is ❌', async () => {
+    const store = new DelegationStore(':memory:');
+    seedDispatch(store);
+    store.setMailbox(THREAD, CHANNEL, MAILBOX);
+    const { reconciler, surface } = makeReconciler(store, {
+      taskList: taskListOut({ id: 'task_3f81', status: 'completed' }),
+      ps: psOut(),
+      checks: {
+        [MAILBOX]: checkOut(
+          workerDone({
+            subject: 'Bench harness',
+            payload: JSON.stringify({ taskId: 'task_3f81', dispatchId: 'ctx_d1', outcome: 'failed' }),
+          }),
+        ),
+      },
+    });
+
+    await reconciler.reconcile();
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
+    expect(restartPosts(surface)[0]).toContain('❌ failed during the outage — Bench harness');
+  });
+});

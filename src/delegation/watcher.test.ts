@@ -17,6 +17,10 @@ const envelope = (result: object): string => JSON.stringify({ id: 'x', ok: true,
 const checkOut = (...messages: object[]): string =>
   envelope({ messages, count: messages.length });
 
+/** A consuming check on Orca ≥ 1.4.198: one Delivery, replayed until acknowledged (ADR 0006). */
+const deliveryOut = (deliveryId: string, ...messages: object[]): string =>
+  envelope({ runId: 'run_mb1', deliveryId, messages, count: messages.length, acknowledged: null, timedOut: false });
+
 const busMessage = (over: Partial<Record<string, unknown>> = {}): object => ({
   id: 'msg_a8f37bac632f',
   from_handle: 'term_w1',
@@ -142,12 +146,18 @@ const makeWatcher = (options: HarnessOptions = {}) => {
   // The short daemon-side runner, dispatched on the subcommand: the registry
   // lookup for issue links, and the success cleanup's `worktree rm` (#43).
   const rmCalls: string[] = [];
+  // The final Delivery acknowledgement rides the short runner too (ADR 0006).
+  const ackCalls: string[] = [];
   const run: CommandRunner = (_command, args) => {
     if (options.registryDown === true) return Promise.reject(new Error('orca down'));
     if (args[0] === 'worktree' && args[1] === 'rm') {
       rmCalls.push(args.join(' '));
       const result = options.rmResult ?? envelope({ removed: true });
       return result instanceof Error ? Promise.reject(result) : Promise.resolve({ stdout: result });
+    }
+    if (args[0] === 'orchestration' && args[1] === 'check') {
+      ackCalls.push(args.join(' '));
+      return Promise.resolve({ stdout: checkOut() });
     }
     return Promise.resolve({ stdout: REPO_LIST_OUT });
   };
@@ -168,7 +178,7 @@ const makeWatcher = (options: HarnessOptions = {}) => {
     run,
     now: () => new Date('2026-07-08T14:31:00.000Z'),
   });
-  return { watcher, store, surface, checkRunner, wakes, rmCalls, slotsFreed: () => closed };
+  return { watcher, store, surface, checkRunner, wakes, rmCalls, ackCalls, slotsFreed: () => closed };
 };
 
 const stopped = (watcher: GateWatcher, threadTs = THREAD) =>
@@ -1171,5 +1181,105 @@ describe('heartbeats — the bus clock and alert reset (issue #48)', () => {
     expect(surface.posts).toHaveLength(1);
     expect(surface.posts[0]?.text).toContain('Overwrite bench.json?');
     expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'question' });
+  });
+});
+
+describe('Deliveries — acknowledged once handled (ADR 0006)', () => {
+  const WINDOW_TAIL =
+    `--terminal ${MAILBOX} --types worker_done,escalation,decision_gate,heartbeat,status --timeout-ms 900000 --json`;
+  const heartbeat = (): object =>
+    busMessage({ id: 'msg_hb', type: 'heartbeat', subject: 'still going', body: '' });
+
+  it('acknowledges the handled Delivery on the next window, and settles the last one before stopping', async () => {
+    const { watcher, store, checkRunner, ackCalls } = makeWatcher({
+      checks: [deliveryOut('delivery_1', heartbeat()), deliveryOut('delivery_2', busMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+
+    expect(checkRunner.calls).toEqual([
+      `orchestration check --wait ${WINDOW_TAIL}`,
+      `orchestration check --wait --ack delivery_1 ${WINDOW_TAIL}`,
+    ]);
+    expect(ackCalls).toEqual([`orchestration check --ack delivery_2 --terminal ${MAILBOX} --json`]);
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+  });
+
+  it('drops the ack after a failed window — a replayed batch is absorbed and acknowledged next', async () => {
+    const { watcher, store, checkRunner, ackCalls, wakes } = makeWatcher({
+      checks: [
+        deliveryOut('delivery_1', heartbeat()),
+        // The runtime applied the ack but the call died: retrying it would
+        // fail every window as stale_delivery, so the retry goes bare…
+        new Error('runtime hiccup'),
+        // …and a batch the runtime did NOT acknowledge simply comes back.
+        deliveryOut('delivery_1', heartbeat()),
+        deliveryOut('delivery_2', busMessage()),
+      ],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+
+    expect(checkRunner.calls[1]).toContain('--ack delivery_1');
+    expect(checkRunner.calls[2]).not.toContain('--ack');
+    expect(checkRunner.calls[3]).toContain('--ack delivery_1');
+    expect(ackCalls).toEqual([`orchestration check --ack delivery_2 --terminal ${MAILBOX} --json`]);
+    expect(wakes).toHaveLength(1);
+  });
+
+  it('a timed-out window and an older runtime carry no Delivery — nothing to acknowledge', async () => {
+    const { watcher, store, checkRunner, ackCalls } = makeWatcher({
+      checks: [deliveryOut('delivery_1', heartbeat()), envelope({ deliveryId: null, messages: [], count: 0, timedOut: true }), checkOut(busMessage())],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+
+    expect(checkRunner.calls[1]).toContain('--ack delivery_1');
+    expect(checkRunner.calls[2]).not.toContain('--ack');
+    expect(ackCalls).toEqual([]);
+  });
+});
+
+describe('worker outcome (ADR 0006)', () => {
+  const withOutcome = (subject: string, outcome: 'succeeded' | 'failed'): object =>
+    busMessage({
+      subject,
+      body: 'One. Two. Three.',
+      payload: JSON.stringify({ taskId: 'task_3f81', dispatchId: 'ctx_d1', outcome }),
+    });
+
+  it('an explicit failure with a plain subject is ❌ — the worktree stays for debugging', async () => {
+    const { watcher, store, surface, rmCalls } = makeWatcher({
+      checks: [checkOut(withOutcome('Retry timeout', 'failed'))],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('failed');
+    expect(surface.updates[0]?.text).toContain('❌');
+    expect(surface.reactions).toContainEqual({ ts: THREAD, name: 'x' });
+    expect(rmCalls).toEqual([]);
+  });
+
+  it('an explicit success outranks a "Failed…" subject — the older subject contract only covers reports without a verdict', async () => {
+    const { watcher, store, surface, rmCalls } = makeWatcher({
+      checks: [checkOut(withOutcome('Failed retries are now covered', 'succeeded'))],
+    });
+    seedDispatch(store);
+
+    watcher.arm(THREAD, CHANNEL);
+    await stopped(watcher);
+
+    expect(store.getByDispatchId('ctx_d1')?.status).toBe('completed');
+    expect(surface.updates[0]?.text).toContain('✅');
+    expect(rmCalls).toHaveLength(1);
   });
 });

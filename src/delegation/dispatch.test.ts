@@ -88,6 +88,7 @@ const makeRunner = (script: Record<string, string | Error> = {}) => {
     'repo list --json': REPO_LIST_OUT,
     'terminal list --json': envelope({ terminals: [] }),
     'terminal create': envelope({ terminal: { handle: 'term_mb1' } }),
+    'orchestration run-create': envelope({ run: { id: 'run_mb1' } }),
     ...script,
   };
   const run: CommandRunner = (_command, args) => {
@@ -709,5 +710,155 @@ describe('created-but-undispatched worktrees (issue #49)', () => {
     await coordinator.observe(THREAD, CHANNEL, CREATE_CMD, envelope({ error: 'boom' }));
 
     expect(coordinator.hasUndispatched(THREAD, CHANNEL)).toBe(false);
+  });
+});
+
+describe('prepare — every orchestration command originates from the mailbox (ADR 0006)', () => {
+  const TASK_CREATE_CMD =
+    'orca orchestration task-create --spec "Request: add retries\nThread context: none" ' +
+    '--task-title "Retry timeout" --display-name webapp-csv-export --json';
+  const TASK_CREATE_REWRITTEN =
+    "orca orchestration task-create --spec 'Request: add retries\nThread context: none' " +
+    "--task-title 'Retry timeout' --display-name webapp-csv-export --json --from term_mb1";
+  const REPLY_CMD = 'orca orchestration reply --id msg_1 --body "go with 2" --json';
+  const REPLY_REWRITTEN = "orca orchestration reply --id msg_1 --body 'go with 2' --json --from term_mb1";
+  const LIVE_MAILBOX = { 'terminal list --json': envelope({ terminals: [{ handle: 'term_mb1' }] }) };
+
+  it('binds a Run to the mailbox on first use, persists both, and rewrites task-create --from it', async () => {
+    const { coordinator, store, runner } = makeCoordinator({ script: LIVE_MAILBOX });
+
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, TASK_CREATE_CMD);
+
+    expect(verdict).toEqual({ action: 'proceed', command: TASK_CREATE_REWRITTEN });
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_mb1');
+    expect(runner.calls).toContain(
+      `orchestration run-create --objective slack-${CHANNEL}-${THREAD} --from term_mb1 --json`,
+    );
+    // Once per mailbox: the dispatch that follows reuses the bound one.
+    await primeWorker(coordinator);
+    await expect(coordinator.prepare(THREAD, CHANNEL, DISPATCH_CMD)).resolves.toEqual({
+      action: 'proceed',
+      command: `${DISPATCH_CMD} --from term_mb1`,
+    });
+    expect(runner.calls.filter((call) => call.startsWith('orchestration run-create'))).toHaveLength(1);
+    expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(1);
+  });
+
+  it('leaves a command that merely mentions the word untouched — the topic, not a flag value', async () => {
+    const { coordinator, runner } = makeCoordinator();
+    const command = 'orca terminal send --terminal term_w1 --text orchestration --enter --json';
+    await expect(coordinator.prepare(THREAD, CHANNEL, command)).resolves.toEqual({ action: 'proceed', command });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('rewrites the gate reply and the read-only inspections the same way', async () => {
+    const { coordinator } = makeCoordinator({ script: LIVE_MAILBOX });
+
+    await expect(coordinator.prepare(THREAD, CHANNEL, REPLY_CMD)).resolves.toEqual({
+      action: 'proceed',
+      command: REPLY_REWRITTEN,
+    });
+    await expect(coordinator.prepare(THREAD, CHANNEL, 'orca orchestration task-list --json')).resolves.toEqual({
+      action: 'proceed',
+      command: 'orca orchestration task-list --json --from term_mb1',
+    });
+  });
+
+  it('refuses a session-chosen --from on any orchestration command, and a self-acknowledged Delivery', async () => {
+    const { coordinator, runner } = makeCoordinator();
+
+    for (const command of [
+      `${TASK_CREATE_CMD} --from term_rogue`,
+      `${REPLY_CMD} --from term_rogue`,
+      'orca orchestration check --terminal term_mb1 --ack delivery_1 --json',
+    ]) {
+      const verdict = await coordinator.prepare(THREAD, CHANNEL, command);
+      expect(verdict).toMatchObject({ action: 'deny' });
+    }
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, `${REPLY_CMD} --from term_rogue`);
+    expect((verdict as { message: string }).message).toContain('thread mailbox');
+    // Denied before any runtime call: no mailbox, no Run, nothing created.
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('refuses a task-create without --json, or chained to another step', async () => {
+    const { coordinator } = makeCoordinator();
+
+    await expect(coordinator.prepare(THREAD, CHANNEL, TASK_CREATE_CMD.replace(' --json', ''))).resolves.toMatchObject({
+      action: 'deny',
+    });
+    await expect(coordinator.prepare(THREAD, CHANNEL, `${TASK_CREATE_CMD} && ${DISPATCH_CMD}`)).resolves.toMatchObject({
+      action: 'deny',
+    });
+  });
+
+  it('binds a Run to a live mailbox from before Runs existed — once, on its next use', async () => {
+    const store = new DelegationStore(':memory:');
+    store.setMailbox(THREAD, CHANNEL, 'term_mb1');
+    const { coordinator, runner } = makeCoordinator({ store, script: LIVE_MAILBOX });
+
+    await coordinator.prepare(THREAD, CHANNEL, REPLY_CMD);
+    await coordinator.prepare(THREAD, CHANNEL, REPLY_CMD);
+
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_mb1');
+    expect(runner.calls.filter((call) => call.startsWith('orchestration run-create'))).toHaveLength(1);
+    expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(0);
+  });
+
+  it('re-binds the previous Run to a recreated mailbox — in-flight workers still reach it', async () => {
+    const store = new DelegationStore(':memory:');
+    store.setMailbox(THREAD, CHANNEL, 'term_dead', 'run_old');
+    const { coordinator, runner } = makeCoordinator({
+      store,
+      script: { 'orchestration run-use': envelope({ run: { id: 'run_old' } }) },
+    });
+
+    await expect(coordinator.prepare(THREAD, CHANNEL, REPLY_CMD)).resolves.toEqual({
+      action: 'proceed',
+      command: REPLY_REWRITTEN,
+    });
+
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_old');
+    expect(runner.calls).toContain('orchestration run-use --id run_old --from term_mb1 --json');
+    expect(runner.calls.filter((call) => call.startsWith('orchestration run-create'))).toHaveLength(0);
+  });
+
+  it('falls back to a fresh Run when the previous one cannot be re-bound', async () => {
+    const store = new DelegationStore(':memory:');
+    store.setMailbox(THREAD, CHANNEL, 'term_dead', 'run_gone');
+    const { coordinator, runner } = makeCoordinator({
+      store,
+      script: { 'orchestration run-use': new Error('Run not found: run_gone') },
+    });
+
+    await expect(coordinator.prepare(THREAD, CHANNEL, REPLY_CMD)).resolves.toMatchObject({ action: 'proceed' });
+
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_mb1');
+    expect(runner.calls.filter((call) => call.startsWith('orchestration run-create'))).toHaveLength(1);
+  });
+
+  it('a Run that cannot be bound denies the command with the ⚠️ line — the terminal waits for the retry', async () => {
+    const { coordinator, store, surface, runner } = makeCoordinator({
+      script: { 'orchestration run-create': new Error('runtime_unavailable') },
+    });
+
+    const verdict = await coordinator.prepare(THREAD, CHANNEL, TASK_CREATE_CMD);
+
+    expect(verdict).toMatchObject({ action: 'deny' });
+    expect((verdict as { message: string }).message).toContain('Orca runtime unavailable');
+    expect(surface.posts).toEqual([
+      {
+        channelId: CHANNEL,
+        threadTs: THREAD,
+        text: '⚠️ Orca runtime unavailable — the thread mailbox terminal could not be reached, so the command did not run.',
+      },
+    ]);
+    // The handle is persisted before the bind, so the retry finds it live
+    // instead of leaking one terminal per attempt.
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mb1');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
+    expect(runner.calls.filter((call) => call.startsWith('terminal create'))).toHaveLength(1);
   });
 });
