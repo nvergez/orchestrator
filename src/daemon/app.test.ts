@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { registerHandlers, type SessionGateway, type SlackApp } from './app.ts';
+import { registerHandlers, type MentionNames, type SessionGateway, type SlackApp } from './app.ts';
 import { GateKeeper } from './gate.ts';
 import { GateRelay } from '../delegation/relay.ts';
 import { ThreadSurface, type Surface } from '../delegation/thread-surface.ts';
@@ -106,7 +106,7 @@ class FakeSessions implements SessionGateway {
   }
 }
 
-const makeHarness = () => {
+const makeHarness = (names?: MentionNames) => {
   const logger = createLogger('silent');
   const app = new FakeBoltApp();
   const sessions = new FakeSessions();
@@ -136,7 +136,7 @@ const makeHarness = () => {
     }),
     logger,
   });
-  registerHandlers(app, GUARD, sessions, gates, relay, logger);
+  registerHandlers(app, GUARD, sessions, gates, relay, logger, undefined, names);
   return { app, sessions, store, gates, gatePosts };
 };
 
@@ -239,6 +239,24 @@ describe('registerHandlers — routing', () => {
     expect(sessions.opened[0]?.text).toContain('first page');
     expect(sessions.opened[0]?.text).toContain('second page');
     expect(sessions.replies.at(-1)?.text).toBe('more detail');
+  });
+
+  it('names the people a turn mentions, in the instruction and in the quoted context alike', async () => {
+    // Without this the session only ever sees `<@U0STRANGER>` and answers
+    // with the raw id, which nobody reading the thread can place.
+    const names: MentionNames = {
+      render: (text) => Promise.resolve(text.replaceAll(`<@${OTHER}>`, '@Alexis')),
+    };
+    const { app, sessions } = makeHarness(names);
+    sessions.replyResult = 'unregistered';
+    app.threadMessages = [{ ts: THREAD, user: USER, text: `ask <@${OTHER}> about retries` }];
+
+    await app.emit('app_mention', { ...threadReply(`<@${BOT}> what did <@${OTHER}> want?`), type: 'app_mention' });
+
+    const text = sessions.opened[0]!.text;
+    expect(text).toContain('ask @Alexis about retries');
+    expect(text).toContain('what did @Alexis want?');
+    expect(text).not.toContain(OTHER);
   });
 
   it('ignores a stranger mentioning the bot inside an unknown thread', async () => {

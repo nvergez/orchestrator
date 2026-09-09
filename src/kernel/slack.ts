@@ -3,6 +3,11 @@ export function imageAttachmentsEnabled(scopes: readonly string[] = []): boolean
   return scopes.includes('files:read');
 }
 
+/** Without it every `<@U…>` stays an opaque id in the turn and in the reply. */
+export function userNamesEnabled(scopes: readonly string[] = []): boolean {
+  return scopes.includes('users:read');
+}
+
 /** The doctor uses the identity check without loading Bolt or daemon code. */
 export async function slackIdentity(token: string): Promise<{ scopes: string[] }> {
   const response = await fetch('https://slack.com/api/auth.test', {

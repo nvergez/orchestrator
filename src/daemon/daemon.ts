@@ -4,6 +4,8 @@ import { pino } from 'pino';
 import { ConfigError, loadConfig, type Config } from '../kernel/config.ts';
 import { createLogger, toBoltLogger } from '../kernel/logger.ts';
 import { registerHandlers } from './app.ts';
+import { UserNames } from './user-names.ts';
+import { userNamesEnabled } from '../kernel/slack.ts';
 import { reportOrcaHealth } from '../kernel/orca-health.ts';
 import { execFileRunner } from '../kernel/orca.ts';
 import { createProcessFactory } from './claude.ts';
@@ -149,7 +151,13 @@ export async function runDaemon(): Promise<void> {
     });
     await runtime.boot();
 
-    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger, runtime.attachments);
+    // Mentions reach us as bare ids; without `users:read` they stay that way
+    // and the session can only refer to people in the thread by id.
+    const namesEnabled = userNamesEnabled(auth.response_metadata?.scopes);
+    if (!namesEnabled) logger.warn('Slack user names disabled — bot token lacks users:read; add the scope and reinstall the app');
+    const names = new UserNames({ users: app.client.users, enabled: namesEnabled, logger });
+
+    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger, runtime.attachments, names);
     await app.start();
     logger.info(
       { botUserId: guard.botUserId, channelIds: guard.channelIds },

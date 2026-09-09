@@ -46,6 +46,11 @@ export interface SessionGateway {
   close(threadTs: string, channelId: string): CloseResult;
 }
 
+/** Resolves `<@U…>` ids to names before a turn reaches Claude (user-names.ts). */
+export interface MentionNames {
+  render(text: string): Promise<string>;
+}
+
 /** The slice of the gate relay the reply path decorates turns through (#21). */
 export interface ReplyDecorator {
   /** Prepends the thread's relayed-gates registry; a no-op without gates. */
@@ -78,6 +83,7 @@ export function registerHandlers(
   relay: ReplyDecorator,
   logger: Logger,
   attachments?: Attachments,
+  names?: MentionNames,
 ): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
     // Slack's payload types for `message` are a union over subtypes, so field
@@ -87,14 +93,18 @@ export function registerHandlers(
     const decision = classifyEvent(incoming, guard);
 
     const prepare = async (text: string, userId: string, files = incoming.files, context?: ThreadContext): Promise<SessionTurn> => {
-      if (!attachments) return { text: renderThreadContext(context) + text, images: [] };
+      // One pass over the finished text covers all three places an id shows
+      // up: the instruction, the quoted thread context, the image labels.
+      const named = async (turn: SessionTurn): Promise<SessionTurn> =>
+        names ? { ...turn, text: await names.render(turn.text) } : turn;
+      if (!attachments) return named({ text: renderThreadContext(context) + text, images: [] });
       const threadTs = incoming.thread_ts ?? incoming.ts;
       const channelId = incoming.channel!;
       const turn = await attachments.prepare(threadTs, channelId, userId, text, files, context);
       // A close already in the session FIFO can finish during this download.
       // Closed is final: its cleanup must not be undone by a late write.
       if (sessions.status(threadTs, channelId) === 'closed') await attachments.remove(threadTs, channelId);
-      return turn;
+      return named(turn);
     };
 
     switch (decision.action) {
