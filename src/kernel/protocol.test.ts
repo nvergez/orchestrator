@@ -2,10 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   CREATE_STEP,
   DISPATCH_STEP,
+  MAILBOX_FROM_RULE,
+  TASK_CREATE_STEP,
   flagViolation,
   stepCommandTemplate,
   stepWarnings,
 } from './protocol.ts';
+
+const TASK_CREATE_TOKENS = [
+  'orca', 'orchestration', 'task-create',
+  '--spec', 'Request: add retries',
+  '--task-title', 'Retry timeout',
+  '--display-name', 'webapp-retry-timeout',
+  '--json',
+];
 
 const CREATE_TOKENS = [
   'orca', 'worktree', 'create',
@@ -36,6 +46,13 @@ describe('stepCommandTemplate', () => {
       'orca orchestration dispatch --task <taskId> --to <handle> --inject --json',
     );
   });
+
+  it('renders the task-create step — the brief flags fixed, then --json', () => {
+    expect(stepCommandTemplate(TASK_CREATE_STEP)).toBe(
+      'orca orchestration task-create --spec "<fixed brief, filled in>" ' +
+        '--task-title "<short>" --display-name "<worktree-name>" --json',
+    );
+  });
 });
 
 describe('stepWarnings', () => {
@@ -44,6 +61,8 @@ describe('stepWarnings', () => {
     expect(stepWarnings(CREATE_STEP)).toContain('dispatch --inject');
     expect(stepWarnings(DISPATCH_STEP)).toContain('NEVER pass `--from`');
     expect(stepWarnings(DISPATCH_STEP)).toContain('thread mailbox');
+    // The one rule every orchestration command shares (ADR 0006).
+    expect(stepWarnings(TASK_CREATE_STEP)).toBe(stepWarnings(DISPATCH_STEP));
   });
 });
 
@@ -51,6 +70,16 @@ describe('flagViolation', () => {
   it('holds on a command carrying exactly the protocol flags', () => {
     expect(flagViolation(CREATE_STEP, CREATE_TOKENS)).toBeUndefined();
     expect(flagViolation(DISPATCH_STEP, DISPATCH_TOKENS)).toBeUndefined();
+    expect(flagViolation(TASK_CREATE_STEP, TASK_CREATE_TOKENS)).toBeUndefined();
+  });
+
+  it('denies a task-create naming its own sender, or missing --json (ADR 0006)', () => {
+    expect(flagViolation(TASK_CREATE_STEP, [...TASK_CREATE_TOKENS, '--from', 'term_rogue'])).toContain(
+      MAILBOX_FROM_RULE.why,
+    );
+    expect(
+      flagViolation(TASK_CREATE_STEP, TASK_CREATE_TOKENS.filter((token) => token !== '--json')),
+    ).toContain('`orca orchestration task-create` must carry --json');
   });
 
   it('denies a forbidden flag with the table reason', () => {

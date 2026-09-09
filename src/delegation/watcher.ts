@@ -7,7 +7,7 @@ import {
   type CommandRunner,
   type OrchestrationMessage,
 } from '../kernel/orca.ts';
-import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
+import { isFailedReport, type ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 import { deliverQuestion } from './question-delivery.ts';
@@ -44,6 +44,13 @@ import { deliverQuestion } from './question-delivery.ts';
  * orchestration bus keys messages on the handle string, not on terminal
  * liveness, so a completion sent while nobody listened is still sitting
  * unread when the re-armed check asks for it.
+ *
+ * Since Orca 1.4.198 (ADR 0006) a window returns one Delivery that replays
+ * identically until acknowledged — so the loop acknowledges a handled batch
+ * on its NEXT check (`--ack` rides the following `--wait`), and settles the
+ * last one before it stops. A crash between handling and ack replays the
+ * batch, which the handlers' duplicate guards absorb: at-least-once, never
+ * lost.
  */
 
 export type WakeResult = 'turn' | 'skipped';
@@ -143,6 +150,8 @@ export class GateWatcher {
   private async watch(threadTs: string, channelId: string): Promise<void> {
     const key = loopKey(threadTs, channelId);
     this.logger.info({ threadTs, channelId }, 'gate watcher armed');
+    /** The Delivery handled in the last window, not yet acknowledged. */
+    let unacked: string | undefined;
     while (true) {
       const pending = this.store.pendingQuestionDeliveries({ threadTs, channelId });
       let deliveryFailed = false;
@@ -159,7 +168,13 @@ export class GateWatcher {
         await sleep(this.retryDelayMs);
         continue;
       }
+      const mailbox = this.store.getMailbox(threadTs, channelId);
       if (this.store.listInFlightForThread(threadTs, channelId).length === 0) {
+        if (unacked !== undefined && mailbox !== undefined) {
+          // Left unacknowledged, the batch would replay ahead of every later
+          // event on this mailbox — settle it before the loop lets go.
+          await this.acknowledge(mailbox, unacked);
+        }
         // Un-arm in the same synchronous block as the stop decision: a
         // dispatch interleaving after this line finds the thread un-armed
         // and starts a fresh loop instead of no-opping into a lost watcher.
@@ -167,7 +182,6 @@ export class GateWatcher {
         this.logger.info({ threadTs }, 'no in-flight delegations left — gate watcher stops');
         return;
       }
-      const mailbox = this.store.getMailbox(threadTs, channelId);
       if (mailbox === undefined) {
         // Unreachable on the normal path — a dispatch cannot happen without
         // the mailbox — but a hand-edited ledger must not spin this loop.
@@ -178,31 +192,41 @@ export class GateWatcher {
         );
         return;
       }
-      let messages: OrchestrationMessage[];
+      let window: CheckWindow;
       try {
-        messages = await this.checkOnce(mailbox);
+        window = await this.checkOnce(mailbox, unacked);
       } catch (error) {
         this.logger.warn(
-          { err: error, threadTs, mailbox },
+          { err: error, threadTs, mailbox, ...(unacked !== undefined && { droppedAck: unacked }) },
           'check --wait failed — next window after a pause',
         );
+        // The ack does not survive a failure: an already-applied one fails
+        // every retry as `stale_delivery` (probed live), while a batch left
+        // unacknowledged merely replays into the duplicate guards and gets
+        // acknowledged after that window instead — at-least-once either way.
+        unacked = undefined;
         await sleep(this.retryDelayMs);
         continue;
       }
+      unacked = window.deliveryId;
       // An empty result is the window's timeout — a checkpoint, not a
       // failure (issue #4): fall through and roll the next window.
-      for (const message of messages) {
+      for (const message of window.messages) {
         await this.handleMessage(threadTs, channelId, message);
       }
     }
   }
 
-  /** One `check --wait` window on the thread's mailbox. Throws on a bad shape. */
-  private async checkOnce(mailbox: string): Promise<OrchestrationMessage[]> {
+  /**
+   * One `check --wait` window on the thread's mailbox, acknowledging the
+   * previous window's Delivery on the way in. Throws on a bad shape.
+   */
+  private async checkOnce(mailbox: string, ack: string | undefined): Promise<CheckWindow> {
     const { stdout } = await this.runCheck('orca', [
       'orchestration',
       'check',
       '--wait',
+      ...(ack === undefined ? [] : ['--ack', ack]),
       '--terminal',
       mailbox,
       '--types',
@@ -211,15 +235,42 @@ export class GateWatcher {
       String(this.windowMs),
       '--json',
     ]);
-    const { messages, raw } = readCheckMessages(stdout);
+    const { messages, raw, deliveryId } = readCheckMessages(stdout);
     if (messages.length < raw.length) {
-      // The check marked them read, so this log line is their last trace.
+      // The check consumed them, so this log line is their last trace.
       this.logger.error(
         { mailbox, dropped: raw.length - messages.length, raw },
         'unreadable bus messages dropped',
       );
     }
-    return messages;
+    return { messages, ...(deliveryId !== undefined && { deliveryId }) };
+  }
+
+  /**
+   * Settles the last handled Delivery when the loop stops with it unacked —
+   * `check --ack` without `--wait`, on the short runner. A batch the ack
+   * hands back stays queued for the next arm (returned is not acknowledged),
+   * so nothing is lost; a failure here merely replays an already-handled
+   * batch later, which the duplicate guards absorb.
+   */
+  private async acknowledge(mailbox: string, deliveryId: string): Promise<void> {
+    try {
+      await this.run('orca', [
+        'orchestration',
+        'check',
+        '--ack',
+        deliveryId,
+        '--terminal',
+        mailbox,
+        '--json',
+      ]);
+      this.logger.info({ mailbox, deliveryId }, 'last Delivery acknowledged');
+    } catch (error) {
+      this.logger.warn(
+        { err: error, mailbox, deliveryId },
+        'final Delivery acknowledgement failed — it replays on the next arm',
+      );
+    }
   }
 
   // ── event handling ─────────────────────────────────────────────────────────
@@ -280,8 +331,8 @@ export class GateWatcher {
    * `worker_done` (issue #20): ledger row closed, card flipped to ✅/❌ with
    * the durable links, root reaction settled, session woken for the summary,
    * and on success the worktree cleaned up (issue #43). Failure is still a
-   * worker_done — the preamble fixes the subject shape ("Failed: <reason>"),
-   * which is all the signal there is.
+   * worker_done — the worker's explicit `--outcome` (Orca ≥ 1.4.198), else
+   * the older preamble's subject shape ("Failed: <reason>").
    */
   private async handleWorkerDone(
     threadTs: string,
@@ -302,7 +353,7 @@ export class GateWatcher {
       );
       return;
     }
-    const failed = isFailureSubject(message.subject);
+    const failed = isFailedReport(message);
     if (!this.store.closeDelegation(row.dispatchId, failed ? 'failed' : 'completed', message.body)) {
       this.logger.info(
         { threadTs, dispatchId: row.dispatchId },
@@ -527,6 +578,13 @@ export class GateWatcher {
 /** The (channel, thread) pair flattened for the loop map (issue #93). */
 function loopKey(threadTs: string, channelId: string): string {
   return `${channelId}:${threadTs}`;
+}
+
+/** What one window returned: its messages, and the Delivery to acknowledge
+ * once they are handled (absent on a timeout and on runtimes before Runs). */
+interface CheckWindow {
+  messages: OrchestrationMessage[];
+  deliveryId?: string;
 }
 
 // ── wake texts — what the daemon feeds the session's input pipe ─────────────

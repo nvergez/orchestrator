@@ -9,7 +9,7 @@ import {
   type OrchestrationMessage,
   type WorktreeProcess,
 } from '../kernel/orca.ts';
-import { isFailureSubject, type ThreadSurface } from './thread-surface.ts';
+import { isFailedReport, type ThreadSurface } from './thread-surface.ts';
 import type { DelegationRow, DelegationStore } from './delegations.ts';
 import type { Logger } from '../kernel/logger.ts';
 import { deliverQuestion } from './question-delivery.ts';
@@ -19,10 +19,12 @@ import { deliverQuestion } from './question-delivery.ts';
  * processes — a daemon crash leaves them running, and a `worker_done` sent
  * into the void is still sitting on the bus. At boot, every delegation the
  * ledger still shows dispatched is reconciled against what actually
- * happened — the orchestration task list, the live worktree state, and a
- * READ-ONLY peek at the thread mailbox (`check --all` never marks messages
- * read, so the re-armed gate watcher keeps seeing whatever it would have) —
- * and each affected thread gets exactly ONE ⚠️ line with the observed truth.
+ * happened — the thread's orchestration task list (asked from its mailbox,
+ * whose Run scopes the list since Orca 1.4.198, ADR 0006), the live worktree
+ * state, and a READ-ONLY peek at the thread mailbox (`check --all` never
+ * consumes messages, so the re-armed gate watcher keeps seeing whatever it
+ * would have) — and each affected thread gets exactly ONE ⚠️ line with the
+ * observed truth.
  *
  * The boundaries are the point:
  * - never kill or restart a worker — every orca call here is a read, with
@@ -69,9 +71,9 @@ interface Reconciled {
 const isTerminal = (item: Reconciled): item is Reconciled & { kind: 'completed' | 'failed' } =>
   item.kind === 'completed' || item.kind === 'failed';
 
-/** What the task list and the worktree table said, fetched once per boot. */
+/** What the worktree table said, fetched once per boot — the runtime's
+ * reachability signal; task statuses come per thread, off its mailbox. */
 interface Observations {
-  taskStatus: Map<string, string>;
   worktrees: WorktreeProcess[];
 }
 
@@ -128,11 +130,7 @@ export class BootReconciler {
     }
     let observed: Observations | undefined;
     try {
-      const [tasks, worktrees] = await Promise.all([
-        listOrchestrationTasks(this.run),
-        listWorktreeProcesses(this.run),
-      ]);
-      observed = { taskStatus: new Map(tasks.map((task) => [task.id, task.status])), worktrees };
+      observed = { worktrees: await listWorktreeProcesses(this.run) };
     } catch (error) {
       // No observations, no conclusions: every row stays as it was and the
       // ⚠️ lines say so — spec §10's "Orca runtime unavailable, never a
@@ -253,13 +251,35 @@ export class BootReconciler {
         reportFor.set(row.dispatchId, message);
       }
     }
-    return rows.map((row) => this.classify(row, observed, reportFor.get(row.dispatchId)));
+    const taskStatus = await this.taskStatuses(threadTs, channelId);
+    return rows.map((row) => this.classify(row, observed, taskStatus, reportFor.get(row.dispatchId)));
+  }
+
+  /**
+   * The thread's task statuses off `task-list`, asked from its mailbox: the
+   * list is scoped to the Run bound to the sender (ADR 0006), and a thread
+   * without a mailbox asks the flag-less form an older runtime still
+   * answers. A failed list observes nothing — the rows then classify from
+   * the bus peek and worktree liveness alone, which only ever describe.
+   */
+  private async taskStatuses(threadTs: string, channelId: string): Promise<Map<string, string>> {
+    const mailbox = this.store.getMailbox(threadTs, channelId);
+    try {
+      const tasks = await listOrchestrationTasks(this.run, mailbox);
+      return new Map(tasks.map((task) => [task.id, task.status]));
+    } catch (error) {
+      this.logger.warn(
+        { err: error, threadTs, mailbox },
+        'task-list failed — reconciling from the bus peek and worktree state alone',
+      );
+      return new Map();
+    }
   }
 
   /**
    * One row against the three observation sources. Precedence: a peeked
    * worker_done is the worker's own word (and the only failure signal with a
-   * reason — the "Failed:" subject contract); the task list is authoritative
+   * reason — its `--outcome`, else the "Failed:" subject contract); the task list is authoritative
    * for bare completion; only an unfinished task falls through to worktree
    * liveness. Liveness only ever describes — a worktree that is gone,
    * archived or silent keeps its row open (absence of evidence closes
@@ -268,10 +288,11 @@ export class BootReconciler {
   private classify(
     row: DelegationRow,
     observed: Observations,
+    taskStatus: Map<string, string>,
     report: OrchestrationMessage | undefined,
   ): Reconciled {
     if (report !== undefined) {
-      return isFailureSubject(report.subject)
+      return isFailedReport(report)
         ? {
             row,
             kind: 'failed',
@@ -282,7 +303,7 @@ export class BootReconciler {
         : { row, kind: 'completed', state: COMPLETED_STATE, report };
     }
 
-    const status = observed.taskStatus.get(row.taskId);
+    const status = taskStatus.get(row.taskId);
     if (status === 'completed') {
       // A task status cannot replace the answer. Leave the Question watched
       // until its worker_done body is available; keep the worktree too.

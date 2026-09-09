@@ -168,6 +168,7 @@ const MAILBOXES_COLUMNS = `(
         channel_id TEXT NOT NULL,
         handle     TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        run_id     TEXT,
         PRIMARY KEY (thread_ts, channel_id)
       ) STRICT`;
 
@@ -190,7 +191,8 @@ const RECONCILIATIONS_COLUMNS = `(
  * on it. It shares the SQLite file with SessionStore — same synchronous
  * single-writer design — across four tables: `delegations` (written at
  * dispatch, closed on `worker_done`, slice #20), `mailboxes` (each thread's
- * coordinator terminal, `slack-<thread_ts>`, issue #9), `pending_gates`
+ * coordinator terminal, `slack-<thread_ts>`, issue #9, and the Orca Run
+ * bound to it, ADR 0006), `pending_gates`
  * (written by the daemon at relay time, issue #21 — what routes human
  * answers back down) and `stall_alerts` (its watchdog sibling, issue #22).
  *
@@ -263,6 +265,7 @@ export class DelegationStore {
     this.migrateDelegations();
     this.migrateStallAlerts();
     this.migrateMailboxes();
+    this.migrateMailboxRuns();
     this.migrateReconciliations();
   }
 
@@ -323,6 +326,19 @@ export class DelegationStore {
       ALTER TABLE mailboxes_next RENAME TO mailboxes;
       COMMIT;
     `);
+  }
+
+  /**
+   * Adds the ADR 0006 `run_id` column to a mailboxes table from before Orca
+   * Runs. A plain nullable add: an existing mailbox reads null, and the
+   * coordinator binds a Run to it lazily the next time the thread needs
+   * its mailbox — the handle itself keeps working.
+   */
+  private migrateMailboxRuns(): void {
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(mailboxes)').all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    if (!columns.has('run_id')) this.db.exec('ALTER TABLE mailboxes ADD COLUMN run_id TEXT');
   }
 
   /**
@@ -687,14 +703,35 @@ export class DelegationStore {
     return row?.handle;
   }
 
-  /** Remembers (or replaces, after a stale-handle recreate) the thread's mailbox. */
-  setMailbox(threadTs: string, channelId: string, handle: string): void {
+  /**
+   * The Orca Run bound to the thread's mailbox terminal (ADR 0006), if one
+   * was ever bound — null for a mailbox from before Runs existed.
+   */
+  getMailboxRun(threadTs: string, channelId: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT run_id FROM mailboxes WHERE thread_ts = ? AND channel_id = ?')
+      .get(threadTs, channelId) as { run_id: string | null } | undefined;
+    return row?.run_id ?? undefined;
+  }
+
+  /** Remembers the Run just bound to the thread's existing mailbox. */
+  setMailboxRun(threadTs: string, channelId: string, runId: string): void {
+    this.db
+      .prepare('UPDATE mailboxes SET run_id = ? WHERE thread_ts = ? AND channel_id = ?')
+      .run(runId, threadTs, channelId);
+  }
+
+  /**
+   * Remembers (or replaces, after a stale-handle recreate) the thread's
+   * mailbox, with the Run bound to it when the runtime has Runs.
+   */
+  setMailbox(threadTs: string, channelId: string, handle: string, runId: string | null = null): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO mailboxes (thread_ts, channel_id, handle, created_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO mailboxes (thread_ts, channel_id, handle, created_at, run_id)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(threadTs, channelId, handle, this.now());
+      .run(threadTs, channelId, handle, this.now(), runId);
   }
 
   /**

@@ -132,9 +132,23 @@ export interface OrchestrationTask {
   status: string;
 }
 
-/** `orca orchestration task-list --json` → every task on the runtime bus. */
-export async function listOrchestrationTasks(run: CommandRunner): Promise<OrchestrationTask[]> {
-  const { stdout } = await run('orca', ['orchestration', 'task-list', '--json']);
+/**
+ * `orca orchestration task-list --json` → the tasks the runtime lists.
+ * Since Orca 1.4.198 (ADR 0006) every orchestration command needs a sender
+ * terminal and the list is scoped to the Run bound to it — so boot
+ * reconciliation asks per thread, `from` its mailbox; the flag-less form
+ * stays for a mailbox-less thread on an older runtime.
+ */
+export async function listOrchestrationTasks(
+  run: CommandRunner,
+  from?: string,
+): Promise<OrchestrationTask[]> {
+  const { stdout } = await run('orca', [
+    'orchestration',
+    'task-list',
+    ...(from === undefined ? [] : ['--from', from]),
+    '--json',
+  ]);
   const tasks = parseOrcaEnvelope(stdout)?.tasks;
   if (!Array.isArray(tasks)) {
     throw new Error('unexpected `orca orchestration task-list` response shape');
@@ -366,7 +380,16 @@ export interface OrchestrationMessage {
   body: string;
   /** The sending terminal — the asking worker, for a gate's route-back. */
   fromHandle?: string;
-  payload: { taskId?: string; dispatchId?: string; question?: string; options?: string[] };
+  payload: {
+    taskId?: string;
+    dispatchId?: string;
+    question?: string;
+    options?: string[];
+    /** The worker's explicit verdict on a `worker_done` (Orca ≥ 1.4.198,
+     * `send --outcome`); absent from older preambles, whose only failure
+     * signal is the "Failed: …" subject. */
+    outcome?: 'succeeded' | 'failed';
+  };
 }
 
 /**
@@ -375,16 +398,28 @@ export interface OrchestrationMessage {
  * on a shapeless envelope. Shared by the gate watcher's `check --wait`
  * windows and boot reconciliation's read-only `check --all` peek (issue
  * #25) — the same message shape either way.
+ *
+ * A consuming check on Orca ≥ 1.4.198 returns one Delivery: the batch
+ * replays identically on every later check until `check --ack <deliveryId>`
+ * (ADR 0006), so the id rides along for the watcher to acknowledge once the
+ * batch is handled. Absent on a read-only `--all` peek and on older runtimes.
  */
 export function readCheckMessages(stdout: string): {
   messages: OrchestrationMessage[];
   raw: unknown[];
+  deliveryId?: string;
 } {
-  const raw = parseOrcaEnvelope(stdout)?.messages;
+  const result = parseOrcaEnvelope(stdout);
+  const raw = result?.messages;
   if (!Array.isArray(raw)) {
     throw new Error('unexpected `orca orchestration check` response shape');
   }
-  return { messages: raw.flatMap(readMessage), raw };
+  const deliveryId = result?.deliveryId;
+  return {
+    messages: raw.flatMap(readMessage),
+    raw,
+    ...(typeof deliveryId === 'string' && deliveryId !== '' && { deliveryId }),
+  };
 }
 
 /** One raw bus message → the readable shape; unreadable entries drop, logged upstream. */
@@ -412,7 +447,8 @@ function readMessage(raw: unknown): OrchestrationMessage[] {
 
 /**
  * The bus serializes `payload` as a JSON string — `{taskId, dispatchId}` on
- * worker events, plus `{question, options}` on an `ask` (issue #21).
+ * worker events (plus `outcome` since Orca 1.4.198), and `{question,
+ * options}` on an `ask` (issue #21).
  */
 function readPayload(raw: unknown): OrchestrationMessage['payload'] {
   if (typeof raw !== 'string') return {};
@@ -422,6 +458,7 @@ function readPayload(raw: unknown): OrchestrationMessage['payload'] {
       dispatchId?: unknown;
       question?: unknown;
       options?: unknown;
+      outcome?: unknown;
     };
     const options = Array.isArray(parsed.options)
       ? parsed.options.filter((option): option is string => typeof option === 'string')
@@ -431,6 +468,7 @@ function readPayload(raw: unknown): OrchestrationMessage['payload'] {
       ...(typeof parsed.dispatchId === 'string' && { dispatchId: parsed.dispatchId }),
       ...(typeof parsed.question === 'string' && { question: parsed.question }),
       ...(options !== undefined && options.length > 0 && { options }),
+      ...((parsed.outcome === 'succeeded' || parsed.outcome === 'failed') && { outcome: parsed.outcome }),
     };
   } catch {
     return {};
@@ -456,4 +494,55 @@ export async function createTerminal(
     throw new Error('unexpected `orca terminal create` response shape');
   }
   return terminal.handle;
+}
+
+/**
+ * `orca orchestration run-create --from <handle>` — binds a fresh Run to the
+ * terminal (Orca ≥ 1.4.198, ADR 0006): the namespace every orchestration
+ * command issued from that terminal lands in, and the inbox its workers'
+ * `worker_done`/`ask` route to. Resolves with the run id; throws when the
+ * runtime is unreachable or predates Runs.
+ */
+export async function createRun(
+  run: CommandRunner,
+  opts: { from: string; objective: string },
+): Promise<string> {
+  const { stdout } = await run('orca', [
+    'orchestration',
+    'run-create',
+    '--objective',
+    opts.objective,
+    '--from',
+    opts.from,
+    '--json',
+  ]);
+  const created = parseOrcaEnvelope(stdout)?.run as { id?: unknown } | undefined;
+  if (typeof created?.id !== 'string') {
+    throw new Error('unexpected `orca orchestration run-create` response shape');
+  }
+  return created.id;
+}
+
+/**
+ * `orca orchestration run-use --id <run> --from <handle>` — re-binds an
+ * existing Run to a fresh terminal (ADR 0006): how a recreated mailbox keeps
+ * the Run its in-flight workers still report to. Throws when the runtime
+ * refuses — the Run is gone, or the runtime predates Runs.
+ */
+export async function bindRun(
+  run: CommandRunner,
+  opts: { from: string; runId: string },
+): Promise<void> {
+  const { stdout } = await run('orca', [
+    'orchestration',
+    'run-use',
+    '--id',
+    opts.runId,
+    '--from',
+    opts.from,
+    '--json',
+  ]);
+  if (parseOrcaEnvelope(stdout) === null) {
+    throw new Error('unexpected `orca orchestration run-use` response shape');
+  }
 }

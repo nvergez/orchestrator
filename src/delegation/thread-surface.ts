@@ -49,6 +49,20 @@ export function isFailureSubject(subject: string): boolean {
   return /^fail/i.test(subject.trim());
 }
 
+/**
+ * Whether a worker's report is a failure. A worker on Orca ≥ 1.4.198 states
+ * its verdict outright (`send --outcome`, ADR 0006) and that word wins; a
+ * report without one — an older preamble — falls back to the subject
+ * contract above. Shared by the live watcher and boot reconciliation.
+ */
+export function isFailedReport(report: {
+  subject: string;
+  payload: { outcome?: 'succeeded' | 'failed' };
+}): boolean {
+  if (report.payload.outcome !== undefined) return report.payload.outcome === 'failed';
+  return isFailureSubject(report.subject);
+}
+
 /** The root reactions the daemon manages (spec §8) — one on, the rest off. */
 const ROOT_REACTIONS = ['eyes', 'white_check_mark', 'x', 'question', 'rotating_light'] as const;
 

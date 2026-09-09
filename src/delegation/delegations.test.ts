@@ -440,6 +440,63 @@ describe('DelegationStore — mailboxes', () => {
 
     expect(store.getMailbox('1751970099.000900', CHANNEL)).toBeUndefined();
   });
+
+  it('remembers the Run bound to a mailbox; a recreated handle starts without one (ADR 0006)', () => {
+    const store = openStore();
+
+    store.setMailbox(THREAD, CHANNEL, 'term_mailbox_1');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
+    store.setMailboxRun(THREAD, CHANNEL, 'run_1');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_1');
+    expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_1');
+
+    // A stale-handle recreate replaces the row — the Run is re-bound
+    // explicitly, never inherited by a terminal it was not bound to.
+    store.setMailbox(THREAD, CHANNEL, 'term_mailbox_2');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
+    store.setMailbox(THREAD, CHANNEL, 'term_mailbox_3', 'run_2');
+    expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_2');
+    expect(store.getMailboxRun('1751970099.000900', CHANNEL)).toBeUndefined();
+  });
+});
+
+describe('DelegationStore — the ADR 0006 mailbox Run migration', () => {
+  it('adds run_id to a post-#93 mailboxes table from before Orca Runs — the handle keeps working', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orchestrator-adr6-'));
+    const dbPath = join(dir, 'orchestrator.db');
+    try {
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE mailboxes (
+          thread_ts  TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          handle     TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (thread_ts, channel_id)
+        ) STRICT;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO mailboxes (thread_ts, channel_id, handle, created_at)
+           VALUES (?, ?, 'term_mailbox_prerun', '2026-07-09T12:23:50.626Z')`,
+        )
+        .run(THREAD, CHANNEL);
+      legacy.close();
+
+      const store = new DelegationStore(dbPath);
+      expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_prerun');
+      expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
+      store.setMailboxRun(THREAD, CHANNEL, 'run_bound_later');
+      store.close();
+
+      // Idempotent: reopening keeps the column and the bound Run.
+      const reopened = new DelegationStore(dbPath);
+      expect(reopened.getMailboxRun(THREAD, CHANNEL)).toBe('run_bound_later');
+      reopened.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 const gateRow = (overrides: Partial<Parameters<DelegationStore['recordGate']>[0]> = {}) => ({
@@ -1133,8 +1190,12 @@ describe('DelegationStore — the issue #93 forward migrations', () => {
       seedPre93(dbPath);
       const store = new DelegationStore(dbPath);
 
-      // Mailboxes re-keyed to the pair; the stored handle still resolves.
+      // Mailboxes re-keyed to the pair; the stored handle still resolves,
+      // and the rebuilt table already carries the ADR 0006 Run column.
       expect(store.getMailbox(THREAD, CHANNEL)).toBe('term_mailbox_pre93');
+      expect(store.getMailboxRun(THREAD, CHANNEL)).toBeUndefined();
+      store.setMailboxRun(THREAD, CHANNEL, 'run_pre93');
+      expect(store.getMailboxRun(THREAD, CHANNEL)).toBe('run_pre93');
       // Reconciliations backfilled from the thread's delegations; the row
       // with no delegations to backfill from is dropped, not misfiled.
       expect(store.getReconcileFingerprint(THREAD, CHANNEL)).toBe('ctx_pre93=in-flight');
