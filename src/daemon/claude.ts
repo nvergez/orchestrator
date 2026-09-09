@@ -4,7 +4,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Logger } from '../kernel/logger.ts';
-import type { ProcessFactory, TurnEvents, TurnOutcome } from './sessions.ts';
+import type { ProcessFactory, SessionTurn, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
 import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
 import type { DispatchObserver, DispatchPreparer } from '../delegation/dispatch.ts';
@@ -147,10 +147,16 @@ class ClaudeProcess {
     });
   }
 
-  async runTurn(text: string, events: TurnEvents): Promise<TurnOutcome> {
+  async runTurn(turn: SessionTurn, events: TurnEvents): Promise<TurnOutcome> {
     this.input.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content: turn.images.length === 0 ? turn.text : [
+        { type: 'text', text: turn.text },
+        ...turn.images.map((image) => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: image.mediaType, data: Buffer.from(image.bytes).toString('base64') },
+        })),
+      ] },
       parent_tool_use_id: null,
     });
 

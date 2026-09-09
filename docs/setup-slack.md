@@ -47,6 +47,7 @@ review the summarized scopes and events → **Create**.
                 "app_mentions:read",
                 "channels:history",
                 "groups:history",
+                "files:read",
                 "chat:write",
                 "reactions:write"
             ]
@@ -70,10 +71,10 @@ review the summarized scopes and events → **Create**.
 Rename the app freely — the daemon discovers its own identity at boot, so
 nothing depends on the literal name. What the manifest configures:
 
-- **5 bot scopes** — exactly what the code uses: read mentions
+- **6 bot scopes** — exactly what the code uses: read mentions
   (`app_mentions:read`), read thread replies in public or private channels
   (`channels:history`, `groups:history`), post and edit messages
-  (`chat:write`), add/remove the status reactions (`reactions:write`).
+  (`chat:write`), download image attachments (`files:read`), add/remove the status reactions (`reactions:write`).
 - **3 event subscriptions** — `app_mention` plus both `message.channels`
   (public channels) and `message.groups` (private channels). The channel's
   privacy decides which `message.*` event Slack emits; subscribing to both
@@ -102,6 +103,23 @@ Mode* in the sidebar if in doubt.)
 authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
+
+### Existing installs: enable image attachments
+
+After updating with `orc update`, add **`files:read`** under **OAuth &
+Permissions → Bot Token Scopes** (or apply the manifest above), then
+**Reinstall to Workspace** and authorize it once. Adding the scope alone
+does not grant it to the installed token. If Slack supplies a replacement
+bot token, update `SLACK_BOT_TOKEN` in the env file; restart the daemon so
+its boot identity check sees the new scopes.
+
+`orc doctor` reports `image attachments: enabled`, or
+`image attachments: disabled — bot token lacks files:read`. Missing scope
+is informational: text requests keep working. The daemon logs one warning
+at boot and explains the missing scope when it skips an image.
+
+No new event subscription is needed. The existing `app_mention` and
+`message.*` events carry Slack files; `file_share` is accepted.
 
 ## 4. Create or choose the channel(s) and invite the bot
 
@@ -143,3 +161,14 @@ Then, in the pinned channel:
 2. Reply **in the thread without mentioning it**. A response proves the
    `message.*` subscription matches your channel's type — the last thing that
    can silently misfire.
+
+3. Mention the bot with a PNG screenshot, then reply with only an image.
+   Expect 👀 and an answer that describes the picture. PNG, JPEG, GIF and
+   WebP are accepted, up to 5 MiB and 8,000 px on the longest side, with at
+   most eight images per turn. Other files get one skip notice per message.
+4. In an isolated dev install, verify that the acting `app_mention` event
+   carries `files`, and that a Question/Change worker can read the saved
+   absolute paths under the daemon's state directory. These depend on the
+   workspace payload and worker sandbox; the unit tests use fakes. Do not
+   copy images into a worktree as a workaround without revisiting the
+   storage decision in [issue #109](https://github.com/nvergez/orchestrator/issues/109).

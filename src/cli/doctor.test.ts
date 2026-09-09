@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { slackIdentity } from '../kernel/slack.ts';
+import { describe, expect, it, vi } from 'vitest';
 import { runDoctor, runDoctorChecks, type DoctorDeps } from './doctor.ts';
 import { RoutingHintsError, type RepoHint } from '../kernel/routing.ts';
 
@@ -100,6 +101,7 @@ const greenDeps = (): DoctorDeps => ({
   uid: 1000,
   unitPath: UNIT_PATH,
   dashboardUnitPath: DASHBOARD_UNIT_PATH,
+  slackAuth: () => Promise.resolve({ scopes: ['files:read'] }),
   httpGet: () => Promise.resolve({ status: 200 }),
 });
 
@@ -107,11 +109,47 @@ const failures = (checks: { label: string; ok: boolean }[]): string[] =>
   checks.filter((check) => !check.ok).map((check) => check.label);
 
 describe('runDoctorChecks', () => {
+  it.each([
+    [['files:read', 'chat:write'], 'enabled'],
+    [['chat:write'], 'disabled — bot token lacks files:read'],
+  ])('reports image attachment availability without failing the check: %s', async (scopes, detail) => {
+    const deps = greenDeps();
+    deps.slackAuth = () => Promise.resolve({ scopes });
+    const checks = await runDoctorChecks(deps);
+    expect(checks.find((check) => check.label === 'image attachments')).toEqual({ label: 'image attachments', ok: true, detail });
+    expect(failures(checks)).toEqual([]);
+  });
+
+  it('reads granted scopes from the identity response header using the configured env-file token', async () => {
+    const deps = greenDeps();
+    deps.env = { XDG_CONFIG_HOME: '/home/op/.config' };
+    deps.readFile = readFiles(() => envFileContent(validEnv));
+    deps.slackAuth = slackIdentity;
+    const request = vi.fn(() => Promise.resolve(new Response('{"ok":true}', { headers: { 'x-oauth-scopes': 'chat:write, files:read' } })));
+    vi.stubGlobal('fetch', request);
+    try {
+      const checks = await runDoctorChecks(deps);
+      expect(checks.find((check) => check.label === 'image attachments')?.detail).toBe('enabled');
+      expect(request).toHaveBeenCalledWith('https://slack.com/api/auth.test', expect.objectContaining({ headers: { Authorization: `Bearer ${validEnv.SLACK_BOT_TOKEN}` } }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports a Slack identity failure as informational without failing other checks', async () => {
+    const deps = greenDeps();
+    deps.slackAuth = () => Promise.reject(new Error('offline'));
+    const checks = await runDoctorChecks(deps);
+    expect(checks.find((check) => check.label === 'image attachments')).toEqual({ label: 'image attachments', ok: true, detail: 'unknown — Slack identity check failed' });
+    expect(failures(checks)).toEqual([]);
+  });
+
   it('passes across the board on a healthy, service-installed box', async () => {
     const checks = await runDoctorChecks(greenDeps());
     expect(failures(checks)).toEqual([]);
     expect(checks.map((check) => check.label)).toEqual([
       'env',
+      'image attachments',
       'routing hints',
       'state dir',
       'node',
@@ -450,7 +488,7 @@ describe('runDoctor', () => {
   it('exits 0 and prints one ✔ line per check when everything passes', async () => {
     const { io, out } = collect();
     await expect(runDoctor(greenDeps(), io)).resolves.toBe(0);
-    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(11);
+    expect(out.filter((line) => line.startsWith('✔'))).toHaveLength(12);
     expect(out.at(-1)).toBe('all checks passed');
   });
 

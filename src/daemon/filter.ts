@@ -16,6 +16,19 @@ export interface IncomingEvent {
   bot_id?: string;
   text?: string;
   blocks?: SlackBlock[];
+  files?: SlackFile[];
+}
+
+/** Metadata delivered with a Slack message; only accepted images are saved. */
+export interface SlackFile {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  size?: number;
+  original_w?: number | string;
+  original_h?: number | string;
+  url_private_download?: string;
+  url_private?: string;
 }
 
 /** The slice of Slack's block structure the text extractor walks. */
@@ -74,9 +87,9 @@ export type IgnoreReason =
 
 export type Decision =
   /** Root @mention by an allowed user — register the thread, first turn. */
-  | { action: 'open'; threadTs: string; channelId: string; userId: string; text: string }
+  | { action: 'open'; threadTs: string; channelId: string; userId: string; text: string; files?: SlackFile[] }
   /** Allowed-user message inside a thread — a turn iff the thread is registered. */
-  | { action: 'reply'; threadTs: string; channelId: string; text: string; userId: string; mentioned: boolean }
+  | { action: 'reply'; threadTs: string; channelId: string; text: string; userId: string; mentioned: boolean; files?: SlackFile[] }
   /** `@orchestrator close` inside a thread — the explicit close command (spec §3). */
   | { action: 'close'; threadTs: string; channelId: string }
   /** Root @mention by a third party — one polite fixed line (UX mock G1). */
@@ -88,7 +101,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     return { action: 'ignore', reason: 'wrong_channel' };
   }
   const channelId = event.channel;
-  if (event.subtype !== undefined) {
+  if (event.subtype !== undefined && event.subtype !== 'file_share') {
     return { action: 'ignore', reason: 'subtype' };
   }
   if (event.bot_id !== undefined) {
@@ -103,6 +116,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
 
   const botTag = `<@${guard.botUserId}>`;
   const spokenText = humanText(event);
+  const files = event.files?.length ? { files: event.files } : {};
   if (event.type === 'message') {
     if (spokenText.includes(botTag)) {
       // A mention fires both the message event and app_mention for the same
@@ -120,14 +134,14 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
       return { action: 'ignore', reason: 'third_party_in_thread' };
     }
     const replyText = spokenText.trim();
-    if (replyText === '') {
-      // Attachment-only or whitespace replies never become empty Claude turns.
+    if (replyText === '' && !files.files) {
+      // Whitespace without files never becomes an empty Claude turn.
       return { action: 'ignore', reason: 'empty_text' };
     }
     if (isCloseCommand(replyText)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText, userId: event.user, mentioned: false };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText, userId: event.user, mentioned: false, ...files };
   }
 
   // app_mention from here on.
@@ -146,7 +160,7 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (isCloseCommand(text)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
     }
-    return { action: 'reply', threadTs: event.thread_ts, channelId, text, userId: event.user, mentioned: true };
+    return { action: 'reply', threadTs: event.thread_ts, channelId, text, userId: event.user, mentioned: true, ...files };
   }
   // A bare root mention is still an Open (spec §3: a root @mention is the one
   // and only opener) — substitute a fixed prompt rather than an empty turn.
@@ -155,7 +169,8 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     threadTs: event.ts,
     channelId,
     userId: event.user,
-    text: text === '' ? BARE_MENTION_PROMPT : text,
+    text: text === '' && !files.files ? BARE_MENTION_PROMPT : text,
+    ...files,
   };
 }
 

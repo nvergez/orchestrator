@@ -114,6 +114,7 @@ export async function runDaemon(): Promise<void> {
     const runtime = buildRuntime({
       config,
       slackWorkspaceUrl: auth.url,
+      slackScopes: auth.response_metadata?.scopes,
       hints,
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
@@ -135,7 +136,7 @@ export async function runDaemon(): Promise<void> {
     });
     await runtime.boot();
 
-    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger);
+    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger, runtime.attachments);
     await app.start();
     logger.info(
       { botUserId: guard.botUserId, channelIds: guard.channelIds },

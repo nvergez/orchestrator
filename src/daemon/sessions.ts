@@ -31,9 +31,21 @@ export type TurnOutcome =
   /** The subprocess exited without delivering a result for this turn. */
   | { status: 'process_ended' };
 
+export interface SessionTurn {
+  text: string;
+  images: Array<{
+    mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+    bytes: Uint8Array;
+    label: string;
+  }>;
+}
+
+const asTurn = (turn: string | SessionTurn): SessionTurn =>
+  typeof turn === 'string' ? { text: turn, images: [] } : turn;
+
 /** One live Claude subprocess, warm across turns until `end()`. */
 export interface OrchestratorProcess {
-  runTurn(text: string, events: TurnEvents): Promise<TurnOutcome>;
+  runTurn(turn: SessionTurn, events: TurnEvents): Promise<TurnOutcome>;
   end(): Promise<void>;
 }
 
@@ -58,7 +70,7 @@ export type VoiceFactory = (threadTs: string, channelId: string) => VoiceHandle;
 export type Notifier = (threadTs: string, channelId: string, text: string) => Promise<void>;
 
 /** A thread's FIFO carries turns and, terminally, the close command (spec §3). */
-type QueueItem = { kind: 'turn'; text: string } | { kind: 'close' };
+type QueueItem = { kind: 'turn'; turn: SessionTurn } | { kind: 'close' };
 
 interface ThreadState {
   threadTs: string;
@@ -97,6 +109,10 @@ export interface SessionManagerOptions {
   /** Turn-end settle (issue #49): takes the 👀 back off when the turn left
    * nothing in flight and nothing pending. Runs on every outcome. */
   onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
+  /** Downloads are activity too: never auto-close while preparing an input. */
+  isPreparingTurn: (threadTs: string, channelId: string) => boolean;
+  /** Runs after the closing summary, for explicit and dormant closes alike. */
+  onClose: (threadTs: string, channelId: string) => Promise<void>;
   logger: Logger;
 }
 
@@ -115,6 +131,8 @@ export class SessionManager {
   ) => Promise<ClosingDelegation[]>;
   private readonly onTurnStart: (threadTs: string, channelId: string) => Promise<void>;
   private readonly onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
+  private readonly isPreparingTurn: SessionManagerOptions['isPreparingTurn'];
+  private readonly onClose: SessionManagerOptions['onClose'];
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   /**
@@ -139,13 +157,19 @@ export class SessionManager {
     this.listDelegations = options.listDelegations;
     this.onTurnStart = options.onTurnStart;
     this.onTurnEnd = options.onTurnEnd;
+    this.onClose = options.onClose;
+    this.isPreparingTurn = options.isPreparingTurn;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
     // Nothing here touches a process; the next human message resumes.
   }
 
+  status(threadTs: string, channelId: string): 'open' | 'closed' | 'unregistered' {
+    return this.store.get(threadTs, channelId)?.status ?? 'unregistered';
+  }
+
   /** Root @mention: register the thread and run its first turn. */
-  open(threadTs: string, channelId: string, rootUser: string, text: string): void {
+  open(threadTs: string, channelId: string, rootUser: string, turn: string | SessionTurn): void {
     this.store.register(threadTs, channelId, rootUser);
     // A redelivered root mention can land on an already-closed row; closed
     // is final (spec §3), so it gets the fixed line, never a fresh turn.
@@ -153,7 +177,7 @@ export class SessionManager {
       this.postClosedLine(threadTs, channelId);
       return;
     }
-    this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn) });
   }
 
   /**
@@ -161,14 +185,14 @@ export class SessionManager {
    * Unregistered threads stay untouched — never a ghost resume — and a
    * closed thread answers with the fixed line only (spec §3).
    */
-  reply(threadTs: string, channelId: string, text: string): ReplyResult {
+  reply(threadTs: string, channelId: string, turn: string | SessionTurn): ReplyResult {
     const row = this.store.get(threadTs, channelId);
     if (row === undefined) return 'unregistered';
     if (row.status === 'closed') {
       this.postClosedLine(threadTs, channelId);
       return 'closed';
     }
-    if (text.trim() !== '') this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    if (asTurn(turn).text.trim() !== '' || asTurn(turn).images.length > 0) this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn) });
     return 'turn';
   }
 
@@ -183,7 +207,7 @@ export class SessionManager {
   wake(threadTs: string, channelId: string, text: string): 'turn' | 'skipped' {
     const row = this.store.get(threadTs, channelId);
     if (row === undefined || row.status === 'closed') return 'skipped';
-    this.enqueue(threadTs, channelId, { kind: 'turn', text });
+    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(text) });
     return 'turn';
   }
 
@@ -219,6 +243,7 @@ export class SessionManager {
       const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
       let closed = 0;
       for (const row of this.store.openSessionsInactiveSince(cutoff)) {
+        if (this.isPreparingTurn(row.threadTs, row.channelId)) continue;
         const state = this.threads.get(threadKey(row.threadTs, row.channelId));
         if (
           state !== undefined &&
@@ -279,6 +304,9 @@ export class SessionManager {
         '🔚 closing summary post failed',
       );
     }
+    await this.onClose(row.threadTs, row.channelId).catch((err: unknown) => {
+      this.logger.warn({ err, threadTs: row.threadTs }, 'thread cleanup failed');
+    });
   }
 
   private enqueue(threadTs: string, channelId: string, item: QueueItem): void {
@@ -312,7 +340,7 @@ export class SessionManager {
     try {
       for (let item = state.queue.shift(); item !== undefined; item = state.queue.shift()) {
         if (item.kind === 'close') await this.runClose(state);
-        else await this.runOneTurn(state, item.text);
+        else await this.runOneTurn(state, item.turn);
       }
     } finally {
       state.running = false;
@@ -422,7 +450,7 @@ export class SessionManager {
     }
   }
 
-  private async runOneTurn(state: ThreadState, text: string): Promise<void> {
+  private async runOneTurn(state: ThreadState, turn: SessionTurn): Promise<void> {
     // A turn must be observable from start to finish (issue #39): a warm turn
     // used to emit nothing until completion, making "running" and "never
     // started" indistinguishable in the logs.
@@ -435,7 +463,7 @@ export class SessionManager {
     // a message queued at the cap still acks within seconds of arriving.
     await this.hookSafe(this.onTurnStart, state, 'turn-start ack failed');
     try {
-      await this.runTurnBody(state, text, turnStartedAt);
+      await this.runTurnBody(state, turn, turnStartedAt);
     } finally {
       // Every outcome settles the root (issue #49): a pure Q&A turn takes
       // its 👀 back off; a turn that left work in flight leaves the root to
@@ -444,7 +472,7 @@ export class SessionManager {
     }
   }
 
-  private async runTurnBody(state: ThreadState, text: string, turnStartedAt: number): Promise<void> {
+  private async runTurnBody(state: ThreadState, turn: SessionTurn, turnStartedAt: number): Promise<void> {
     if (state.proc === null) {
       await this.acquireSlot(state);
       const row = this.store.get(state.threadTs, state.channelId);
@@ -469,7 +497,7 @@ export class SessionManager {
     const voice = this.voiceFor(state.threadTs, state.channelId);
     let outcome: TurnOutcome;
     try {
-      outcome = await state.proc.runTurn(text, {
+      outcome = await state.proc.runTurn(turn, {
         onDelta: (delta) => voice.append(delta),
         onSessionId: (sessionId) =>
           this.store.setSessionId(state.threadTs, state.channelId, sessionId),
