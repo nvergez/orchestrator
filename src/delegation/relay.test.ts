@@ -360,70 +360,6 @@ describe('prepare — option fidelity on the gate-answer terminal send (issue #5
   });
 });
 
-describe('sanctionsSend — the registry-anchored terminal send', () => {
-  const SEND = `orca terminal send --terminal ${WORKER} --text "app/" --enter --json`;
-
-  it('sanctions the fallback while the worker’s gate is pending, not forever after', () => {
-    const { relay, store } = makeRelay();
-    seedGate(store);
-    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(true);
-
-    // All answered and no correction under way: the worker is no longer a
-    // silent AUTO target — the 🚦 is back.
-    store.answerGate(GATE);
-    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(false);
-  });
-
-  it('sanctions the correction send an answered-gate denial just pointed at', () => {
-    const { relay, store } = makeRelay();
-    seedGate(store);
-    store.answerGate(GATE);
-
-    expect(relay.prepare(THREAD, CHANNEL, replyCommand('actually 1')).action).toBe('deny');
-    expect(relay.sanctionsSend(THREAD, CHANNEL, SEND)).toBe(true);
-  });
-
-  it.each([
-    ['an unknown worker handle', 'orca terminal send --terminal term_other --text "x" --json'],
-    ['a missing --json', `orca terminal send --terminal ${WORKER} --text "x" --enter`],
-    ['a chained command', `orca terminal send --terminal ${WORKER} --text "x" --json && ls`],
-    ['another thread’s gate', `orca terminal send --terminal ${WORKER} --text "x" --json`],
-  ])('never sanctions %s', (label, command) => {
-    const { relay, store } = makeRelay();
-    seedGate(store, label === 'another thread’s gate' ? { threadTs: OTHER_THREAD } : {});
-    expect(relay.sanctionsSend(THREAD, CHANNEL, command)).toBe(false);
-  });
-
-  it('sanctions the nudge while the worker’s stall alert is pending, not after (issue #22)', () => {
-    const { relay, store } = makeRelay();
-    seedStall(store);
-    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
-      true,
-    );
-
-    store.answerStall('ctx_stalled');
-    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --enter --json`)).toBe(
-      false,
-    );
-  });
-
-  it('never sanctions a send for another thread’s stall', () => {
-    const { relay, store } = makeRelay();
-    seedStall(store, { threadTs: OTHER_THREAD });
-    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
-      false,
-    );
-  });
-
-  it('the stall sanction demands --enter — keystrokes without it answer nothing', () => {
-    const { relay, store } = makeRelay();
-    seedStall(store);
-    expect(relay.sanctionsSend(THREAD, CHANNEL, `orca terminal send --terminal ${WORKER} --text "y" --json`)).toBe(
-      false,
-    );
-  });
-});
-
 describe('gate registry hygiene — superseded and closed gates (issue #46)', () => {
   const seedDispatch = (
     store: DelegationStore,
@@ -511,17 +447,6 @@ describe('gate registry hygiene — superseded and closed gates (issue #46)', ()
 
     const numeric = `orca terminal send --terminal ${WORKER} --text "2" --enter --json`;
     expect(relay.prepare(THREAD, CHANNEL, numeric)).toEqual({ action: 'proceed', command: numeric });
-  });
-
-  it('sanctionsSend lapses once the delegation close mooted the worker’s gates', () => {
-    const { relay, store } = makeRelay();
-    const send = `orca terminal send --terminal ${WORKER} --text "root" --enter --json`;
-    seedDispatch(store);
-    seedGate(store);
-    expect(relay.sanctionsSend(THREAD, CHANNEL, send)).toBe(true);
-
-    store.closeDelegation('ctx_13c7', 'completed');
-    expect(relay.sanctionsSend(THREAD, CHANNEL, send)).toBe(false);
   });
 });
 

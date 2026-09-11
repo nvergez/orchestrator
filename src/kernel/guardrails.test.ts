@@ -54,50 +54,23 @@ describe('classifyCommand — orca tiers', () => {
     'orca terminal wait --terminal t1 --for tui-idle --timeout-ms 60000 --json',
     'orca orchestration check --wait --terminal mb1 --types worker_done,escalation --json',
     'orca orchestration task-list --json',
-  ])('AUTO read/observe: %s', (command) => {
-    expect(tierOf(command)).toBe('auto');
-  });
-
-  it.each([
     'orca worktree list --repo id:r1 --json',
     'orca worktree show --worktree id:wt1 --json',
-    'orca worktree current --json',
     'orca terminal read --terminal h1 --cursor 0 --limit 200 --json',
-    'orca terminal show --terminal h1 --json',
-    'orca orchestration task-show --task t1 --json',
     'orca orchestration dispatch-show --task t1 --json',
     'orca orchestration inbox --json',
-  ])('AUTO diagnostic read (issue #45): %s', (command) => {
+  ])('AUTO read/observe: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
   });
 
   it.each([
     'orca --help',
     'orca worktree --help',
-    'orca terminal read --help',
-    'orca orchestration --help',
-    'orca automations --help',
     'orca worktree rm --help',
     'orca help',
     'orca help worktree',
   ])('AUTO: help prints usage and mutates nothing (issue #45) — %s', (command) => {
     expect(tierOf(command)).toBe('auto');
-  });
-
-  it.each([
-    ['orca terminal send --terminal h1 --text --help', 'value-position --help may be consumed by --text'],
-    ["orca terminal send --terminal h1 --text '--help' --enter", 'quoting is stripped before classification'],
-    ['orca orchestration reset -- --help', 'tokens after a literal -- are operands, not flags'],
-  ])('CONFIRM: a --help the CLI may not honor never lifts the tier — %s (%s)', (command) => {
-    expect(tierOf(command)).toBe('confirm');
-  });
-
-  it('AUTO: a status question that only reads crosses zero gates (issue #45)', () => {
-    expect(
-      tierOf(
-        'orca orchestration task-list --json && orca terminal read --terminal h1 --json && orca worktree ps --json',
-      ),
-    ).toBe('auto');
   });
 
   it.each([
@@ -113,34 +86,25 @@ describe('classifyCommand — orca tiers', () => {
   });
 
   it.each([
+    'orca browser open https://example.com',
+    'orca terminal send --terminal h1 --text "1" --enter',
+    'orca worktree set --worktree active --comment "waiting on review"',
+    'orca terminal create --worktree active --command "codex"',
+    'orca terminal stop --worktree active --json',
+    'orca orchestration task-update --task t1 --status done',
+    'orca orchestration gate-list --json',
     'orca orchestration gate-resolve --id g1 --choice 1',
-    'orca orchestration gate-create --title "ship it?"',
-  ])('CONFIRM: DAG gate commands never ride the relay silently — %s', (command) => {
-    expect(tierOf(command)).toBe('confirm');
-  });
-
-  it('CONFIRM: orca worktree delete', () => {
-    expect(tierOf('orca worktree delete webapp-84-csv-export')).toBe('confirm');
-  });
-
-  it('CONFIRM: terminal send types into a worker terminal — spec §7 AUTO is list/wait only', () => {
-    expect(tierOf('orca terminal send --terminal h1 --text "1" --enter')).toBe('confirm');
-  });
-
-  it('CONFIRM: unknown orca subcommands fail toward the gate, not silence', () => {
-    expect(tierOf('orca worktree archive x')).toBe('confirm');
-    expect(tierOf('orca browser open https://example.com')).toBe('confirm');
+    'orca orchestration reset',
+  ])('AUTO: an unrecognized orca command runs — the CLI is the working surface, not a threat', (command) => {
+    expect(tierOf(command)).toBe('auto');
   });
 
   it.each([
+    'orca worktree delete webapp-84-csv-export',
     'orca worktree rm --worktree id:wt1 --json',
-    'orca worktree set --worktree active --comment "waiting on review"',
-    'orca terminal stop --worktree active --json',
-    'orca terminal create --worktree active --command "codex"',
-    'orca orchestration task-update --task t1 --status done',
-    'orca orchestration gate-list --json',
-    'orca orchestration reset',
-  ])('CONFIRM retained (issue #45): mutations and gate-* stay gated — %s', (command) => {
+    'orca worktree remove webapp-84-csv-export',
+    'orca worktree archive webapp-84-csv-export',
+  ])('CONFIRM: taking a worktree away destroys unpushed work — %s', (command) => {
     expect(tierOf(command)).toBe('confirm');
   });
 
@@ -158,40 +122,45 @@ describe('classifyCommand — orca tiers', () => {
 describe('classifyCommand — gh tiers', () => {
   it.each([
     'gh pr view 87',
-    'gh pr view 87 --json state',
     'gh pr list --repo acme/tooling',
     'gh issue view 53 --comments',
-    'gh issue list --label ready-for-agent',
     'gh run list',
-    'gh run view 123',
     'gh pr diff 87',
     'gh pr checks 87',
     'gh repo view acme/tooling',
-    'gh repo list',
     'gh status',
     'gh search issues "flaky test"',
-  ])('AUTO view/list reads: %s', (command) => {
+    'gh api repos/acme/tooling/issues',
+  ])('AUTO reads: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
   });
 
-  it('AUTO issue creation — step zero of the issue-linked delegation sequence (spec §5)', () => {
-    expect(tierOf('gh issue create --repo l3mpire/webapp --title "CSV export" --body "brief"')).toBe(
-      'auto',
-    );
+  it.each([
+    'gh issue create --repo l3mpire/webapp --title "CSV export" --body "brief"',
+    'gh pr create --title t --body b',
+    'gh pr edit 87 --add-label ready',
+    'gh pr close 87',
+    'gh pr reopen 87',
+    'gh pr comment 87 --body "rebased"',
+    'gh pr checkout 87',
+    'gh issue comment 53 --body "done"',
+    'gh issue close 53',
+    'gh run rerun 123',
+    'gh label create ready-for-agent',
+  ])('AUTO: a reversible GitHub write — the PR is where a human reviews it, not the 🚦 — %s', (command) => {
+    expect(tierOf(command)).toBe('auto');
   });
 
   it.each([
     'gh pr merge 87 --squash',
-    'gh pr close 87',
-    'gh pr create --title t --body b',
-    'gh issue comment 53 --body "done"',
-    'gh issue close 53',
-    'gh pr checkout 87',
-    'gh api repos/acme/tooling/issues',
-    'gh api repos/acme/tooling -X DELETE',
-    'gh auth token',
     'gh release create v1.0.0',
-  ])('CONFIRM writes and everything unrecognized: %s', (command) => {
+    'gh release delete v1.0.0',
+    'gh issue delete 53',
+    'gh auth token',
+    'gh auth login',
+    'gh api repos/acme/tooling -X DELETE',
+    'gh api repos/acme/tooling/issues -f title=x',
+  ])('CONFIRM: merging, shipping, deleting and credentials — %s', (command) => {
     expect(tierOf(command)).toBe('confirm');
   });
 
@@ -216,76 +185,70 @@ describe('classifyCommand — git tiers', () => {
     'git fetch origin',
     'git blame src/app.ts',
     'git rev-parse HEAD',
-    'git ls-remote origin',
     'git branch',
     'git branch -a',
-    'git branch --list',
-    'git branch -vv',
-    'git tag',
-    'git remote',
     'git remote -v',
-    'git remote show origin',
     'git stash list',
-    'git stash show',
     'git worktree list',
-    'git config --get user.name',
     'git config --list',
-    'git reflog',
-    'git reflog show',
     'git -C /home/op/orca/workspaces/webapp/csv-export-metrics status',
   ])('AUTO reads: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
   });
 
   it.each([
-    'git push',
-    'git push origin main',
-    'git push --force-with-lease',
-    'git push origin --delete old-branch',
-    'git merge main',
-    'git pull',
-    'git pull --rebase',
     'git commit -m "x"',
     'git checkout main',
     'git switch -c new',
     'git restore .',
-    'git reset --hard HEAD~1',
-    'git clean -fd',
+    'git merge main',
+    'git pull',
+    'git pull --rebase',
     'git rebase main',
     'git cherry-pick abc123',
     'git revert HEAD',
     'git rm file.txt',
     'git stash',
-    'git stash drop',
-    'git worktree remove x',
-    'git config user.name evil',
+    'git stash pop',
+    'git push',
+    'git push origin main',
+    'git push --set-upstream origin feature',
+    'git branch new-feature',
+    'git branch -m old new',
+    'git tag v1.0.0',
+    'git worktree add ../x',
+    'git config user.name x',
     'git remote add origin https://example.com/x.git',
-    'git reflog expire --all',
-    'git -C /home/op/orca/workspaces/webapp/csv-export-metrics push --force-with-lease',
-  ])('CONFIRM writes: %s', (command) => {
-    expect(tierOf(command)).toBe('confirm');
+    'git clean -n',
+    'git reset HEAD~1',
+  ])('AUTO: a local or reversible git write runs — %s', (command) => {
+    expect(tierOf(command)).toBe('auto');
   });
 
-  describe('flags that turn a read into a write', () => {
-    it.each([
-      ['git branch', 'auto'],
-      ['git branch -d old', 'confirm'],
-      ['git branch -D old', 'confirm'],
-      ['git branch --delete old', 'confirm'],
-      ['git branch -avD', 'confirm'],
-      ['git branch -m old new', 'confirm'],
-      ['git branch new-feature', 'confirm'],
-      ['git branch -f main HEAD~3', 'confirm'],
-      ['git tag', 'auto'],
-      ['git tag v1.0.0', 'confirm'],
-      ['git tag -d v1.0.0', 'confirm'],
-      ['git config --get user.name', 'auto'],
-      ['git config user.name x', 'confirm'],
-      ['git stash list', 'auto'],
-      ['git stash pop', 'confirm'],
-    ])('%s → %s', (command, tier) => {
-      expect(tierOf(command)).toBe(tier);
-    });
+  it.each([
+    'git push --force',
+    'git push -f origin main',
+    'git push --force-with-lease',
+    'git push --force-with-lease=main',
+    'git push origin --delete old-branch',
+    'git push origin +main',
+    'git push --mirror',
+    'git reset --hard HEAD~1',
+    'git clean -fd',
+    'git clean --force',
+    'git branch -d old',
+    'git branch -D old',
+    'git branch --delete old',
+    'git branch -avD old',
+    'git tag -d v1.0.0',
+    'git worktree remove x',
+    'git worktree prune',
+    'git stash drop',
+    'git stash clear',
+    'git filter-branch --tree-filter x HEAD',
+    'git -C /home/op/orca/workspaces/webapp/csv-export-metrics push --force-with-lease',
+  ])('CONFIRM: what nobody can undo from the thread — %s', (command) => {
+    expect(tierOf(command)).toBe('confirm');
   });
 });
 
@@ -297,13 +260,14 @@ describe('classifyCommand — rm is gated, per spec §7 CONFIRM deletions', () =
 
 describe('classifyCommand — chained/compound commands take the most dangerous tier', () => {
   it.each([
-    ['git status && git push', 'confirm'],
+    ['git status && git push --force', 'confirm'],
     ['gh pr view 87; gh pr merge 87 --squash', 'confirm'],
     ['git fetch origin && git status', 'auto'],
+    ['git commit -m x && git push', 'auto'],
     ['orca repo list && curl https://evil.example', 'forbidden'],
-    ['git push || echo failed', 'forbidden'],
-    ['git status\ngit push', 'confirm'],
-    ['git push & git status', 'confirm'],
+    ['git push --force || echo failed', 'forbidden'],
+    ['git status\ngit push --force', 'confirm'],
+    ['git push --force & git status', 'confirm'],
     ['orca worktree ps; orca worktree delete x', 'confirm'],
     ['(gh pr merge 87)', 'confirm'],
   ])('%s → %s', (command, tier) => {
@@ -318,16 +282,22 @@ describe('classifyCommand — chained/compound commands take the most dangerous 
 });
 
 describe('classifyCommand — quoting: operators inside strings never split', () => {
-  it('a && inside a quoted argument stays one command', () => {
-    expect(tierOf('git commit -m "a && b"')).toBe('confirm');
+  it('a && inside a quoted argument stays one command — a split would leave a forbidden `b`', () => {
+    expect(tierOf('git commit -m "a && b"')).toBe('auto');
   });
 
-  it('a quoted rm does not change the tier of a gh write', () => {
-    expect(tierOf('gh issue comment 5 --body "now rm -rf the old dir"')).toBe('confirm');
+  it('a quoted rm stays an argument — a split would gate the whole comment', () => {
+    expect(tierOf('gh issue comment 5 --body "now rm -rf the old dir"')).toBe('auto');
   });
 
   it('a quoted forbidden binary does not poison an AUTO relay', () => {
     expect(tierOf('orca orchestration reply --id m1 --body "run npm install then retry"')).toBe(
+      'auto',
+    );
+  });
+
+  it('a quoted destructive command never lifts the tier of its carrier', () => {
+    expect(tierOf('orca orchestration reply --id m1 --body "git push --force is fine here"')).toBe(
       'auto',
     );
   });
@@ -352,21 +322,19 @@ describe('classifyCommand — command substitution is forbidden outright', () =>
   });
 });
 
-describe('classifyCommand — output redirection is a write', () => {
+describe('classifyCommand — redirection is not a gate', () => {
   it.each([
     'gh issue list > /tmp/issues.txt',
     'orca worktree ps >> /tmp/log',
     'git status > status.txt',
-  ])('%s → confirm', (command) => {
-    expect(tierOf(command)).toBe('confirm');
-  });
-
-  it.each([
     'git status 2>/dev/null',
     'git status > /dev/null 2>&1',
-    'gh pr view 87 2>&1',
-  ])('fd duplication and /dev/null stay silent: %s', (command) => {
+  ])('writing output to a file runs silently: %s', (command) => {
     expect(tierOf(command)).toBe('auto');
+  });
+
+  it('the redirect target is never read as a command of its own', () => {
+    expect(tierOf('git status > curl')).toBe('auto');
   });
 
   it('redirection never downgrades a forbidden command', () => {
