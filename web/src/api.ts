@@ -65,6 +65,35 @@ export interface ClosedSessionView {
   costUsdTotal: number;
 }
 
+export interface PortraitView {
+  userId: string;
+  memories: Array<{
+    id: string;
+    nature: 'durable' | 'moment';
+    text: string;
+    createdAt: string;
+    participantUserIds: string[];
+    recurrenceCount: number;
+  }>;
+}
+
+export interface MemoryPassView {
+  threadTs: string;
+  channelId: string;
+  ranAt: string;
+  outcome: 'wrote' | 'empty' | 'failed' | 'abandoned';
+  written: number;
+  dropped: number;
+  costUsd: number;
+}
+
+export interface MemoryState {
+  present: boolean;
+  portraits: PortraitView[];
+  recentPasses: MemoryPassView[];
+  passCostUsdTotal: number;
+}
+
 export interface StateSnapshot {
   asOf: string;
   noStateYet: boolean;
@@ -73,6 +102,7 @@ export interface StateSnapshot {
   pendingGates: GateView[];
   pendingStalls: StallView[];
   recentlyClosed: { delegations: DelegationView[]; sessions: ClosedSessionView[] };
+  memory: MemoryState;
 }
 
 export async function fetchState(): Promise<StateSnapshot> {

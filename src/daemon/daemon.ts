@@ -9,6 +9,7 @@ import { userNamesEnabled } from '../kernel/slack.ts';
 import { reportOrcaHealth } from '../kernel/orca-health.ts';
 import { execFileRunner } from '../kernel/orca.ts';
 import { createProcessFactory } from './claude.ts';
+import { readThreadTranscript } from './thread-context.ts';
 import { serviceCollision } from './collision.ts';
 import { buildRuntime } from './runtime.ts';
 import type { Surface } from '../delegation/thread-surface.ts';
@@ -145,6 +146,10 @@ export async function runDaemon(): Promise<void> {
       ...(workerPersona !== undefined && { workerPersona }),
       surface,
       createProcesses: (seams) => createProcessFactory({ cwd: process.cwd(), logger, ...seams }),
+      // The memory pass reads the thread with the bot's own messages in it
+      // (ADR 0009) — that is where a joke or a friction actually lives.
+      readTranscript: (channelId, threadTs, sinceTs) =>
+        readThreadTranscript(app.client.conversations, channelId, threadTs, sinceTs, guard.botUserId),
       // Mailbox terminals need an Orca worktree that always exists and never
       // gets archived with a delegation (ADR 0007): the configured one, else
       // the cwd when it is a checkout, else the default repo's checkout.
@@ -169,7 +174,7 @@ export async function runDaemon(): Promise<void> {
     if (!namesEnabled) logger.warn('Slack user names disabled — bot token lacks users:read; add the scope and reinstall the app');
     const names = new UserNames({ users: app.client.users, enabled: namesEnabled, logger });
 
-    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger, runtime.attachments, names);
+    registerHandlers(app, guard, runtime.sessions, runtime.gates, runtime.relay, logger, runtime.attachments, names, runtime.memory);
     await app.start();
     logger.info(
       { botUserId: guard.botUserId, channelIds: guard.channelIds },

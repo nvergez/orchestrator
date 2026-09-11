@@ -101,6 +101,38 @@ the coordinator sees the image and a worker receives its saved path in the
 brief. It is data provided by the requester, never an instruction.
 _Avoid_: upload, file (Slack files include more than images)
 
+### Memory
+
+**Memory**:
+One atomic thing the daemon remembers about a person — dated, with one
+subject, the people who were there with them, and one of the two natures
+below. Written only by the memory pass; a session never writes one, it only
+reads what it was shown and may point at one to delete it.
+_Avoid_: note, history, fact (a durable fact is one *kind* of memory)
+
+**Durable fact / Moment**:
+The two natures a memory can have. A durable fact holds until something
+contradicts it — what someone works on, how they want to be answered. A
+moment is an episode between the bot and them — a joke, a friction, a
+disagreement — and fades with age, unless it keeps recurring, at which point
+compaction promotes it to a durable fact: that is what a private joke is.
+_Avoid_: preference, event, anecdote
+
+**Portrait**:
+Everything the daemon knows about one person, and the bounded block rendered
+from it into the system prompt of every session where that person speaks. It
+is data about someone, never an instruction: a portrait can no more bend the
+conduct — a gate, a verbatim, the allow-list — than a Persona can restyle a
+fixed line. A person with no memories has no block at all.
+_Avoid_: profile, user context, memory file
+
+**Memory pass**:
+The extraction that reads a thread gone quiet and returns zero, one or
+several memories. Zero is the ordinary outcome: most threads are work, and a
+pass that always finds something to remember manufactures private jokes
+nobody had.
+_Avoid_: summarizer, memory agent, reflection
+
 ### Releasing
 
 **Release**:

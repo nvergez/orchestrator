@@ -13,6 +13,21 @@ import type { DispatchObserver, DispatchPreparer } from '../delegation/dispatch.
 import type { RelayObserver, RelayPolicy } from '../delegation/relay.ts';
 import type { Logger } from '../kernel/logger.ts';
 
+/**
+ * The session's single write (ADR 0009): `orc memory forget <id>` deletes one
+ * memory it was shown. Consulted before the classifier, because it never
+ * runs a command — it is a daemon action the session asks for through the
+ * one channel it already has, exactly as a delegation is.
+ */
+export interface MemoryPolicy {
+  /** Handles the command, or declines it so the classifier rules as usual. */
+  forget(
+    threadTs: string,
+    channelId: string,
+    command: string,
+  ): { handled: false } | { handled: true; message: string };
+}
+
 /** The slice of RepoAllowList this hook consults for every delegation. */
 export interface DelegationPolicy {
   /** Verdict on one `--repo` ref; null means the create carried none. */
@@ -36,9 +51,10 @@ export function buildCanUseTool(opts: {
   allowList: DelegationPolicy;
   delegations: DispatchPreparer;
   relay: RelayPolicy;
+  memory: MemoryPolicy;
   logger: Logger;
 }): CanUseTool {
-  const { threadTs, channelId, gates, allowList, delegations, relay, logger } = opts;
+  const { threadTs, channelId, gates, allowList, delegations, relay, memory, logger } = opts;
   return async (toolName, input, { signal }) => {
     // The session's base tool set is Bash-only, but fail closed anyway: the
     // orchestrator routes/delegates/supervises, it never codes (spec §7).
@@ -53,6 +69,17 @@ export function buildCanUseTool(opts: {
     }
 
     const command = typeof input.command === 'string' ? input.command : '';
+
+    // Forgetting is a daemon action, not a shell command: it is answered
+    // here and the process never runs anything. Ahead of the classifier
+    // because `orc` is outside the orca/gh/git allow-list and always will
+    // be — the session is asking the daemon, not the machine.
+    const forgotten = memory.forget(threadTs, channelId, command);
+    if (forgotten.handled) {
+      logger.info({ threadTs, command }, 'memory deletion requested by the session');
+      return { behavior: 'deny', message: forgotten.message };
+    }
+
     const verdict = classifyCommand(command);
     logger.info(
       { threadTs, command, tier: verdict.tier, reason: verdict.reason },

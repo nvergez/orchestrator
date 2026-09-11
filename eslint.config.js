@@ -37,7 +37,7 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['../daemon/*', '../delegation/*', '../dashboard/*'],
+              group: ['../daemon/*', '../delegation/*', '../dashboard/*', '../memory/*'],
               message: 'cli/ statically imports only kernel/ — daemon and dashboard load via the lazy dynamic imports in cli.ts.',
             },
           ],
@@ -59,11 +59,32 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['../daemon/*', '../delegation/*'],
+              group: ['../daemon/*', '../delegation/*', '../memory/*'],
               allowTypeImports: true,
               message: 'dashboard/ reads the database file directly — only the HTTP-seam tests and the demo-state builder construct the real stores.',
             },
             { group: ['../cli/*'], message: 'dashboard/ must not import cli/.' },
+          ],
+        },
+      ],
+    },
+  },
+  // The memory module (issue #120) is a peer of delegation/: its own store,
+  // sweep and pass, kernel-only dependencies, joined to the rest exclusively
+  // in the composition root.
+  {
+    files: ['src/memory/**/*.ts'],
+    // One exemption, the same shape as the dashboard's: the migration test
+    // opens a database a pre-feature daemon built, which means building it
+    // with the real session store rather than a copy of its schema.
+    ignores: ['src/memory/store.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            { group: ['../daemon/*', '../delegation/*', '../dashboard/*', '../cli/*'],
+              message: 'memory/ imports kernel/ only — it is wired by value in runtime.ts.' },
           ],
         },
       ],
@@ -84,9 +105,9 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['../delegation/*'],
+              group: ['../delegation/*', '../memory/*'],
               allowTypeImports: true,
-              message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
+              message: 'daemon/ ↔ delegation/ and daemon/ ↔ memory/ value edges live only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'daemon/ must not import cli/.' },
             { group: ['../dashboard/*'], message: 'the dashboard is a sidecar, never a daemon endpoint (ADR 0002).' },
@@ -103,9 +124,9 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['../daemon/*'],
+              group: ['../daemon/*', '../memory/*'],
               allowTypeImports: true,
-              message: 'daemon/ ↔ delegation/ value edges live only in the composition root runtime.ts.',
+              message: 'delegation/ meets daemon/ and memory/ only in the composition root runtime.ts.',
             },
             { group: ['../cli/*'], message: 'delegation/ must not import cli/.' },
             { group: ['../dashboard/*'], message: 'the dashboard is a sidecar, never a daemon endpoint (ADR 0002).' },

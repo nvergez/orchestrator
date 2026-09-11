@@ -1,6 +1,6 @@
 import type { Attachments } from './attachments.ts';
-import { classifyEvent, type Guard, type IncomingEvent, type SlackFile } from './filter.ts';
-import { refusalLine } from '../kernel/messages.ts';
+import { classifyEvent, type Guard, type IncomingEvent, type MemoryCommand, type SlackFile } from './filter.ts';
+import { forgetLine, memorySettingLine, refusalLine } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from '../kernel/logger.ts';
 import type { CloseResult, ReplyResult, SessionTurn } from './sessions.ts';
@@ -51,6 +51,22 @@ export interface MentionNames {
   render(text: string): Promise<string>;
 }
 
+/**
+ * The slice of the memory keeper this router drives (issue #120). Reading
+ * belongs to the harness on both paths: at spawn the portraits ride in the
+ * system prompt, and a person who first speaks mid-flight gets theirs here,
+ * in that turn's text — ending the process to refresh the prompt would deny
+ * a pending 🚦 gate and release reserved worker slots (ADR 0009).
+ */
+export interface ThreadMemory {
+  /** Records the speaker; returns their portrait iff they are a latecomer. */
+  noteSpeaker(threadTs: string, channelId: string, userId: string): string;
+  forget(userId: string, memoryId: string): 'deleted' | 'not_yours' | 'unknown' | 'disabled';
+  optOut(userId: string): number;
+  optIn(userId: string): void;
+  readonly enabled: boolean;
+}
+
 /** The slice of the gate relay the reply path decorates turns through (#21). */
 export interface ReplyDecorator {
   /** Prepends the thread's relayed-gates registry; a no-op without gates. */
@@ -84,6 +100,7 @@ export function registerHandlers(
   logger: Logger,
   attachments?: Attachments,
   names?: MentionNames,
+  memory?: ThreadMemory,
 ): void {
   const handle = async ({ event }: { event: unknown }): Promise<void> => {
     // Slack's payload types for `message` are a union over subtypes, so field
@@ -93,12 +110,16 @@ export function registerHandlers(
     const decision = classifyEvent(incoming, guard);
 
     const prepare = async (text: string, userId: string, files = incoming.files, context?: ThreadContext): Promise<SessionTurn> => {
+      // Who spoke is recorded before anything else in the turn: it decides
+      // whose portraits the NEXT spawn injects, and a latecomer's portrait
+      // rides in this turn's text because this turn may already be warm.
+      const portrait = memory?.noteSpeaker(incoming.thread_ts ?? incoming.ts, incoming.channel!, userId) ?? '';
       // Authorship and addressing survive batching: people may be talking to
       // each other, and their messages must not look like one unnamed user.
       // Resolve the author in the same pass as mentions, context and images.
       const named = async (turn: SessionTurn): Promise<SessionTurn> => {
         if (turn.text.trim() === '' && turn.images.length === 0) return turn;
-        const text = `[Slack message from <@${userId}>; bot explicitly mentioned: ${incoming.type === 'app_mention' ? 'yes' : 'no'}]\n${turn.text}`;
+        const text = `${portrait}[Slack message from <@${userId}>; bot explicitly mentioned: ${incoming.type === 'app_mention' ? 'yes' : 'no'}]\n${turn.text}`;
         return { ...turn, text: names ? await names.render(text) : text };
       };
       if (!attachments) return named({ text: renderThreadContext(context) + text, images: [] });
@@ -187,6 +208,24 @@ export function registerHandlers(
         }
         return;
       }
+      case 'memory': {
+        // Deterministic and model-free, beside the bare `close` word: a wrong
+        // memory must be removable exactly when the session is confused about
+        // what it remembers.
+        const text = memory === undefined || !memory.enabled
+          ? memoryReply(undefined, decision.command)
+          : memoryReply(memory, decision.command, decision.userId);
+        logger.info(
+          { threadTs: decision.threadTs, userId: decision.userId, command: decision.command.kind },
+          'bare memory command',
+        );
+        await app.client.chat.postMessage({
+          channel: decision.channelId,
+          thread_ts: decision.threadTs,
+          text,
+        });
+        return;
+      }
       case 'close': {
         // "@orchestrator close" while a 🚦 gate is pending denies the gate
         // first (the word travels back verbatim), so the suspended turn can
@@ -206,6 +245,21 @@ export function registerHandlers(
         return;
       }
     }
+  };
+
+  /** The fixed answer to a bare memory command — never prose, never a voice. */
+  const memoryReply = (
+    keeper: ThreadMemory | undefined,
+    command: MemoryCommand,
+    userId = '',
+  ): string => {
+    if (keeper === undefined) {
+      return command.kind === 'forget' ? forgetLine('disabled', command.memoryId) : memorySettingLine('disabled');
+    }
+    if (command.kind === 'forget') return forgetLine(keeper.forget(userId, command.memoryId), command.memoryId);
+    if (command.kind === 'forget_me') return memorySettingLine('forget_me', keeper.optOut(userId));
+    keeper.optIn(userId);
+    return memorySettingLine('remember_me');
   };
 
   // Thread reads are async; queue same-thread events so a second mention or

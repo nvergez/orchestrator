@@ -1,5 +1,6 @@
 import type { SlackFile } from './filter.ts';
 import type { SlackApp } from './app.ts';
+import type { TranscriptMessage } from '../memory/keeper.ts';
 
 const CONTEXT_LIMIT = 12_000;
 
@@ -44,6 +45,45 @@ export async function readThreadContext(
   } while (cursor);
   return { lines: messages.map((message) => message.line), files: messages.reverse().flatMap((message) => message.files), dropped };
 }
+
+/**
+ * The memory pass's transcript reader (issue #120): the same thread, the
+ * same pagination, WITH the bot's own messages and sliced strictly after a
+ * watermark. `readThreadContext` above deliberately drops the bot's turns —
+ * they are not context for the session that wrote them — but a joke and a
+ * friction only exist in the exchange, so this is a variant of it and not a
+ * reuse. Oldest first, which is the order the pass reads.
+ */
+export async function readThreadTranscript(
+  conversations: SlackApp['client']['conversations'],
+  channelId: string,
+  threadTs: string,
+  sinceTs: string,
+  botUserId: string,
+): Promise<TranscriptMessage[]> {
+  const messages: TranscriptMessage[] = [];
+  let cursor: string | undefined;
+  const cursors = new Set<string>();
+  do {
+    const page = await conversations.replies({ channel: channelId, ts: threadTs, latest: NOW_TS, inclusive: true, limit: 200, ...(cursor && { cursor }) });
+    if (page.ok === false) throw new Error(page.error ?? 'Slack thread read failed');
+    for (const message of page.messages ?? []) {
+      if (!message.ts || Number(message.ts) <= Number(sinceTs)) continue;
+      const text = (message.text ?? '').trim();
+      if (text === '') continue;
+      messages.push({ ts: message.ts, userId: message.user ?? null, text, fromBot: message.user === botUserId });
+    }
+    cursor = page.response_metadata?.next_cursor || undefined;
+    if (page.has_more && !cursor) throw new Error('Slack thread pagination returned no cursor');
+    if (cursor && cursors.has(cursor)) throw new Error('Slack thread pagination repeated a cursor');
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return messages.sort((left, right) => Number(left.ts) - Number(right.ts));
+}
+
+/** `conversations.replies` wants a `latest`; the pass wants everything up to
+ * now, and a ts far in the future is how the Web API spells that. */
+const NOW_TS = '9999999999.999999';
 
 export function renderThreadContext(context?: ThreadContext, imageLines: string[] = []): string {
   if (!context || context.lines.length === 0) return '';

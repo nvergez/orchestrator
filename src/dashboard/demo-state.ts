@@ -1,6 +1,7 @@
 import { rmSync } from 'node:fs';
 import { SessionStore } from '../daemon/db.ts';
 import { DelegationStore } from '../delegation/delegations.ts';
+import { MemoryStore } from '../memory/store.ts';
 
 /**
  * Demo state (issue #94, CONTEXT.md): a representative orchestrator
@@ -37,6 +38,9 @@ export function seedDemoState(dbPath: string, now: Date): void {
   let clock = at(hours(27));
   const sessions = new SessionStore(dbPath, () => clock);
   const delegations = new DelegationStore(dbPath, () => clock);
+  // Fixed ids: a second seed of the same state must produce the same database.
+  let mint = 0;
+  const memories = new MemoryStore(dbPath, () => clock, () => `demo${String((mint += 1)).padStart(2, '0')}`);
 
   // The live session: two turns, accumulated cost.
   sessions.register(THREAD, CHANNEL, USER);
@@ -181,6 +185,27 @@ export function seedDemoState(dbPath: string, now: Date): void {
     relayTs: '1751970015.000600',
   });
 
+  // A portrait the memory pass wrote (issue #120): one durable fact, one
+  // shared moment, and the passes behind them — including the ordinary
+  // outcome, which is nothing at all.
+  clock = at(days(40));
+  memories.add({
+    subjectUserId: USER, participantUserIds: [], nature: 'durable',
+    text: 'Works almost exclusively in webapp, and wants a PR rather than a patch.',
+    sourceThreadTs: THREAD_CLOSED, sourceChannelId: CHANNEL,
+  });
+  clock = at(days(3));
+  memories.add({
+    subjectUserId: USER, participantUserIds: ['U0TEAMMATE1'], nature: 'moment',
+    text: 'Argued that a red CI is a reason to stop, not a reason to hurry; turned out to be right.',
+    sourceThreadTs: THREAD, sourceChannelId: CHANNEL,
+  });
+  clock = at(days(3));
+  memories.recordPass({ threadTs: THREAD, channelId: CHANNEL, outcome: 'wrote', written: 1, dropped: 1, costUsd: 0.031 });
+  clock = at(hours(20));
+  memories.recordPass({ threadTs: THREAD_CLOSED, channelId: CHANNEL, outcome: 'empty', written: 0, dropped: 0, costUsd: 0.018 });
+
   sessions.close();
   delegations.close();
+  memories.close();
 }

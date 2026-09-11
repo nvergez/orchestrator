@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../kernel/logger.ts';
-import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
+import { buildCanUseTool, guardrailHooks, type DelegationPolicy, type MemoryPolicy } from './permissions.ts';
 import type { GateVerdict } from './gate.ts';
 import type { DispatchObserver, DispatchPreparer, PrepareVerdict } from '../delegation/dispatch.ts';
 import type { DelegationVerdict } from '../kernel/routing.ts';
@@ -91,11 +91,15 @@ const callOptions = () => ({
   requestId: 'req_01',
 });
 
+/** Memory declines everything here; runtime.test.ts drives the real keeper. */
+const inertMemory = { forget: () => ({ handled: false as const }) };
+
 const makeCanUseTool = (
   gates: FakeGates,
   allowList: DelegationPolicy = new FakeAllowList(),
   delegations: FakeDelegations = new FakeDelegations(),
   relay: FakeRelay = new FakeRelay(),
+  memory: MemoryPolicy = inertMemory,
 ) =>
   buildCanUseTool({
     threadTs: THREAD,
@@ -104,6 +108,7 @@ const makeCanUseTool = (
     allowList,
     delegations,
     relay,
+    memory,
     logger: createLogger('silent'),
   });
 

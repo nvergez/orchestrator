@@ -92,9 +92,20 @@ export type Decision =
   | { action: 'reply'; threadTs: string; channelId: string; text: string; userId: string; mentioned: boolean; files?: SlackFile[] }
   /** `@orchestrator close` inside a thread — the explicit close command (spec §3). */
   | { action: 'close'; threadTs: string; channelId: string }
+  /** A bare memory command inside a thread (issue #120) — deterministic and
+   * model-free, so forgetting still works when the session is confused. */
+  | { action: 'memory'; threadTs: string; channelId: string; userId: string; command: MemoryCommand }
   /** Root @mention by a third party — one polite fixed line (UX mock G1). */
   | { action: 'refuse'; threadTs: string; channelId: string }
   | { action: 'ignore'; reason: IgnoreReason };
+
+/** What a bare memory command asks for. `forget` names an id the speaker was
+ * shown; `forget_me` purges their portrait and tombstones them; `remember_me`
+ * lifts that tombstone — nothing purged comes back. */
+export type MemoryCommand =
+  | { kind: 'forget'; memoryId: string }
+  | { kind: 'forget_me' }
+  | { kind: 'remember_me' };
 
 export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   if (event.channel === undefined || !guard.channelIds.includes(event.channel)) {
@@ -141,6 +152,10 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
     if (isCloseCommand(replyText)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
     }
+    const memory = memoryCommand(replyText);
+    if (memory !== undefined) {
+      return { action: 'memory', threadTs: event.thread_ts, channelId, userId: event.user, command: memory };
+    }
     return { action: 'reply', threadTs: event.thread_ts, channelId, text: replyText, userId: event.user, mentioned: false, ...files };
   }
 
@@ -159,6 +174,10 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
   if (event.thread_ts !== undefined) {
     if (isCloseCommand(text)) {
       return { action: 'close', threadTs: event.thread_ts, channelId };
+    }
+    const memory = memoryCommand(text);
+    if (memory !== undefined) {
+      return { action: 'memory', threadTs: event.thread_ts, channelId, userId: event.user, command: memory };
     }
     return { action: 'reply', threadTs: event.thread_ts, channelId, text, userId: event.user, mentioned: true, ...files };
   }
@@ -185,6 +204,31 @@ export function classifyEvent(event: IncomingEvent, guard: Guard): Decision {
  */
 function isCloseCommand(text: string): boolean {
   return text.toLowerCase().replace(/[.!]+$/, '').trim() === 'close';
+}
+
+/**
+ * The short ids the portrait block renders — no vowels, no look-alikes, so a
+ * human retypes one out of Slack without a second try. Matching the exact
+ * alphabet is deliberate: anything else ("forget what I said") is a sentence,
+ * not a command, and belongs to the session to interpret.
+ */
+const MEMORY_ID = /^[2-9bcdfghjkmnpqrstvwxz]{6}$/;
+
+/**
+ * The bare memory commands, beside the bare `close` word and read the same
+ * way: thread-only, exact, and free of any model in the loop — deletion has
+ * to work precisely when the session is confused about what it remembers.
+ */
+function memoryCommand(text: string): MemoryCommand | undefined {
+  const words = text.toLowerCase().replace(/[.!]+$/, '').trim().split(/\s+/);
+  if (words.length !== 2) return undefined;
+  const [verb, target] = words as [string, string];
+  if (verb === 'forget') {
+    if (target === 'me') return { kind: 'forget_me' };
+    return MEMORY_ID.test(target) ? { kind: 'forget', memoryId: target } : undefined;
+  }
+  if (verb === 'remember' && target === 'me') return { kind: 'remember_me' };
+  return undefined;
 }
 
 /** What the session gets when the thread opened on a mention with no words. */

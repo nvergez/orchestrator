@@ -235,6 +235,62 @@ describe('classifyEvent', () => {
     });
   });
 
+  it.each([['forget k7m2qp'], ['Forget K7M2QP.'], ['  forget k7m2qp  ']])(
+    'reads the bare memory command %j as a deletion, no model in the loop',
+    (text) => {
+      expect(classifyEvent({ ...threadReply, text }, guard)).toEqual({
+        action: 'memory',
+        threadTs: '1751970000.000100',
+        channelId: 'C0EXAMPLE123',
+        userId: 'U0EXAMPLE456',
+        command: { kind: 'forget', memoryId: 'k7m2qp' },
+      });
+    },
+  );
+
+  it('accepts the mentioned form too, exactly like the close command', () => {
+    expect(classifyEvent({
+      ...mention, thread_ts: '1751970000.000100', text: '<@U0EXAMPLEBOT> forget k7m2qp',
+    }, guard)).toMatchObject({ action: 'memory', command: { kind: 'forget', memoryId: 'k7m2qp' } });
+  });
+
+  it('leaves a word that is not one of the ids it renders to the session', () => {
+    // The ids carry no vowels and no look-alikes on purpose: "forget marius"
+    // is a sentence, and only the session can work out what it means.
+    expect(classifyEvent({ ...threadReply, text: 'forget marius' }, guard).action).toBe('reply');
+  });
+
+  it.each([
+    ['forget me', { kind: 'forget_me' }],
+    ['remember me', { kind: 'remember_me' }],
+  ])('reads %j as the opt-out switch', (text, command) => {
+    expect(classifyEvent({ ...threadReply, text }, guard)).toMatchObject({ action: 'memory', command });
+  });
+
+  it.each([
+    ['forget what I just said'],
+    ['forget it'],
+    ['forget'],
+    ['can you forget k7m2qp please'],
+    ['remember that I use webapp'],
+  ])('leaves %j to the session — a sentence is not a command', (text) => {
+    expect(classifyEvent({ ...threadReply, text }, guard).action).toBe('reply');
+  });
+
+  it('a bare "forget" at the channel root opens nothing, exactly like "close"', () => {
+    expect(classifyEvent({ ...threadReply, thread_ts: undefined, text: 'forget k7m2qp' }, guard)).toEqual({
+      action: 'ignore',
+      reason: 'not_a_mention',
+    });
+  });
+
+  it('a third party cannot forget anything', () => {
+    expect(classifyEvent({ ...threadReply, user: 'U0INTRUDER', text: 'forget k7m2qp' }, guard)).toEqual({
+      action: 'ignore',
+      reason: 'third_party_in_thread',
+    });
+  });
+
   it('a mention-less sentence containing "close" stays a reply', () => {
     expect(classifyEvent({ ...threadReply, text: 'close the PR when CI is green' }, guard)).toEqual({
       action: 'reply',

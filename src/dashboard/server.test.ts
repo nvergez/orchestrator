@@ -73,6 +73,7 @@ describe('GET /api/state — the snapshot contract', () => {
       pendingGates: [],
       pendingStalls: [],
       recentlyClosed: { delegations: [], sessions: [] },
+      memory: { present: false, portraits: [], recentPasses: [], passCostUsdTotal: 0 },
     });
   });
 
@@ -123,6 +124,22 @@ describe('GET /api/state — live state off a daemon-written database', () => {
     expect(state.sessions[0]?.delegations[0]).toMatchObject({ reference: 'webapp-dashboard', kind: null, prLinks: [] });
     expect(state.recentlyClosed.delegations[1]).toMatchObject({ reference: 'webapp-retry-timeout', kind: null, prLinks: [] });
   });
+  it('serves a database from before per-person memory as "nothing to show", never an error', async () => {
+    const path = populatedDb();
+    const preMemory = new DatabaseSync(path);
+    for (const table of ['memories', 'memory_passes', 'memory_extractions', 'memory_people', 'memory_participants']) {
+      preMemory.exec(`DROP TABLE ${table}`);
+    }
+    preMemory.close();
+    const { baseUrl } = await serve(snapshotDeps(path));
+    const response = await fetch(`${baseUrl}/api/state`);
+    expect(response.status).toBe(200);
+    const state = await response.json() as StateSnapshot;
+    expect(state.memory).toEqual({ present: false, portraits: [], recentPasses: [], passCostUsdTotal: 0 });
+    // Everything else still renders — an older database is not a broken one.
+    expect(state.sessions[0]?.delegations[0]).toMatchObject({ reference: 'webapp-dashboard' });
+  });
+
   it('exposes a worktree reference, request kind and PR links without an invented issue', async () => {
     const dbPath = populatedDb();
     const store = new DelegationStore(dbPath, () => NOW);
@@ -285,6 +302,39 @@ describe('GET /api/state — live state off a daemon-written database', () => {
             costUsdTotal: 0,
           },
         ],
+      },
+      // Portraits are read-only here and dated absolutely: the page is an
+      // audit view, and the only way to remove one is `forget <id>` in Slack.
+      memory: {
+        present: true,
+        portraits: [
+          {
+            userId: USER,
+            memories: [
+              {
+                id: 'demo01',
+                nature: 'durable',
+                text: 'Works almost exclusively in webapp, and wants a PR rather than a patch.',
+                createdAt: '2026-05-31T12:00:00.000Z',
+                participantUserIds: [],
+                recurrenceCount: 1,
+              },
+              {
+                id: 'demo02',
+                nature: 'moment',
+                text: 'Argued that a red CI is a reason to stop, not a reason to hurry; turned out to be right.',
+                createdAt: '2026-07-07T12:00:00.000Z',
+                participantUserIds: ['U0TEAMMATE1'],
+                recurrenceCount: 1,
+              },
+            ],
+          },
+        ],
+        recentPasses: [
+          { threadTs: THREAD_CLOSED, channelId: CHANNEL, ranAt: '2026-07-09T16:00:00.000Z', outcome: 'empty', written: 0, dropped: 0, costUsd: 0.018 },
+          { threadTs: THREAD, channelId: CHANNEL, ranAt: '2026-07-07T12:00:00.000Z', outcome: 'wrote', written: 1, dropped: 1, costUsd: 0.031 },
+        ],
+        passCostUsdTotal: 0.049,
       },
     } satisfies StateSnapshot);
   });

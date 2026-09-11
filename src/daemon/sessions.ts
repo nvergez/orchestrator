@@ -120,6 +120,14 @@ export interface SessionManagerOptions {
   isPreparingTurn: (threadTs: string, channelId: string) => boolean;
   /** Runs on close, for explicit and dormant closes alike. */
   onClose: (threadTs: string, channelId: string) => Promise<void>;
+  /**
+   * Runs on an EXPLICIT close only (issue #120): a deliberately ended
+   * conversation forces the memory pass at once, where a dormant sweep does
+   * not — by the time a thread has been silent for a week, the pass ran days
+   * ago. Awaited after the 🔚 summary and after the process and its slot are
+   * already released, so the only thing it ever delays is bookkeeping.
+   */
+  onExplicitClose?: (threadTs: string, channelId: string) => Promise<void>;
   logger: Logger;
 }
 
@@ -141,6 +149,7 @@ export class SessionManager {
   private readonly onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
   private readonly isPreparingTurn: SessionManagerOptions['isPreparingTurn'];
   private readonly onClose: SessionManagerOptions['onClose'];
+  private readonly onExplicitClose: SessionManagerOptions['onExplicitClose'];
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   private readonly closedReminders = new Map<string, NodeJS.Timeout>();
@@ -168,6 +177,7 @@ export class SessionManager {
     this.onTurnStart = options.onTurnStart;
     this.onTurnEnd = options.onTurnEnd;
     this.onClose = options.onClose;
+    this.onExplicitClose = options.onExplicitClose;
     this.isPreparingTurn = options.isPreparingTurn;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
@@ -470,6 +480,11 @@ export class SessionManager {
     void this.dropProcess(state);
     if (hadProc) this.wakeWaiters();
     await this.postClosingSummary(row);
+    if (this.onExplicitClose !== undefined) {
+      await this.onExplicitClose(state.threadTs, state.channelId).catch((error: unknown) => {
+        this.logger.warn({ err: error, threadTs: state.threadTs }, 'explicit-close hook failed');
+      });
+    }
     // Best-effort and independent of the summary post: a failed summary must
     // not swallow the dropped turns' fixed line, or vice versa.
     if (dropped.some((item) => item.kind === 'turn')) {

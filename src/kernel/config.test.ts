@@ -33,7 +33,47 @@ describe('loadConfig', () => {
       watchdogMaxInflightMs: 30 * 60_000,
       autoCloseAfterMs: 7 * 24 * 60 * 60_000,
       sweepIntervalMs: 60 * 60_000,
+      // Per-person memory ships ON: the feature is the product, and an
+      // operator who wants the bot to stay anonymous says so explicitly.
+      memoryEnabled: true,
+      memoryPassModel: 'claude-sonnet-5',
+      memorySilenceMs: 30 * 60_000,
+      memorySweepIntervalMs: 10 * 60_000,
+      memoryPerPersonChars: 1_200,
+      memoryBlockChars: 4_000,
+      memoryPassAttemptLimit: 3,
     });
+  });
+
+  it('turns memory off, and configures the pass down, from the environment', () => {
+    const config = loadConfig({
+      ...validEnv,
+      MEMORY_ENABLED: 'false',
+      MEMORY_PASS_MODEL: 'claude-haiku-4-5-20251001',
+      MEMORY_SILENCE_MINUTES: '5',
+      MEMORY_SWEEP_INTERVAL_MINUTES: '1',
+      MEMORY_PER_PERSON_CHARS: '400',
+      MEMORY_BLOCK_CHARS: '900',
+      MEMORY_PASS_ATTEMPT_LIMIT: '1',
+    });
+    expect(config).toMatchObject({
+      memoryEnabled: false,
+      memoryPassModel: 'claude-haiku-4-5-20251001',
+      memorySilenceMs: 5 * 60_000,
+      memorySweepIntervalMs: 60_000,
+      memoryPerPersonChars: 400,
+      memoryBlockChars: 900,
+      memoryPassAttemptLimit: 1,
+    });
+  });
+
+  it('refuses a memory flag that is not a boolean and a non-integer attempt limit', () => {
+    expect(() => loadConfig({ ...validEnv, MEMORY_ENABLED: 'sometimes' })).toThrowError(
+      /MEMORY_ENABLED must be true or false/,
+    );
+    expect(() => loadConfig({ ...validEnv, MEMORY_PASS_ATTEMPT_LIMIT: '2.5' })).toThrowError(
+      /MEMORY_PASS_ATTEMPT_LIMIT must be a positive integer/,
+    );
   });
 
   it('fails fast, naming every missing key at once', () => {

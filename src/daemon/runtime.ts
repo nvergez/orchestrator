@@ -17,6 +17,10 @@ import { Watchdog } from '../delegation/watchdog.ts';
 import { GateRelay, type SessionRelay } from '../delegation/relay.ts';
 import { execFileRunner, safeRegistryIssueUrls, type CommandRunner } from '../kernel/orca.ts';
 import { GateKeeper, type SessionGates } from './gate.ts';
+import { MemoryStore } from '../memory/store.ts';
+import { MemoryKeeper, type TranscriptReader } from '../memory/keeper.ts';
+import { sdkMemoryPass, type MemoryPass } from '../memory/pass.ts';
+import type { MemoryPolicy } from './permissions.ts';
 import { Voice } from './voice.ts';
 import { RepoAllowList, routingInstructions, type RepoHint } from '../kernel/routing.ts';
 import { personaInstructions, workerPersonaBrief } from '../kernel/persona.ts';
@@ -43,10 +47,16 @@ export interface ProcessSeams {
   allowList: DelegationPolicy;
   delegations: DispatchPreparer & DispatchObserver;
   relay: SessionRelay;
-  /** The routing rules (issue #18) rendered from the hints — worker briefs
-   * included — followed by the operator's voice when one is configured;
-   * ready to append. */
-  systemPromptAppend: string;
+  /** The session's single write (issue #120): `orc memory forget <id>`. */
+  memory: MemoryPolicy;
+  /**
+   * The system prompt for ONE thread (issue #120): the routing rules (issue
+   * #18) rendered from the hints — worker briefs included — the operator's
+   * voice when one is configured, and the portraits of whoever has spoken in
+   * this thread. Synchronous because the spawn path is: SQLite reads
+   * synchronously, so nothing about the turn queue changes shape for it.
+   */
+  systemPromptFor: (threadTs: string, channelId: string) => string;
 }
 
 export interface RuntimeOptions {
@@ -85,6 +95,18 @@ export interface RuntimeOptions {
   every?: (task: () => void, intervalMs: number) => void;
   /** Injectable human-message collection window for deterministic tests. */
   messageBatchWindowMs?: number;
+  /**
+   * The memory pass (issue #120) — the tool-less second SDK query by
+   * default, a script in tests. Following the same pattern as the Orca
+   * runner and the file downloader: a real default, replaceable at the seam.
+   */
+  runMemoryPass?: MemoryPass;
+  /**
+   * Reads a thread's Slack transcript WITH the bot's own messages, sliced
+   * after a watermark (daemon.ts binds `readThreadTranscript` to the Web
+   * API). Absent leaves the pass with nothing to read, so memory stays inert.
+   */
+  readTranscript?: TranscriptReader;
 }
 
 /** The wired graph, plus the boot sequence and sweep arming as callable steps. */
@@ -100,6 +122,9 @@ export interface Runtime {
   watcher: GateWatcher;
   watchdog: Watchdog;
   reconciler: BootReconciler;
+  memoryStore: MemoryStore;
+  /** Per-person memory (issue #120): portraits in, memory pass out. */
+  memory: MemoryKeeper;
   /** The ordered boot pass: reconcile, re-arm the gate watchers, then the
    * watchdog's first sweep and its interval. Call once, before Slack events
    * flow. */
@@ -127,6 +152,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   });
   const store = new SessionStore(config.dbPath);
   const delegationStore = new DelegationStore(config.dbPath);
+  const memoryStore = new MemoryStore(config.dbPath);
   // Boot rule (spec §3): rows survive the restart, every session comes back
   // dormant, and nothing below wakes one — the next human message does.
   logger.info(
@@ -169,6 +195,50 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   // sanctioned terminal-send fallback, and the turn-context decoration.
   const relay = new GateRelay({ store: delegationStore, surface, logger });
 
+  // Per-person memory (issue #120, ADR 0009). Its own store, its own sweep
+  // and its own pass; it depends on kernel only, and this is the one place
+  // it meets the session lifecycle. Writing is the pass's, never a session's.
+  const memory = new MemoryKeeper({
+    store: memoryStore,
+    enabled: config.memoryEnabled,
+    allowedUserIds: config.slackAllowedUserIds,
+    // The sweep's shortlist, off the sessions table: threads quiet past the
+    // silence mark. The keeper still checks each one for turns past its
+    // watermark, so an unchanged thread costs neither a Slack nor a model call.
+    quietThreads: (cutoffIso) =>
+      store.openSessionsInactiveSince(cutoffIso).map((row) => ({
+        threadTs: row.threadTs,
+        channelId: row.channelId,
+        lastActivityAt: row.lastActivityAt,
+      })),
+    readTranscript:
+      options.readTranscript ??
+      (() => Promise.resolve([])),
+    // Work facts come from the ledger, exact and dated — the pass is never
+    // asked to infer from a transcript what can simply be read.
+    workFacts: (threadTs, channelId) =>
+      delegationStore.listForThread(threadTs, channelId).map((row) =>
+        `- ${row.dispatchedAt.slice(0, 10)} — ${row.kind ?? 'change'} in ${row.repo ?? 'an unnamed repo'}` +
+        `${row.issueNumber === null ? '' : ` (#${String(row.issueNumber)})`}` +
+        `${row.title === null ? '' : `: ${row.title}`} — ${row.status}`,
+      ),
+    runPass:
+      options.runMemoryPass ??
+      sdkMemoryPass({ model: config.memoryPassModel, cwd: process.cwd(), logger }),
+    silenceMs: config.memorySilenceMs,
+    attemptLimit: config.memoryPassAttemptLimit,
+    caps: { perPersonChars: config.memoryPerPersonChars, blockChars: config.memoryBlockChars },
+    logger,
+  });
+
+  // Built once; the portraits are the only per-thread half, and they are
+  // read fresh on every spawn so a memory written last night is there today.
+  const baseSystemPrompt =
+    routingInstructions(
+      hints,
+      options.workerPersona === undefined ? undefined : workerPersonaBrief(options.workerPersona),
+    ) + (options.persona === undefined ? '' : `\n\n${personaInstructions(options.persona)}`);
+
   const sessions = new SessionManager({
     store,
     spawn: options.createProcesses({
@@ -176,11 +246,13 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       allowList,
       delegations,
       relay,
-      systemPromptAppend:
-        routingInstructions(
-          hints,
-          options.workerPersona === undefined ? undefined : workerPersonaBrief(options.workerPersona),
-        ) + (options.persona === undefined ? '' : `\n\n${personaInstructions(options.persona)}`),
+      memory: {
+        forget: (threadTs, channelId, command) => memory.forgetCommand(threadTs, channelId, command),
+      },
+      systemPromptFor: (threadTs, channelId) => {
+        const portraits = memory.systemPromptBlock(threadTs, channelId);
+        return portraits === '' ? baseSystemPrompt : `${baseSystemPrompt}\n\n${portraits}`;
+      },
       threadPermalink: (threadTs, channelId) => options.slackWorkspaceUrl === undefined
         ? undefined
         : new URL(`archives/${channelId}/p${threadTs.replace('.', '')}`, options.slackWorkspaceUrl).href,
@@ -211,6 +283,9 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     // delegation in flight and nothing pending.
     isPreparingTurn: (threadTs, channelId) => attachments.isPreparing(threadTs, channelId),
     onClose: (threadTs, channelId) => attachments.remove(threadTs, channelId),
+    // An explicit close forces the memory pass at once (ADR 0009): a
+    // deliberately ended conversation is captured now, not at the next sweep.
+    onExplicitClose: (threadTs, channelId) => memory.extractOnClose(threadTs, channelId),
     onTurnStart: (threadTs, channelId) => surface.ackWorking(channelId, threadTs),
     onTurnEnd: (threadTs, channelId) =>
       surface.settleTurnEnd(channelId, threadTs, delegations.hasUndispatched(threadTs, channelId)),
@@ -279,6 +354,26 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     // down must not wait a full interval to surface.
     stallSweep();
     every(stallSweep, config.watchdogSweepIntervalMs);
+
+    // The memory sweep (issue #120) rides the same repeating-task seam. No
+    // boot pass: a thread quiet across a restart is quiet for the next
+    // interval too, and boot has enough to do. Silent in Slack either way —
+    // extraction bookkeeping is never the requester's business.
+    if (config.memoryEnabled) {
+      every(memorySweep, config.memorySweepIntervalMs);
+      logger.info(
+        { model: config.memoryPassModel, silenceMs: config.memorySilenceMs },
+        'per-person memory enabled — portraits injected, the pass writes them',
+      );
+    } else {
+      logger.info('per-person memory disabled by configuration');
+    }
+  };
+
+  const memorySweep = (): void => {
+    memory.sweep().catch((error: unknown) => {
+      logger.error({ err: error }, 'memory sweep failed');
+    });
   };
 
   const startDormancySweep = (): void => {
@@ -305,6 +400,8 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     watcher,
     watchdog,
     reconciler,
+    memoryStore,
+    memory,
     boot,
     startDormancySweep,
   };
