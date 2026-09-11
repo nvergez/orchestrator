@@ -329,6 +329,21 @@ describe('GET /api/state — live state off a daemon-written database', () => {
               },
             ],
           },
+          // The shared moment is ONE record in BOTH portraits — the same id,
+          // never a copy, exactly as the daemon injects it for each of them.
+          {
+            userId: 'U0TEAMMATE1',
+            memories: [
+              {
+                id: 'demo02',
+                nature: 'moment',
+                text: 'Argued that a red CI is a reason to stop, not a reason to hurry; turned out to be right.',
+                createdAt: '2026-07-07T12:00:00.000Z',
+                participantUserIds: ['U0TEAMMATE1'],
+                recurrenceCount: 1,
+              },
+            ],
+          },
         ],
         recentPasses: [
           { threadTs: THREAD_CLOSED, channelId: CHANNEL, ranAt: '2026-07-09T16:00:00.000Z', outcome: 'empty', written: 0, dropped: 0, costUsd: 0.018 },

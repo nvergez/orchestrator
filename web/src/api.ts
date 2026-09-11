@@ -65,6 +65,8 @@ export interface ClosedSessionView {
   costUsdTotal: number;
 }
 
+/** Everything the daemon knows about one person — the shared records they
+ * were part of included, one record showing in every portrait it belongs to. */
 export interface PortraitView {
   userId: string;
   memories: Array<{

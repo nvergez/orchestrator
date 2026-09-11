@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { buildPassPrompt, MAX_MEMORY_CHARS, parseDrafts } from './pass.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { createLogger } from '../kernel/logger.ts';
+import { buildPassPrompt, MAX_MEMORY_CHARS, parseDrafts, sdkMemoryPass } from './pass.ts';
+
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: vi.fn() }));
 
 /**
  * The pass's pure halves: what it is handed, and what survives validation.
@@ -103,5 +107,33 @@ describe('buildPassPrompt', () => {
     expect(prompt).toContain('An empty list is the expected answer');
     expect(prompt).toContain('- nothing yet');
     expect(prompt).toContain('- none');
+  });
+});
+
+describe('sdkMemoryPass', () => {
+  const input = {
+    threadTs: '1751970000.000100', channelId: 'C0EXAMPLE123',
+    transcript: ['<@U0ALICE>: the toaster is a design choice'], work: [], participants: [ALICE], known: [],
+  };
+  const answering = (message: Record<string, unknown>): void => {
+    vi.mocked(query).mockReturnValue(
+      (async function* () { await Promise.resolve(); yield message; })() as unknown as ReturnType<typeof query>,
+    );
+  };
+  const pass = sdkMemoryPass({ model: 'claude-sonnet-5', cwd: '/tmp', logger: createLogger('silent') });
+
+  it('returns what the model answered, with the cost it was billed', async () => {
+    answering({ type: 'result', subtype: 'success', total_cost_usd: 0.02, result: JSON.stringify({ memories: [draft()] }) });
+    await expect(pass(input)).resolves.toMatchObject({ costUsd: 0.02, dropped: 0 });
+  });
+
+  it.each([
+    ['prose instead of JSON', { type: 'result', subtype: 'success', total_cost_usd: 1.25, result: 'Sure! Here is what I found.' }],
+    ['an error result', { type: 'result', subtype: 'error_during_execution', total_cost_usd: 1.25, errors: ['the model gave up'] }],
+  ])('carries the cost of a pass that was billed and then failed: %s', async (_label, message) => {
+    answering(message);
+    // The money is spent either way, and the keeper records it against the
+    // pass's own meter — a retry must not make the spend disappear.
+    await expect(pass(input)).rejects.toMatchObject({ costUsd: 1.25 });
   });
 });

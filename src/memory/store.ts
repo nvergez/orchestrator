@@ -53,6 +53,14 @@ export interface ExtractionRow {
   attempts: number;
 }
 
+/** A thread whose last pass failed and still owes its slice another attempt. */
+export interface PendingExtraction {
+  threadTs: string;
+  channelId: string;
+  activityMark: string;
+  attempts: number;
+}
+
 /** One memory-pass run, for the dashboard and the separate cost counter. */
 export interface PassRow {
   threadTs: string;
@@ -67,6 +75,11 @@ export interface PassRow {
 /** Base32-ish, no vowels and no look-alikes: an id a human retypes from Slack. */
 const ID_ALPHABET = '23456789bcdfghjkmnpqrstvwxz';
 const ID_LENGTH = 6;
+
+/** How long a deletion tombstone outlives the request. Long enough that no
+ * pass in flight when the deletion landed can still be running; short enough
+ * that a deletion is never a permanent ban on learning the same thing again. */
+const DELETION_TOMBSTONE_MS = 7 * 86_400_000;
 
 export class MemoryStore {
   private readonly db: DatabaseSync;
@@ -138,7 +151,14 @@ export class MemoryStore {
         dropped    INTEGER NOT NULL DEFAULT 0,
         cost_usd   REAL NOT NULL DEFAULT 0
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS memory_deletions (
+        id              INTEGER PRIMARY KEY,
+        subject_user_id TEXT NOT NULL,
+        text            TEXT NOT NULL,
+        deleted_at      TEXT NOT NULL
+      ) STRICT;
       CREATE INDEX IF NOT EXISTS memories_subject ON memories (subject_user_id);
+      CREATE INDEX IF NOT EXISTS memory_deletions_at ON memory_deletions (deleted_at);
     `);
   }
 
@@ -201,6 +221,36 @@ export class MemoryStore {
   /** Deletes one memory outright — a shared record leaves both portraits. */
   delete(id: string): boolean {
     return this.db.prepare('DELETE FROM memories WHERE id = ?').run(id).changes > 0;
+  }
+
+  /**
+   * A tombstone for a deletion somebody ASKED for — never for a memory
+   * compaction retired. It is what stops a pass that was already running
+   * when the request landed from writing the same thing back under a new id
+   * a second later: its result is work from before the deletion, and absorb
+   * checks these before it writes.
+   *
+   * Pruned on write: only deletions younger than a pass can possibly be are
+   * ever consulted, and a permanent block would stop the daemon from ever
+   * learning the same thing again if it became true again.
+   */
+  recordDeletion(memory: MemoryRow): void {
+    const now = this.now();
+    this.db
+      .prepare('INSERT INTO memory_deletions (subject_user_id, text, deleted_at) VALUES (?, ?, ?)')
+      .run(memory.subjectUserId, memory.text, now);
+    this.db
+      .prepare('DELETE FROM memory_deletions WHERE deleted_at < ?')
+      .run(new Date(Date.parse(now) - DELETION_TOMBSTONE_MS).toISOString());
+  }
+
+  /** The deletions asked for since an instant — a pass older than one of
+   * these must not write its subject back. */
+  deletionsSince(sinceIso: string): Array<{ subjectUserId: string; text: string }> {
+    const rows = this.db
+      .prepare('SELECT subject_user_id, text FROM memory_deletions WHERE deleted_at >= ?')
+      .all(sinceIso) as Array<{ subject_user_id: string; text: string }>;
+    return rows.map((row) => ({ subjectUserId: row.subject_user_id, text: row.text }));
   }
 
   /** The pass saw an existing memory again: a recurring moment earns its keep. */
@@ -287,42 +337,6 @@ export class MemoryStore {
     }));
   }
 
-  /**
-   * Everyone who has spoken here since an instant. The deletion path uses it
-   * to notice that it cannot tell who asked: two people talking at once make
-   * "the speaker" ambiguous, and a deletion must never guess between them.
-   */
-  speakersSince(threadTs: string, channelId: string, sinceIso: string): string[] {
-    const rows = this.db
-      .prepare(
-        `SELECT user_id FROM memory_participants
-          WHERE thread_ts = ? AND channel_id = ? AND last_seen_at >= ?
-          ORDER BY last_seen_at, user_id`,
-      )
-      .all(threadTs, channelId, sinceIso) as Array<{ user_id: string }>;
-    return rows.map((row) => row.user_id);
-  }
-
-  /**
-   * Who spoke here last — the person a deletion asked for in plain words
-   * belongs to. A session never gets to name whose memory it is deleting.
-   */
-  lastSpeaker(threadTs: string, channelId: string): ParticipantRow | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM memory_participants
-          WHERE thread_ts = ? AND channel_id = ?
-          ORDER BY last_seen_at DESC, user_id DESC LIMIT 1`,
-      )
-      .get(threadTs, channelId) as Record<string, unknown> | undefined;
-    if (row === undefined) return undefined;
-    return {
-      userId: row.user_id as string,
-      firstSeenAt: row.first_seen_at as string,
-      lastSeenAt: row.last_seen_at as string,
-    };
-  }
-
   extraction(threadTs: string, channelId: string): ExtractionRow {
     const row = this.db
       .prepare('SELECT * FROM memory_extractions WHERE thread_ts = ? AND channel_id = ?')
@@ -333,6 +347,30 @@ export class MemoryStore {
       activityMark: row.activity_mark as string,
       attempts: Number(row.attempts),
     };
+  }
+
+  /**
+   * Threads still holding a slice a failed pass owes another attempt. The
+   * sweep's own shortlist is the open sessions, and a thread closed between
+   * the failure and the retry would otherwise fall off it forever — the
+   * attempt counter says a retry was promised, so this is where it is kept.
+   * A slice that was abandoned advances its marks and resets the counter, so
+   * it is gone from here by construction.
+   */
+  pendingExtractions(): PendingExtraction[] {
+    const rows = this.db
+      .prepare(
+        `SELECT thread_ts, channel_id, activity_mark, attempts FROM memory_extractions
+          WHERE attempts > 0
+          ORDER BY updated_at, thread_ts`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      threadTs: row.thread_ts as string,
+      channelId: row.channel_id as string,
+      activityMark: row.activity_mark as string,
+      attempts: Number(row.attempts),
+    }));
   }
 
   /** A pass landed (or was abandoned): both marks move, the counter resets. */

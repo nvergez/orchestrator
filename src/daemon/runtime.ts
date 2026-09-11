@@ -201,19 +201,30 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   // Per-person memory (issue #120, ADR 0009). Its own store, its own sweep
   // and its own pass; it depends on kernel only, and this is the one place
   // it meets the session lifecycle. Writing is the pass's, never a session's.
-  const memory = new MemoryKeeper({
+  // Annotated because the shortlist below reads the session manager, which
+  // is built from this keeper: the cycle is real and deliberate (one asks
+  // what is busy, the other what is remembered), and only the annotations
+  // let the compiler resolve it.
+  const memory: MemoryKeeper = new MemoryKeeper({
     store: memoryStore,
     enabled: config.memoryEnabled,
     allowedUserIds: config.slackAllowedUserIds,
     // The sweep's shortlist, off the sessions table: threads quiet past the
-    // silence mark. The keeper still checks each one for turns past its
-    // watermark, so an unchanged thread costs neither a Slack nor a model call.
+    // silence mark AND with nothing happening in them right now. The row's
+    // last_activity_at moves only when a turn FINISHES, so on its own it
+    // would call a thread quiet while a fresh reply is queued, running, or
+    // still downloading its images. The keeper still checks each survivor
+    // for turns past its watermark, so an unchanged thread costs neither a
+    // Slack nor a model call.
     quietThreads: (cutoffIso) =>
-      store.openSessionsInactiveSince(cutoffIso).map((row) => ({
-        threadTs: row.threadTs,
-        channelId: row.channelId,
-        lastActivityAt: row.lastActivityAt,
-      })),
+      store
+        .openSessionsInactiveSince(cutoffIso)
+        .filter((row) => !sessions.isBusy(row.threadTs, row.channelId))
+        .map((row) => ({
+          threadTs: row.threadTs,
+          channelId: row.channelId,
+          lastActivityAt: row.lastActivityAt,
+        })),
     readTranscript:
       options.readTranscript ??
       (() => Promise.resolve([])),
@@ -242,7 +253,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       options.workerPersona === undefined ? undefined : workerPersonaBrief(options.workerPersona),
     ) + (options.persona === undefined ? '' : `\n\n${personaInstructions(options.persona)}`);
 
-  const sessions = new SessionManager({
+  const sessions: SessionManager = new SessionManager({
     store,
     spawn: options.createProcesses({
       gates,
@@ -287,6 +298,12 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     // An explicit close forces the memory pass at once (ADR 0009): a
     // deliberately ended conversation is captured now, not at the next sweep.
     onExplicitClose: (threadTs, channelId) => memory.extractOnClose(threadTs, channelId),
+    // Who wrote the turn about to run (issue #120). The one thing that can
+    // say whose memory the session may delete while it runs: a batch can
+    // carry several people, and arrival times cannot tell them apart.
+    onTurnSpeakers: (threadTs, channelId, userIds) => {
+      memory.noteTurnSpeakers(threadTs, channelId, userIds);
+    },
     onTurnStart: (threadTs, channelId) => surface.ackWorking(channelId, threadTs),
     onTurnEnd: (threadTs, channelId) =>
       surface.settleTurnEnd(channelId, threadTs, delegations.hasUndispatched(threadTs, channelId)),

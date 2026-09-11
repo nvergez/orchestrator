@@ -86,15 +86,6 @@ export const RETAINED_MOMENTS_PER_PERSON = 30;
  */
 const MAX_PASSES_PER_SWEEP = 5;
 
-/**
- * How close two messages must be for the daemon to be unable to say which of
- * their authors asked for something. Consecutive human messages this close
- * can share one turn (issue #117), so the session sees both at once and its
- * "forget that" belongs to either. Wider than the default batch window;
- * nothing about how long the turn then ran changes the answer.
- */
-const CONTEMPORANEOUS_MS = 2_000;
-
 export class MemoryKeeper {
   readonly enabled: boolean;
   private readonly store: MemoryStore;
@@ -109,6 +100,17 @@ export class MemoryKeeper {
   private readonly logger: Logger;
   private readonly now: () => Date;
   private sweeping = false;
+  /**
+   * Per thread: the ids actually rendered into something the session read,
+   * and the authors of the turn it is running. Both are the deletion path's
+   * evidence (spec §12) — what the session was shown, and whose words it is
+   * acting on — and both are process-local on purpose: they describe a live
+   * session, and a restart re-establishes them at the next spawn and turn.
+   */
+  private readonly shownIds = new Map<string, Set<string>>();
+  private readonly turnSpeakers = new Map<string, string[]>();
+  /** One extraction at a time per thread, close and sweep sharing the queue. */
+  private readonly extractions = new Map<string, Promise<void>>();
 
   constructor(options: MemoryKeeperOptions) {
     this.store = options.store;
@@ -136,7 +138,9 @@ export class MemoryKeeper {
       .participants(threadTs, channelId)
       .filter((row) => !this.store.isOptedOut(row.userId))
       .map((row) => ({ userId: row.userId, memories: this.store.listForPerson(row.userId) }));
-    return renderPortraitBlock(portraits, this.now(), this.caps);
+    const block = renderPortraitBlock(portraits, this.now(), this.caps);
+    this.noteShown(threadTs, channelId, block.shownIds);
+    return block.text;
   }
 
   /**
@@ -155,11 +159,26 @@ export class MemoryKeeper {
     if (!latecomer || this.store.isOptedOut(userId)) return '';
     // Once per person per thread falls out of the participant row above: by
     // their second message they are in `before`, and this never runs again.
-    return renderLatecomerBlock(
+    const block = renderLatecomerBlock(
       { userId, memories: this.store.listForPerson(userId) },
       this.now(),
       this.caps,
     );
+    this.noteShown(threadTs, channelId, block.shownIds);
+    return block.text;
+  }
+
+  /**
+   * The authors of the turn a thread is about to run — every person whose
+   * messages the session is reading, because a batch can carry several
+   * (issue #117). The deletion the session may ask for during that turn
+   * belongs to them and nobody else: arrival timestamps cannot say who
+   * spoke, since messages that queued behind a slow turn or a slot wait
+   * share a turn however far apart they were sent.
+   */
+  noteTurnSpeakers(threadTs: string, channelId: string, userIds: readonly string[]): void {
+    if (!this.enabled) return;
+    this.turnSpeakers.set(threadKey(threadTs, channelId), [...new Set(userIds)]);
   }
 
   /**
@@ -172,13 +191,25 @@ export class MemoryKeeper {
     this.sweeping = true;
     try {
       const cutoff = new Date(this.now().getTime() - this.silenceMs).toISOString();
+      const swept = new Set<string>();
       let ran = 0;
       for (const thread of this.quietThreads(cutoff)) {
         if (ran >= MAX_PASSES_PER_SWEEP) break;
         const marks = this.store.extraction(thread.threadTs, thread.channelId);
         // Nothing said since the last pass: no Slack call, no model call.
         if (marks.activityMark >= thread.lastActivityAt) continue;
+        swept.add(threadKey(thread.threadTs, thread.channelId));
         await this.extract(thread.threadTs, thread.channelId, thread.lastActivityAt, 'silence');
+        ran += 1;
+      }
+      // The retries the failure path promised. The shortlist above is the
+      // OPEN sessions, so a thread closed since its pass failed — an
+      // extraction forced by that very close, most often — would otherwise
+      // keep a slice nothing ever comes back for.
+      for (const pending of this.store.pendingExtractions()) {
+        if (ran >= MAX_PASSES_PER_SWEEP) break;
+        if (swept.has(threadKey(pending.threadTs, pending.channelId))) continue;
+        await this.extract(pending.threadTs, pending.channelId, pending.activityMark, 'retry');
         ran += 1;
       }
       return ran;
@@ -211,6 +242,11 @@ export class MemoryKeeper {
     if (row === undefined) return 'unknown';
     if (row.subjectUserId !== userId && !row.participantUserIds.includes(userId)) return 'not_yours';
     this.store.delete(memoryId);
+    // A pass that was already reading this thread when the request landed
+    // finishes against a row that is now gone, and writing it back under a
+    // new id would undo an acknowledged deletion. The tombstone is what
+    // `absorb` checks before it writes.
+    this.store.recordDeletion(row);
     this.logger.info({ userId, memoryId }, 'memory forgotten');
     return 'deleted';
   }
@@ -221,13 +257,13 @@ export class MemoryKeeper {
    * command that runs: `canUseTool` answers it and nothing reaches a shell.
    * Declining leaves the classifier to rule on the command as usual.
    *
-   * The asker is the thread's most recent speaker — the session never gets
-   * to name whose memory it is deleting. When two people spoke at almost the
-   * same moment their messages can share one turn (issue #117), and then
-   * "the speaker" is genuinely ambiguous: the request is refused rather than
-   * guessed at, and the bare `forget <id>` command, which carries a real
-   * Slack author, still works. Deleting the wrong person's memory to save
-   * someone a second message is not a trade worth making.
+   * The asker is whoever wrote the turn the session is answering — it never
+   * gets to name whose memory it is deleting. A turn can carry several
+   * people's messages (issue #117), and then "the speaker" is genuinely
+   * ambiguous: the request is refused rather than guessed at, and the bare
+   * `forget <id>` command, which carries a real Slack author, still works.
+   * Deleting the wrong person's memory to save someone a second message is
+   * not a trade worth making.
    */
   forgetCommand(
     threadTs: string,
@@ -244,21 +280,29 @@ export class MemoryKeeper {
   /** Works out who asked, then forgets as them — or refuses to guess. */
   private forgetAsAsker(threadTs: string, channelId: string, memoryId: string): ForgetOutcome {
     if (!this.enabled) return 'disabled';
-    const last = this.store.lastSpeaker(threadTs, channelId);
-    if (last === undefined) return 'not_yours';
-    const together = this.store.speakersSince(
-      threadTs,
-      channelId,
-      new Date(Date.parse(last.lastSeenAt) - CONTEMPORANEOUS_MS).toISOString(),
-    );
-    if (together.length > 1) {
+    const speakers = this.turnSpeakers.get(threadKey(threadTs, channelId)) ?? [];
+    if (speakers.length > 1) {
       this.logger.info(
-        { threadTs, channelId, together },
-        'session asked to forget while several people were speaking at once — refused',
+        { threadTs, channelId, speakers },
+        'session asked to forget on a turn several people wrote — refused',
       );
       return 'ambiguous';
     }
-    return this.forget(last.userId, memoryId);
+    const asker = speakers[0];
+    // No identifiable author: an orchestration-event wake, or a turn from
+    // before this process started. Nobody asked, so nothing is deleted.
+    if (asker === undefined) return 'not_yours';
+    // Only what the session was actually shown (spec §12). A memory the
+    // portrait budget left out, or one written after the block it read, is
+    // not an id it can have seen — so to this session it does not exist.
+    if (!(this.shownIds.get(threadKey(threadTs, channelId))?.has(memoryId) ?? false)) {
+      this.logger.info(
+        { threadTs, channelId, memoryId },
+        'session asked to forget an id it was never shown — refused',
+      );
+      return 'unknown';
+    }
+    return this.forget(asker, memoryId);
   }
 
   /** Stop remembering me: purge the portrait, leave the tombstone. */
@@ -280,13 +324,40 @@ export class MemoryKeeper {
    * posted to the thread, nothing rethrows, and the daemon never goes down
    * because a model call did.
    */
-  private async extract(
+  private extract(
     threadTs: string,
     channelId: string,
     activityMark: string,
-    trigger: 'silence' | 'close',
+    trigger: ExtractionTrigger,
   ): Promise<void> {
+    // One at a time per thread. A close landing while the sweep's pass is
+    // running would otherwise read the same slice against the same
+    // watermark: both passes would charge for the conversation, absorb it
+    // twice — inflating recurrence, which is what promotes a moment — and
+    // the slower one would write the older watermark last.
+    const key = threadKey(threadTs, channelId);
+    const next = (this.extractions.get(key) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => this.runExtraction(threadTs, channelId, activityMark, trigger));
+    this.extractions.set(key, next);
+    void next.finally(() => {
+      if (this.extractions.get(key) === next) this.extractions.delete(key);
+    });
+    return next;
+  }
+
+  private async runExtraction(
+    threadTs: string,
+    channelId: string,
+    activityMark: string,
+    trigger: ExtractionTrigger,
+  ): Promise<void> {
+    // Read after the queue, never before it: the pass that just finished may
+    // have moved this very watermark.
     const marks = this.store.extraction(threadTs, channelId);
+    // Everything from here on is work from BEFORE any deletion asked for
+    // while it runs — which is what makes such a deletion final (§12).
+    const startedAt = this.now().toISOString();
     const people = this.store
       .participants(threadTs, channelId)
       .map((row) => row.userId)
@@ -303,6 +374,16 @@ export class MemoryKeeper {
         this.store.advance(threadTs, channelId, marks.watermarkTs, activityMark);
         return;
       }
+      // The shortlist says a thread finished its last turn long ago; the
+      // transcript says whether anyone has spoken since. A reply that
+      // arrived while the sweep was working — or one still queued behind a
+      // turn — lands here, and a conversation still in progress is left
+      // alone with its marks untouched, to be extracted when it really is
+      // quiet. A close is exempt: someone just asked for it.
+      if (trigger !== 'close' && this.spokenSinceCutoff(messages)) {
+        this.logger.debug({ threadTs, channelId, trigger }, 'memory pass skipped — the thread is still talking');
+        return;
+      }
       const result = await this.runPass({
         threadTs,
         channelId,
@@ -311,7 +392,7 @@ export class MemoryKeeper {
         participants: people,
         known: this.knownLines(people),
       });
-      const written = this.absorb(result.memories, threadTs, channelId);
+      const written = this.absorb(result.memories, threadTs, channelId, startedAt);
       const watermark = messages.reduce((latest, message) => (message.ts > latest ? message.ts : latest), marks.watermarkTs);
       this.store.advance(threadTs, channelId, watermark, activityMark);
       this.store.recordPass({
@@ -349,7 +430,9 @@ export class MemoryKeeper {
       outcome: abandoned ? 'abandoned' : 'failed',
       written: 0,
       dropped: 0,
-      costUsd: 0,
+      // A model can bill for an answer and still fail on it. The money is
+      // spent whatever the outcome, so the pass's own counter must see it.
+      costUsd: billedCost(error),
     });
     if (abandoned) {
       // The slice is what keeps failing, so the slice is what must go: the
@@ -372,9 +455,26 @@ export class MemoryKeeper {
    * moment that has recurred enough is promoted to a durable fact — which is
    * exactly what a private joke is.
    */
-  private absorb(drafts: readonly DraftMemory[], threadTs: string, channelId: string): number {
+  private absorb(
+    drafts: readonly DraftMemory[],
+    threadTs: string,
+    channelId: string,
+    startedAt: string,
+  ): number {
+    // Anything somebody asked to forget while this pass was running. The
+    // pass read the conversation before the request landed, so writing its
+    // drafts back would return a deleted memory under a new id, seconds
+    // after the person was told it was gone.
+    const forgotten = this.store.deletionsSince(startedAt);
     let written = 0;
     for (const draft of drafts) {
+      if (forgotten.some((row) => row.subjectUserId === draft.subject && sameThing(row.text, draft.text))) {
+        this.logger.info(
+          { threadTs, channelId, subject: draft.subject },
+          'memory dropped — it was forgotten while the pass was running',
+        );
+        continue;
+      }
       const existing = this.store.listForPerson(draft.subject).find((row) => sameThing(row.text, draft.text));
       if (existing !== undefined) {
         this.store.noteRecurrence(existing.id);
@@ -397,14 +497,38 @@ export class MemoryKeeper {
   /** Compaction: promote what keeps recurring, retire the oldest moments. */
   private compact(userId: string): void {
     const memories = this.store.listForPerson(userId).filter((row) => row.subjectUserId === userId);
-    for (const id of promotable(memories)) {
+    const promoted = new Set(promotable(memories));
+    for (const id of promoted) {
       this.store.promote(id);
       this.logger.info({ userId, memoryId: id }, 'recurring moment promoted to a durable fact');
     }
-    const moments = memories.filter((row) => row.nature === 'moment');
+    // The rows in hand still say `moment` for everything just promoted, and
+    // the oldest moment is exactly the one most likely to have earned its
+    // third sighting: retiring it here would delete a durable fact one line
+    // after making it one.
+    const moments = memories.filter((row) => row.nature === 'moment' && !promoted.has(row.id));
     for (const retired of moments.slice(0, Math.max(0, moments.length - RETAINED_MOMENTS_PER_PERSON))) {
       this.store.delete(retired.id);
     }
+  }
+
+  /** Remembers what a session was handed, so a deletion can be checked
+   * against it. Ids accumulate per thread: a resumed session still holds
+   * every block it has read, and a memory evicted from today's block by the
+   * budget was genuinely shown yesterday. */
+  private noteShown(threadTs: string, channelId: string, ids: readonly string[]): void {
+    if (ids.length === 0) return;
+    const key = threadKey(threadTs, channelId);
+    const seen = this.shownIds.get(key) ?? new Set<string>();
+    for (const id of ids) seen.add(id);
+    this.shownIds.set(key, seen);
+  }
+
+  /** Whether anyone has spoken since the silence mark — the transcript's own
+   * answer to "is this thread quiet", rather than the sessions table's. */
+  private spokenSinceCutoff(messages: readonly TranscriptMessage[]): boolean {
+    const cutoffTs = (this.now().getTime() - this.silenceMs) / 1000;
+    return messages.some((message) => Number(message.ts) > cutoffTs);
   }
 
   /** What the pass is told it already knows, so it does not write it twice. */
@@ -418,6 +542,21 @@ export class MemoryKeeper {
   }
 }
 
+/** Why a pass is running: the sweep's silence mark, an explicit close, or a
+ * slice a previous failure still owes an attempt. */
+type ExtractionTrigger = 'silence' | 'close' | 'retry';
+
+function threadKey(threadTs: string, channelId: string): string {
+  return `${channelId}:${threadTs}`;
+}
+
+/** What a failed attempt was billed before it threw, if it says so — read
+ * structurally so a scripted pass can report it as readily as the SDK one. */
+function billedCost(error: unknown): number {
+  const cost = (error as { costUsd?: unknown } | null)?.costUsd;
+  return typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? cost : 0;
+}
+
 /** The session's one write, exactly as the portrait block spells it. */
 const FORGET_COMMAND = /^\s*orc\s+memory\s+forget\s+([A-Za-z0-9]{1,32})\s*$/;
 
@@ -429,7 +568,7 @@ const FORGET_COMMAND = /^\s*orc\s+memory\s+forget\s+([A-Za-z0-9]{1,32})\s*$/;
 const SESSION_FORGET_REPLIES: Record<ForgetOutcome, (memoryId: string) => string> = {
   deleted: (id) => `Forgotten: the memory ${id} is gone, from every portrait it was in. Tell them in one short line.`,
   ambiguous: () =>
-    'Refused: several people have just spoken here, so I cannot tell whose memory this is. Ask them to send `forget <id>` as a message on its own — that carries their name.',
+    'Refused: this turn carries messages from several people, so I cannot tell whose memory this is. Ask them to send `forget <id>` as a message on its own — that carries their name.',
   not_yours: (id) =>
     `Refused: ${id} is not a memory about the person who just spoke, and you can only forget what was shown about them. Say so plainly and do not try another id.`,
   unknown: (id) =>

@@ -38,19 +38,28 @@ export function Portraits({ memory, asOf }: { memory: MemoryState; asOf: string 
               <CardTitle className="font-mono">{portrait.userId}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1.5">
-              {portrait.memories.map((entry) => (
-                <div key={entry.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-                  <code className="font-mono text-2xs text-muted-foreground">{entry.id}</code>
-                  <Badge variant={entry.nature === 'durable' ? 'accent' : 'neutral'}>
-                    {entry.nature === 'durable' ? 'durable fact' : 'moment'}
-                  </Badge>
-                  <span className="min-w-0 flex-1">{entry.text}</span>
-                  <span className="font-mono text-2xs tabular-nums text-muted-foreground">
-                    {ago(entry.createdAt, asOf)}
-                    {entry.recurrenceCount > 1 && ` · seen ×${entry.recurrenceCount}`}
-                  </span>
-                </div>
-              ))}
+              {portrait.memories.map((entry) => {
+                // A shared memory is one record in several portraits, not a
+                // copy per person: naming the others is what keeps the same
+                // id showing up twice on this page legible.
+                const others = entry.participantUserIds.filter((userId) => userId !== portrait.userId);
+                return (
+                  <div key={entry.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+                    <code className="font-mono text-2xs text-muted-foreground">{entry.id}</code>
+                    <Badge variant={entry.nature === 'durable' ? 'accent' : 'neutral'}>
+                      {entry.nature === 'durable' ? 'durable fact' : 'moment'}
+                    </Badge>
+                    <span className="min-w-0 flex-1">{entry.text}</span>
+                    {others.length > 0 && (
+                      <span className="font-mono text-2xs text-muted-foreground">with {others.join(', ')}</span>
+                    )}
+                    <span className="font-mono text-2xs tabular-nums text-muted-foreground">
+                      {ago(entry.createdAt, asOf)}
+                      {entry.recurrenceCount > 1 && ` · seen ×${entry.recurrenceCount}`}
+                    </span>
+                  </div>
+                );
+              })}
             </CardContent>
           </Card>
         ))

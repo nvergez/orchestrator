@@ -64,6 +64,35 @@ describe('MemoryStore — forward migration', () => {
     reopened.close();
   });
 
+  it('adds the deletion tombstones to a database from before they existed', () => {
+    const dbPath = tempDbPath();
+    // A database written by the first version of the feature: memories, no
+    // tombstones. Opening it must gain the table and lose nothing.
+    const old = new DatabaseSync(dbPath);
+    old.exec(`
+      CREATE TABLE memories (
+        id TEXT PRIMARY KEY, subject_user_id TEXT NOT NULL,
+        participant_user_ids TEXT NOT NULL DEFAULT '[]',
+        nature TEXT NOT NULL CHECK (nature IN ('durable', 'moment')),
+        text TEXT NOT NULL, created_at TEXT NOT NULL,
+        source_thread_ts TEXT, source_channel_id TEXT,
+        recurrence_count INTEGER NOT NULL DEFAULT 1, last_seen_at TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO memories VALUES ('ab12cd', '${ALICE}', '[]', 'durable', 'Lives in webapp.',
+        '2026-09-01T10:00:00.000Z', NULL, NULL, 1, '2026-09-01T10:00:00.000Z');
+    `);
+    old.close();
+
+    const store = new MemoryStore(dbPath);
+    const row = store.get('ab12cd')!;
+    expect(row.text).toBe('Lives in webapp.');
+    store.recordDeletion(row);
+    expect(store.deletionsSince('2026-09-01T00:00:00.000Z')).toEqual([
+      { subjectUserId: ALICE, text: 'Lives in webapp.' },
+    ]);
+    store.close();
+  });
+
   it('survives a reopen of its own database and keeps WAL on', () => {
     const dbPath = tempDbPath();
     const first = new MemoryStore(dbPath);
@@ -140,24 +169,51 @@ describe('MemoryStore — opt-out', () => {
 });
 
 describe('MemoryStore — participants and extraction bookkeeping', () => {
-  it('names everyone who spoke inside a window, so an ambiguous asker is visible', () => {
-    let clock = 0;
-    const store = new MemoryStore(':memory:', () => new Date(1_700_000_000_000 + (clock += 1000)).toISOString());
-    store.noteParticipant(THREAD, CHANNEL, ALICE);
-    store.noteParticipant(THREAD, CHANNEL, BOB);
-    expect(store.speakersSince(THREAD, CHANNEL, new Date(1_700_000_000_000).toISOString())).toEqual([ALICE, BOB]);
-    expect(store.speakersSince(THREAD, CHANNEL, new Date(1_700_000_001_500).toISOString())).toEqual([BOB]);
-    store.close();
-  });
-
-  it('records only who spoke, in arrival order, and names the last speaker', () => {
+  it('records only who spoke, in arrival order', () => {
     let clock = 0;
     const store = new MemoryStore(':memory:', () => new Date(1_700_000_000_000 + (clock += 1000)).toISOString());
     store.noteParticipant(THREAD, CHANNEL, ALICE);
     store.noteParticipant(THREAD, CHANNEL, BOB);
     store.noteParticipant(THREAD, CHANNEL, ALICE);
     expect(store.participants(THREAD, CHANNEL).map((row) => row.userId)).toEqual([ALICE, BOB]);
-    expect(store.lastSpeaker(THREAD, CHANNEL)?.userId).toBe(ALICE);
+    store.close();
+  });
+
+  it('lists the threads a failed pass still owes an attempt, and nothing else', () => {
+    const store = new MemoryStore(':memory:');
+    store.advance(THREAD, CHANNEL, '1751970005.000100', '2026-09-11T10:00:00.000Z');
+    expect(store.pendingExtractions()).toEqual([]);
+    store.recordAttempt(THREAD, CHANNEL);
+    // Whether the session is still open is not this table's business: the
+    // retry was promised here, so it is owed here (spec §12).
+    expect(store.pendingExtractions()).toEqual([
+      { threadTs: THREAD, channelId: CHANNEL, activityMark: '2026-09-11T10:00:00.000Z', attempts: 1 },
+    ]);
+    store.advance(THREAD, CHANNEL, '1751970009.000100', '2026-09-11T11:00:00.000Z');
+    expect(store.pendingExtractions()).toEqual([]);
+    store.close();
+  });
+
+  it('remembers a deletion for a while, so a pass in flight cannot undo it', () => {
+    let clock = Date.parse('2026-09-11T10:00:00.000Z');
+    const store = new MemoryStore(':memory:', () => new Date(clock).toISOString());
+    const id = write(store, ALICE, 'Calls the deploy script the goat.', 'moment');
+    const row = store.get(id)!;
+    store.delete(id);
+    store.recordDeletion(row);
+    expect(store.deletionsSince('2026-09-11T09:00:00.000Z')).toEqual([
+      { subjectUserId: ALICE, text: 'Calls the deploy script the goat.' },
+    ]);
+    // A pass that started AFTER the deletion has nothing to hold back.
+    expect(store.deletionsSince('2026-09-11T10:00:01.000Z')).toEqual([]);
+
+    // And a tombstone is not a life sentence: weeks later the daemon may
+    // learn the same thing again, because it became true again.
+    clock = Date.parse('2026-10-11T10:00:00.000Z');
+    store.recordDeletion({ ...row, subjectUserId: BOB, text: 'Something else.' });
+    expect(store.deletionsSince('2026-09-11T09:00:00.000Z')).toEqual([
+      { subjectUserId: BOB, text: 'Something else.' },
+    ]);
     store.close();
   });
 

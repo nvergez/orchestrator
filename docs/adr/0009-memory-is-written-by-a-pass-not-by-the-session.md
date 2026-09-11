@@ -29,8 +29,9 @@ reserved worker slots on the way out. A prompt refresh must never be able
 to answer a human's gate for them.
 
 The session keeps exactly one write: deleting a memory it was shown, by the
-id rendered next to it, checked by the daemon against the speaker's own
-portrait. It cannot invent what does not exist and cannot reach another
+id rendered next to it, checked by the daemon against the ids it actually
+handed that thread and against the portrait of whoever wrote the turn it is
+answering. It cannot invent what does not exist and cannot reach another
 person's memories; "forget everything" is the same mechanism, generalised.
 The alternative — no deletion path at all — was worse: the first wrong memory
 would have been permanent, invisible from Slack, and the dashboard cannot

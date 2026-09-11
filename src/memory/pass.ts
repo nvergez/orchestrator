@@ -49,10 +49,27 @@ export interface MemoryPassResult {
 
 export type MemoryPass = (input: MemoryPassInput) => Promise<MemoryPassResult>;
 
+/**
+ * A pass that failed, carrying what it had already been billed. A model can
+ * charge for an answer and still fail on it — a non-success result, or prose
+ * where JSON was asked for — and that money is spent either way: the keeper
+ * records it so the dashboard's spending total stays true across retries and
+ * abandoned slices.
+ */
+export class MemoryPassError extends Error {
+  readonly costUsd: number;
+
+  constructor(message: string, costUsd = 0) {
+    super(message);
+    this.name = 'MemoryPassError';
+    this.costUsd = costUsd;
+  }
+}
+
 /** The whole answer was not JSON — a failed pass, not an empty one. The
  * difference matters: an empty pass advances the watermark, a failed one
  * holds the slice for another attempt. */
-export class MemoryPassFormatError extends Error {}
+export class MemoryPassFormatError extends MemoryPassError {}
 
 /** Past this a memory has stopped being a memory and become a summary. */
 export const MAX_MEMORY_CHARS = 280;
@@ -193,12 +210,15 @@ export function sdkMemoryPass(opts: { model: string; cwd: string; logger: Logger
       if (message.type !== 'result') continue;
       costUsd = message.total_cost_usd;
       if (message.subtype !== 'success') {
-        throw new Error(message.errors.length > 0 ? message.errors.join('; ') : message.subtype);
+        throw new MemoryPassError(
+          message.errors.length > 0 ? message.errors.join('; ') : message.subtype,
+          costUsd,
+        );
       }
       text = message.result;
     }
     const { memories, dropped, parsed } = parseDrafts(text, input.participants);
-    if (!parsed) throw new MemoryPassFormatError('the memory pass did not answer with JSON');
+    if (!parsed) throw new MemoryPassFormatError('the memory pass did not answer with JSON', costUsd);
     if (dropped > 0) {
       opts.logger.warn({ threadTs: input.threadTs, dropped }, 'memory pass records dropped as malformed');
     }

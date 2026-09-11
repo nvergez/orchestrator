@@ -118,9 +118,12 @@ export function registerHandlers(
       // each other, and their messages must not look like one unnamed user.
       // Resolve the author in the same pass as mentions, context and images.
       const named = async (turn: SessionTurn): Promise<SessionTurn> => {
-        if (turn.text.trim() === '' && turn.images.length === 0) return turn;
+        // The author travels with the turn, not just inside its text: a
+        // batch carries several, and the memory keeper binds a deletion
+        // asked for during the turn to exactly the people who wrote it.
+        if (turn.text.trim() === '' && turn.images.length === 0) return { ...turn, author: userId };
         const text = `${portrait}[Slack message from <@${userId}>; bot explicitly mentioned: ${incoming.type === 'app_mention' ? 'yes' : 'no'}]\n${turn.text}`;
-        return { ...turn, text: names ? await names.render(text) : text };
+        return { ...turn, author: userId, text: names ? await names.render(text) : text };
       };
       if (!attachments) return named({ text: renderThreadContext(context) + text, images: [] });
       const threadTs = incoming.thread_ts ?? incoming.ts;

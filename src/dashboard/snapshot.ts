@@ -92,6 +92,10 @@ export interface ClosedSessionView {
  * One person's portrait, read-only (issue #120). The dashboard shows what
  * the bot believes about a team; it can never delete a memory, because it
  * never writes at all (ADR 0002) — `forget <id>` in Slack is the way out.
+ *
+ * Everything the daemon would inject for that person, which includes the
+ * shared records they are merely a participant of: one row, every portrait
+ * it belongs to, the same id in each — never a copy.
  */
 export interface PortraitView {
   userId: string;
@@ -101,6 +105,7 @@ export interface PortraitView {
     text: string;
     /** Absolute, as stored: the page is an audit view, not the bot's voice. */
     createdAt: string;
+    /** Who else was there. The record shows in their portrait too. */
     participantUserIds: string[];
     recurrenceCount: number;
   }>;
@@ -418,21 +423,28 @@ const EMPTY_MEMORY: MemoryState = {
 function readMemory(db: DatabaseSync): MemoryState {
   if (!hasTable(db, 'memories')) return EMPTY_MEMORY;
   const rows = db
-    .prepare('SELECT * FROM memories ORDER BY subject_user_id, created_at, rowid')
+    .prepare('SELECT * FROM memories ORDER BY created_at, rowid')
     .all() as Array<Record<string, unknown>>;
-  const bySubject = new Map<string, PortraitView>();
+  const byPerson = new Map<string, PortraitView>();
   for (const row of rows) {
-    const userId = row.subject_user_id as string;
-    const portrait = bySubject.get(userId) ?? { userId, memories: [] };
-    portrait.memories.push({
+    const participantUserIds = readStringArray(row.participant_user_ids);
+    const entry = {
       id: row.id as string,
       nature: row.nature as 'durable' | 'moment',
       text: row.text as string,
       createdAt: row.created_at as string,
-      participantUserIds: readStringArray(row.participant_user_ids),
+      participantUserIds,
       recurrenceCount: Number(row.recurrence_count),
-    });
-    bySubject.set(userId, portrait);
+    };
+    // A shared memory is ONE row in EVERY portrait it belongs to — exactly
+    // what the daemon injects for each of them (CONTEXT.md: Portrait). The
+    // page would otherwise show someone an empty portrait while their
+    // sessions were being handed a memory about them.
+    for (const userId of new Set([row.subject_user_id as string, ...participantUserIds])) {
+      const portrait = byPerson.get(userId) ?? { userId, memories: [] };
+      portrait.memories.push(entry);
+      byPerson.set(userId, portrait);
+    }
   }
   const passes = hasTable(db, 'memory_passes')
     ? (db
@@ -444,7 +456,7 @@ function readMemory(db: DatabaseSync): MemoryState {
     : 0;
   return {
     present: true,
-    portraits: [...bySubject.values()],
+    portraits: [...byPerson.values()].sort((a, b) => a.userId.localeCompare(b.userId)),
     recentPasses: passes.map((row) => ({
       threadTs: row.thread_ts as string,
       channelId: row.channel_id as string,
