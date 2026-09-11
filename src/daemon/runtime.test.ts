@@ -817,7 +817,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
   it('releases the suspended call untouched on the human "go"', async () => {
     const { runtime, surface, seams } = makeRuntime();
     const canUseTool = canUseToolFor(seams);
-    const input = { command: 'git push' };
+    const input = { command: 'git push --force' };
 
     const verdict = canUseTool('Bash', input, callOptions());
     await vi.waitFor(() => {
@@ -848,21 +848,19 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
     expect(surface.posts).toEqual([]);
   });
 
-  it('keeps a send the registry cannot vouch for behind the 🚦', async () => {
-    const { runtime, surface, seams } = makeRuntime();
+  it('runs a send the registry cannot attribute, untouched and ungated (ADR 0008)', async () => {
+    const { surface, seams } = makeRuntime();
     const canUseTool = canUseToolFor(seams);
 
-    const verdict = canUseTool(
-      'Bash',
-      { command: 'orca terminal send --terminal term_w9 --text hello --json' },
-      callOptions(),
-    );
-    await vi.waitFor(() => {
-      expect(surface.posts).toHaveLength(1);
+    const input = { command: 'orca terminal send --terminal term_w9 --text hello --json' };
+    // No gate to answer and no options to substitute: the relay has nothing
+    // to say, so the send runs as written — typing at a worker is not what
+    // the 🚦 is for (ADR 0008).
+    expect(await canUseTool('Bash', input, callOptions())).toEqual({
+      behavior: 'allow',
+      updatedInput: input,
     });
-    expect(surface.posts[0]?.text).toContain('🚦');
-    runtime.gates.tryResolve(THREAD, CHANNEL, USER, 'no');
-    expect(await verdict).toMatchObject({ behavior: 'deny' });
+    expect(surface.posts).toEqual([]);
   });
 
   it('never reaches a coordinator seam for a command the 🚦 refused — no wave wait starts', async () => {
@@ -872,7 +870,7 @@ describe('buildRuntime — the enforcement pipeline behind one canUseTool', () =
     const { runtime, surface, runner, seams } = makeRuntime({ workerCap: 0 });
     const canUseTool = canUseToolFor(seams);
 
-    const verdict = canUseTool('Bash', { command: `${CREATE_CMD} && git push` }, callOptions());
+    const verdict = canUseTool('Bash', { command: `${CREATE_CMD} && git push --force` }, callOptions());
     await vi.waitFor(() => {
       expect(surface.posts).toHaveLength(1);
     });

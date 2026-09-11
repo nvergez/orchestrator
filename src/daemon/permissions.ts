@@ -24,11 +24,10 @@ export interface DelegationPolicy {
  * tier classifier and the SDK's permission protocol. One instance per
  * session, bound to its Slack thread so CONFIRM gates land in the right
  * place. Two coordinators get a word on an approved command: the gate relay
- * (issue #21) lifts a registry-anchored `terminal send` past the 🚦, checks
- * every `orchestration reply` against the pending-gates registry and pins
- * answer fidelity; the delegation coordinator (issue #19) holds the worker
- * cap on `worktree create` and rewrites `orchestration dispatch` to origin
- * from the thread mailbox.
+ * (issue #21) checks every `orchestration reply` against the pending-gates
+ * registry and pins answer fidelity; the delegation coordinator (issue #19)
+ * holds the worker cap on `worktree create` and rewrites `orchestration
+ * dispatch` to origin from the thread mailbox.
  */
 export function buildCanUseTool(opts: {
   threadTs: string;
@@ -95,16 +94,6 @@ export function buildCanUseTool(opts: {
             'and do not ask the user to approve it.',
         };
       case 'confirm': {
-        // A `terminal send` carrying a human answer down to a worker this
-        // thread relayed a gate for is AUTO (spec §7) — the pending-gates
-        // registry is the provenance the tier classifier cannot see.
-        if (relay.sanctionsSend(threadTs, channelId, command)) {
-          logger.info(
-            { threadTs, command },
-            'terminal send sanctioned by the pending-gates registry — runs without a 🚦',
-          );
-          break;
-        }
         const gate = describeGate(command);
         const answer = await gates.request(
           threadTs,

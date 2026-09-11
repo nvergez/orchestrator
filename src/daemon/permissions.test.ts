@@ -68,17 +68,10 @@ class FakeDelegations implements DispatchPreparer, DispatchObserver {
 class FakeRelay implements SessionRelay {
   prepared: Array<{ threadTs: string; command: string }> = [];
   observed: Array<{ threadTs: string; command: string; stdout: string }> = [];
-  sanctioned: string[] = [];
-  sendSanctioned = false;
   private readonly verdict: PrepareVerdict | 'passthrough';
 
   constructor(verdict: PrepareVerdict | 'passthrough' = 'passthrough') {
     this.verdict = verdict;
-  }
-
-  sanctionsSend(_threadTs: string, _channelId: string, command: string): boolean {
-    this.sanctioned.push(command);
-    return this.sendSanctioned;
   }
 
   prepare(threadTs: string, _channelId: string, command: string): PrepareVerdict {
@@ -167,7 +160,7 @@ describe('buildCanUseTool', () => {
   it('cancels the call cleanly on refusal, quoting the human verbatim', async () => {
     const gates = new FakeGates({ approved: false, reply: 'no, rebase first' });
     const canUseTool = makeCanUseTool(gates);
-    const result = await canUseTool('Bash', { command: 'git push' }, callOptions());
+    const result = await canUseTool('Bash', { command: 'git push --force' }, callOptions());
     expect(result).toMatchObject({ behavior: 'deny' });
     expect((result as { message: string }).message).toContain('no, rebase first');
   });
@@ -213,7 +206,7 @@ describe('buildCanUseTool — repo allow-list on delegations (spec §4/§7, issu
     const gates = new FakeGates({ approved: true, reply: 'go' });
     const allowList = new FakeAllowList({ allowed: false, reason: 'off-list' });
     const canUseTool = makeCanUseTool(gates, allowList);
-    const result = await canUseTool('Bash', { command: `${CREATE} && git push` }, callOptions());
+    const result = await canUseTool('Bash', { command: `${CREATE} && git push --force` }, callOptions());
     expect(result).toMatchObject({ behavior: 'deny' });
     expect(gates.requests).toEqual([]);
   });
@@ -236,7 +229,7 @@ describe('buildCanUseTool — repo allow-list on delegations (spec §4/§7, issu
     const allowList = new FakeAllowList();
     const canUseTool = makeCanUseTool(gates, allowList);
     await canUseTool('Bash', { command: 'orca repo list --json' }, callOptions());
-    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    await canUseTool('Bash', { command: 'git push --force' }, callOptions());
     expect(allowList.checkedRefs).toEqual([]);
   });
 
@@ -280,7 +273,7 @@ describe('buildCanUseTool — the delegation coordinator seam (issue #19)', () =
     const delegations = new FakeDelegations();
     const gates = new FakeGates({ approved: false, reply: 'no' });
     const canUseTool = makeCanUseTool(gates, new FakeAllowList(), delegations);
-    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    await canUseTool('Bash', { command: 'git push --force' }, callOptions());
     expect(delegations.prepared).toEqual([]);
   });
 
@@ -296,23 +289,15 @@ describe('buildCanUseTool — the gate relay seam (issue #21)', () => {
   const REPLY = 'orca orchestration reply --id msg_1 --body "2" --json';
   const SEND = 'orca terminal send --terminal term_w1 --text "app/" --enter --json';
 
-  it('runs a registry-sanctioned terminal send without the 🚦 gate', async () => {
+  it('runs a terminal send with no 🚦 — the relay owns what it may carry (ADR 0008)', async () => {
     const gates = new FakeGates();
     const relay = new FakeRelay();
-    relay.sendSanctioned = true;
     const canUseTool = makeCanUseTool(gates, new FakeAllowList(), new FakeDelegations(), relay);
     const input = { command: SEND };
     const result = await canUseTool('Bash', input, callOptions());
     expect(result).toEqual({ behavior: 'allow', updatedInput: input });
     expect(gates.requests).toEqual([]);
-    expect(relay.sanctioned).toEqual([SEND]);
-  });
-
-  it('keeps an unsanctioned terminal send behind the 🚦 gate', async () => {
-    const gates = new FakeGates({ approved: true, reply: 'go' });
-    const canUseTool = makeCanUseTool(gates);
-    await canUseTool('Bash', { command: SEND }, callOptions());
-    expect(gates.requests).toHaveLength(1);
+    expect(relay.prepared).toEqual([{ threadTs: THREAD, command: SEND }]);
   });
 
   it('turns a relay deny into a tool denial before the delegation seam runs', async () => {
@@ -337,7 +322,7 @@ describe('buildCanUseTool — the gate relay seam (issue #21)', () => {
     const relay = new FakeRelay();
     const gates = new FakeGates({ approved: false, reply: 'no' });
     const canUseTool = makeCanUseTool(gates, new FakeAllowList(), new FakeDelegations(), relay);
-    await canUseTool('Bash', { command: 'git push' }, callOptions());
+    await canUseTool('Bash', { command: 'git push --force' }, callOptions());
     expect(relay.prepared).toEqual([]);
   });
 });

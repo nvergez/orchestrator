@@ -6,10 +6,12 @@
  * reader also powers `extractDelegationRepoRefs` (issue #18) — the seam
  * permissions.ts runs the repo allow-list on.
  *
- * Fail-closed by construction: only bare `orca` / `gh` / `git` (plus the
- * spec-gated `rm`) are recognized; compound commands take the tier of their
- * most dangerous segment; command substitution — which could smuggle
- * anything — is forbidden without further analysis.
+ * The binary boundary is fail-closed: only bare `orca` / `gh` / `git` (plus
+ * the spec-gated `rm`) are recognized, compound commands take the tier of
+ * their most dangerous segment, and command substitution — which could
+ * smuggle anything — is forbidden without further analysis. Inside that
+ * boundary the default is the opposite: a recognized binary runs, and only
+ * the named irreversible commands (spec §7) suspend behind the 🚦.
  */
 
 export type Tier = 'auto' | 'confirm' | 'forbidden';
@@ -46,9 +48,6 @@ export function classifyCommand(command: string): Verdict {
   for (const segment of parsed.segments) {
     const verdict = classifySegment(segment);
     if (SEVERITY[verdict.tier] > SEVERITY[worst.tier]) worst = verdict;
-  }
-  if (worst.tier === 'auto' && parsed.writesFile) {
-    return confirm('output is redirected into a file');
   }
   return worst;
 }
@@ -167,15 +166,13 @@ interface ParsedCommand {
   segments: string[][];
   /** `$(…)`, backticks, or `<(…)`/`>(…)` seen where the shell would run them. */
   hasSubstitution: boolean;
-  /** Output redirected somewhere other than /dev/null or another fd. */
-  writesFile: boolean;
 }
 
 /**
  * A deliberately small shell reader: enough quoting/operator awareness to
  * split compound commands and spot substitution, never enough to be clever.
- * Anything it misreads falls toward a stricter tier, not a looser one —
- * misparsed segments land on unknown-command defaults (CONFIRM at best).
+ * A misread never smuggles a binary past the allow-list: the first word of
+ * every segment is matched literally, and substitution is forbidden whole.
  */
 function parse(command: string): ParsedCommand {
   const segments: string[][] = [];
@@ -185,7 +182,6 @@ function parse(command: string): ParsedCommand {
   let inSingle = false;
   let inDouble = false;
   let hasSubstitution = false;
-  let writesFile = false;
 
   const endToken = (): void => {
     if (hasToken) tokens.push(current);
@@ -273,16 +269,9 @@ function parse(command: string): ParsedCommand {
         }
         let j = i + 1;
         while (j < command.length && '><&|'.includes(command[j] as string)) j += 1;
-        const operator = command.slice(i, j);
         while (j < command.length && (command[j] === ' ' || command[j] === '\t')) j += 1;
-        let target = '';
-        while (j < command.length && !' \t\n;|&<>'.includes(command[j] as string)) {
-          target += command[j] as string;
-          j += 1;
-        }
-        if (ch === '>' && !operator.includes('&') && target !== '/dev/null') {
-          writesFile = true;
-        }
+        // Swallow the redirect target so it is never read as an argument.
+        while (j < command.length && !' \t\n;|&<>'.includes(command[j] as string)) j += 1;
         i = j;
         break;
       }
@@ -318,11 +307,27 @@ function parse(command: string): ParsedCommand {
     }
   }
   endSegment();
-  return { segments, hasSubstitution, writesFile };
+  return { segments, hasSubstitution };
 }
 
 // ── per-binary rules ─────────────────────────────────────────────────────────
 
+// ── per-binary rules ─────────────────────────────────────────────────────────
+
+/**
+ * Inside the allow-listed binaries the default is AUTO. `orca`, `gh` and
+ * `git` are the orchestrator's working surface, and gating whatever the
+ * classifier did not recognize turned every guessed CLI spelling, every
+ * ordinary `gh` write and every local `git` command into a 🚦 the human had
+ * to answer for nothing. Only the commands below earn a gate: the ones whose
+ * damage nobody can undo from the thread — destroying work that was never
+ * pushed, rewriting published history, merging, or handing the operator's
+ * credentials around. Typing into a worker's terminal is not one of them:
+ * the relay already owns what a send may carry (relay.ts), and a nudge is
+ * undone by the next one. Reversible writes (a commit, a branch, a PR, a
+ * comment) run silently; the review of what a worker produced happens on the
+ * pull request, not at the command line.
+ */
 function classifySegment(tokens: string[]): Verdict {
   const head = tokens[0] as string;
   switch (head) {
@@ -333,7 +338,7 @@ function classifySegment(tokens: string[]): Verdict {
     case 'git':
       return classifyGit(tokens.slice(1));
     case 'rm':
-      return confirm('`rm` deletes files (spec §7: deletions are gated)');
+      return confirm('`rm` deletes files on the machine irreversibly');
     default:
       // Also catches wrappers (sudo/env/bash -c) and VAR=… prefixes: the
       // first word must literally be an allow-listed binary.
@@ -352,34 +357,6 @@ function commandWords(args: string[], count: number): (string | undefined)[] {
   while (words.length < count) words.push(undefined);
   return words;
 }
-
-const ORCA_AUTO: Record<string, Set<string>> = {
-  // Reads plus the full delegation sequence (issue #8: no double ceremony —
-  // the routing gate of #10 already covers inferred delegations). The read
-  // verbs were widened in issue #45 after auditing the live CLI: every
-  // listed action only prints state. `task-show` does not exist in today's
-  // CLI (the real read is spelled `dispatch-show`) — it stays listed because
-  // it is the spelling the live session guessed during the #45 gate spiral
-  // and the issue's acceptance pins it AUTO; running it costs a fast usage
-  // error instead of a 🚦.
-  worktree: new Set(['ps', 'list', 'show', 'current', 'create']),
-  terminal: new Set(['list', 'show', 'read', 'wait']),
-  // `reply` is AUTO for relays carrying a human reply (spec §7). The
-  // "carrying a human reply" half is not checkable from the command string —
-  // the relay coordinator (issue #21) enforces it on the pending_gates
-  // registry: a reply whose --id is not one of the thread's pending gates is
-  // denied there before it runs.
-  orchestration: new Set([
-    'check',
-    'inbox',
-    'task-list',
-    'task-show',
-    'dispatch-show',
-    'task-create',
-    'dispatch',
-    'reply',
-  ]),
-};
 
 /**
  * A `--help` the CLI is guaranteed to honor as the help flag. Presence alone
@@ -402,43 +379,38 @@ function carriesHelp(args: string[]): boolean {
   return false;
 }
 
+/**
+ * True when a long flag appears, or a short cluster carries one of `short` —
+ * so `-fd` is read the way git reads it, not as an opaque token.
+ */
+function carriesFlag(tokens: string[], short: RegExp, long: readonly string[]): boolean {
+  return tokens.some(
+    (token) =>
+      long.includes(token.split('=')[0] as string) ||
+      (/^-[a-zA-Z]+$/.test(token) && short.test(token.slice(1))),
+  );
+}
+
+/** Worktree actions that take a worktree — and its unpushed work — away. */
+const ORCA_WORKTREE_DESTROY = new Set(['delete', 'remove', 'rm', 'archive']);
+
 function classifyOrca(args: string[]): Verdict {
   // Help output mutates nothing (issue #45) — AUTO even on gated or
   // forbidden topics, because the CLI short-circuits on `--help` before
   // validating required flags (verified live: `orca worktree rm --help`
-  // prints usage and exits 0). Checked before every other rule so a help
-  // lookup can never burn a gate.
+  // prints usage and exits 0).
   if (carriesHelp(args)) return auto('`--help` prints usage');
   const [topic, action] = commandWords(args, 2);
-  if (topic === 'help') return auto('`orca help` prints usage');
   if (topic === 'automation' || topic === 'automations') {
     return forbidden('Orca automation management from Slack is out of scope (spec §7)');
   }
-  if (topic === 'repo') {
-    return action === 'list'
-      ? auto('orca read')
-      : forbidden('repo creation/registration from Slack is out of scope (spec §7)');
+  if (topic === 'repo' && action !== undefined && action !== 'list') {
+    return forbidden('repo creation/registration from Slack is out of scope (spec §7)');
   }
-  if (topic === 'worktree' && (action === 'delete' || action === 'remove' || action === 'rm')) {
-    return confirm('worktree deletion');
+  if (topic === 'worktree' && action !== undefined && ORCA_WORKTREE_DESTROY.has(action)) {
+    return confirm('removing a worktree destroys whatever its worker never pushed');
   }
-  if (topic === 'terminal' && action === 'send') {
-    // Spec §7's AUTO list is `terminal list/wait` only: send types arbitrary
-    // input into a worker terminal. The relay coordinator (issue #21) lifts
-    // the one sanctioned case — a send targeting the worker terminal of a
-    // gate this thread relayed — back to AUTO inside canUseTool.
-    return confirm('`orca terminal send` types into a worker terminal');
-  }
-  if (topic === 'orchestration' && (action === 'gate-resolve' || action === 'gate-create')) {
-    // Issue #9: DAG gates are reserved for coordinator DAG decisions; none of
-    // the worker↔human relay goes through them, so the relay path can never
-    // emit one silently.
-    return confirm('DAG gate commands are never part of the worker relay (spec §6)');
-  }
-  if (topic !== undefined && action !== undefined && ORCA_AUTO[topic]?.has(action) === true) {
-    return auto('orca read/delegation/relay');
-  }
-  return confirm('unrecognized orca command — gated rather than trusted');
+  return auto('orca is the delegation surface — reversible by design');
 }
 
 const GH_FORBIDDEN_REPO_ACTIONS = new Set([
@@ -453,74 +425,46 @@ const GH_FORBIDDEN_REPO_ACTIONS = new Set([
   'sync',
 ]);
 
-const GH_READ_ACTIONS = new Set(['view', 'list', 'status', 'diff', 'checks']);
+/** Release actions that publish or unpublish outside GitHub's review flow. */
+const GH_RELEASE_WRITES = new Set(['create', 'delete', 'edit', 'upload', 'delete-asset']);
 
 function classifyGh(args: string[]): Verdict {
   const [topic, action] = commandWords(args, 2);
-  if (topic === 'repo') {
-    if (action !== undefined && GH_FORBIDDEN_REPO_ACTIONS.has(action)) {
-      return forbidden('GitHub repo management from Slack is out of scope (spec §7)');
-    }
-    if (action === 'view' || action === 'list') return auto('gh read');
-    return confirm('unrecognized gh repo command — gated');
+  if (topic === 'repo' && action !== undefined && GH_FORBIDDEN_REPO_ACTIONS.has(action)) {
+    return forbidden('GitHub repo management from Slack is out of scope (spec §7)');
   }
-  if (topic === 'issue' && action === 'create') {
-    // Delegation is issue-linked (#4): creating the target-repo issue is step
-    // zero of the AUTO delegation sequence (spec §7) — the mock shows no 🚦
-    // between the routing gate's "go" and the delegation card.
-    return auto('issue-linked delegation (spec §5)');
+  if (topic === 'pr' && action === 'merge') {
+    return confirm('`gh pr merge` lands code on the default branch');
   }
-  if (topic === 'status' || topic === 'search') {
-    return auto('gh read');
+  if (topic === 'release' && action !== undefined && GH_RELEASE_WRITES.has(action)) {
+    return confirm('a release ships outside the repo — never on the orchestrator\'s own call');
   }
-  if (action !== undefined && GH_READ_ACTIONS.has(action)) {
-    return auto('gh read');
+  if (topic === 'issue' && action === 'delete') {
+    return confirm('deleting an issue is irreversible');
   }
-  return confirm('gh write operation — gated');
+  if (topic === 'auth') {
+    return confirm('`gh auth` reads or rewrites the operator\'s GitHub credentials');
+  }
+  if (topic === 'api' && mutatesOverApi(args)) {
+    return confirm('`gh api` with a write method can do anything the token can');
+  }
+  return auto('gh reads and reversible writes — the PR is the review surface');
+}
+
+/**
+ * A `gh api` call that writes: an explicit non-read `--method`, or the
+ * fields that make gh default to POST. A read stays AUTO like any other.
+ */
+function mutatesOverApi(args: string[]): boolean {
+  const method = flagValue(args, '-X') ?? flagValue(args, '--method');
+  if (method !== undefined) return !['GET', 'HEAD'].includes(method.toUpperCase());
+  return args.some((token) =>
+    ['-f', '-F', '--field', '--raw-field', '--input'].includes(token.split('=')[0] as string),
+  );
 }
 
 /** git global flags that consume the next token when not written as --x=y. */
 const GIT_VALUE_GLOBALS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path']);
-
-const GIT_READ_SUBCOMMANDS = new Set([
-  'status',
-  'log',
-  'diff',
-  'show',
-  'fetch',
-  'blame',
-  'shortlog',
-  'describe',
-  'rev-parse',
-  'rev-list',
-  'ls-files',
-  'ls-remote',
-  'ls-tree',
-  'cat-file',
-  'grep',
-  'merge-base',
-  'for-each-ref',
-  'name-rev',
-  'check-ignore',
-  'version',
-  'help',
-]);
-
-/**
- * Subcommands that are reads only in specific first-argument forms — bare
- * `git stash` pushes, `git stash list` reads. `bareIsRead` says whether the
- * argument-less form is one of the read forms.
- */
-const GIT_READ_FORMS: Record<string, { forms: Set<string>; bareIsRead: boolean }> = {
-  remote: { forms: new Set(['show', 'get-url', '-v']), bareIsRead: true },
-  stash: { forms: new Set(['list', 'show']), bareIsRead: false },
-  worktree: { forms: new Set(['list']), bareIsRead: false },
-  config: {
-    forms: new Set(['--get', '--get-all', '--get-regexp', '--list', '-l']),
-    bareIsRead: false,
-  },
-  reflog: { forms: new Set(['show']), bareIsRead: true },
-};
 
 function classifyGit(args: string[]): Verdict {
   let i = 0;
@@ -529,56 +473,57 @@ function classifyGit(args: string[]): Verdict {
   }
   const sub = args[i];
   const rest = args.slice(i + 1);
-
   if (sub === undefined) return auto('bare git prints usage');
-  if (GIT_READ_SUBCOMMANDS.has(sub)) return auto('git read');
-
-  const readForms = GIT_READ_FORMS[sub];
-  if (readForms !== undefined) {
-    const first = rest[0];
-    const isRead = first === undefined ? readForms.bareIsRead : readForms.forms.has(first);
-    return isRead ? auto('git read') : confirm(`\`git ${sub}\` mutation`);
-  }
 
   switch (sub) {
     case 'push':
-      return confirm('`git push` publishes commits (spec §7)');
-    case 'merge':
-      return confirm('`git merge` (spec §7)');
-    case 'pull':
-      return confirm('`git pull` runs a merge');
+      return classifyPush(rest);
+    case 'reset':
+      return rest.includes('--hard')
+        ? confirm('`git reset --hard` throws away work that was never committed')
+        : auto('git reset moves a ref, the work stays');
+    case 'clean':
+      return carriesFlag(rest, /f/, ['--force'])
+        ? confirm('`git clean -f` deletes untracked files outright')
+        : auto('git clean without --force only lists');
     case 'branch':
-      return classifyRefListing(rest, 'branch');
+      return carriesFlag(rest, /d/i, ['--delete'])
+        ? confirm('branch deletion')
+        : auto('git branch');
     case 'tag':
-      return classifyRefListing(rest, 'tag');
+      return carriesFlag(rest, /d/, ['--delete'])
+        ? confirm('tag deletion')
+        : auto('git tag');
+    case 'worktree':
+      return rest[0] === 'remove' || rest[0] === 'prune'
+        ? confirm('removing a worktree destroys whatever it holds uncommitted')
+        : auto('git worktree');
+    case 'stash':
+      return rest[0] === 'drop' || rest[0] === 'clear'
+        ? confirm('a dropped stash is unrecoverable')
+        : auto('git stash');
+    case 'filter-branch':
+      return confirm('`git filter-branch` rewrites history irreversibly');
     default:
-      return confirm(`\`git ${sub}\` mutates state — gated`);
+      // Commits, checkouts, merges, rebases: local, reversible, and the
+      // orchestrator barely runs them — gating them bought nothing.
+      return auto('git works inside a worktree and stays undoable');
   }
 }
 
-/**
- * `git branch` / `git tag` are reads only in their bare listing forms; a
- * delete/move/force flag — even buried in a short-option cluster like
- * `-avD` — or any positional argument flips them into gated writes.
- */
-function classifyRefListing(rest: string[], kind: 'branch' | 'tag'): Verdict {
-  // -a/-s are harmless on branch (--all) but writes on tag (--annotate/--sign).
-  const shortMutating = kind === 'branch' ? /[mMcCf]/ : /[fasu]/;
-  const longMutating =
-    kind === 'branch'
-      ? ['--move', '--copy', '--force', '--set-upstream-to', '--unset-upstream', '--edit-description']
-      : ['--force', '--annotate', '--sign', '--local-user'];
-  const deletes = rest.some(
+/** Force, delete and mirror pushes overwrite what is already published. */
+function classifyPush(rest: string[]): Verdict {
+  const destructive = rest.some(
     (token) =>
-      token === '--delete' || (/^-[a-zA-Z]+$/.test(token) && /[dD]/.test(token.slice(1))),
+      token.startsWith('--force') ||
+      token === '--delete' ||
+      token === '--mirror' ||
+      token === '--prune' ||
+      // A leading `+` on a refspec is the force marker.
+      token.startsWith('+') ||
+      (/^-[a-zA-Z]+$/.test(token) && /[fd]/.test(token.slice(1))),
   );
-  if (deletes) return confirm(`${kind} deletion (spec §7)`);
-  const mutates = rest.some(
-    (token) =>
-      longMutating.includes(token.split('=')[0] as string) ||
-      (/^-[a-zA-Z]+$/.test(token) && shortMutating.test(token.slice(1))),
-  );
-  const positional = rest.some((token) => !token.startsWith('-'));
-  if (mutates || positional) return confirm(`${kind} creation/mutation`);
-  return auto('git read');
+  return destructive
+    ? confirm('a force/delete push overwrites history other people already have')
+    : auto('`git push` publishes a branch — reviewable on the PR, not at the gate');
 }

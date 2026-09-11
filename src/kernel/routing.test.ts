@@ -211,7 +211,7 @@ describe('routingInstructions', () => {
   });
 
   it('defines Question and Change with fixed briefs and continuity', () => {
-    expect(prompt).toContain('in doubt, Question');
+    expect(prompt).toContain('In doubt, Change');
     expect(prompt).toContain('Question brief');
     expect(prompt).toContain('no file edits, commits, pushes or PRs');
     expect(prompt).toContain('Change brief');
@@ -222,6 +222,13 @@ describe('routingInstructions', () => {
     expect(prompt).toContain('Question answer VERBATIM');
     expect(prompt).toContain('Never merge');
     expect(prompt).not.toContain('gh issue create');
+  });
+
+  it('never stages a change behind a human go — the PR is the proposal (ADR 0008)', () => {
+    expect(prompt).toContain('the pull request IS the proposal');
+    expect(prompt).toContain('Never lay out what you intend to change and wait for a go');
+    expect(prompt).toContain('do not stop to have a split approved');
+    expect(prompt).not.toContain('report a proposed split before starting');
   });
 
   it('states the agent precedence with claude as the global default', () => {

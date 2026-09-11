@@ -27,13 +27,6 @@ import type { Logger } from '../kernel/logger.ts';
  *   bare option number is rewritten to that option's exact text — on the
  *   reply body and on the gate-answer `terminal send` fallback alike (issue
  *   #50): fidelity is absolute, the worker receives the option verbatim.
- * - `sanctionsSend` (from canUseTool, before the tier verdict): `terminal
- *   send` is CONFIRM by classification, but a send targeting the worker
- *   terminal of a gate this thread relayed carries a human answer — the
- *   reply-failure fallback or a best-effort late correction (issue #9) — so
- *   it runs AUTO, without the 🚦 ceremony. A pending watchdog stall alert
- *   (issue #22) vouches the same way: a stalled worker has no `ask` to
- *   reply to, so the sanctioned send IS its answer path.
  * - `observe` (from the PostToolUse hook): a reply (or fallback send) that
  *   actually succeeded flips the gate — or the stall alert the send just
  *   nudged — to `answered` and settles the root reaction — ❓/🚨 while
@@ -51,7 +44,6 @@ export interface GateRelayOptions {
 
 /** The slice canUseTool consults before a command runs (issue #21). */
 export interface RelayPolicy {
-  sanctionsSend(threadTs: string, channelId: string, command: string): boolean;
   prepare(threadTs: string, channelId: string, command: string): PrepareVerdict;
 }
 
@@ -114,42 +106,6 @@ export class GateRelay implements SessionRelay {
   }
 
   // ── prepare: the canUseTool seam ─────────────────────────────────────────
-
-  /**
-   * True for the sanctioned `terminal send`: a single-segment, --json send
-   * to a worker this thread's registry vouches for RIGHT NOW — the worker
-   * still has a pending gate here (the reply-failure fallback), a pending
-   * watchdog stall alert (issue #22: the nudge IS the answer path — there
-   * is no `ask` to reply to), or the thread's last reply attempt named one
-   * of its gates (the late correction the denial pointed at). Anything else
-   * keeps its CONFIRM tier: a worker whose gates and stalls are long
-   * answered must not stay a silent AUTO target forever.
-   */
-  sanctionsSend(threadTs: string, channelId: string, command: string): boolean {
-    const segments = commandSegments(command);
-    if (segments.length !== 1) return false;
-    const tokens = segments[0] as string[];
-    if (!isOrcaCommand(tokens, 'terminal', 'send')) return false;
-    if (!hasFlag(tokens, '--json')) return false;
-    const handle = flagValue(tokens, '--terminal');
-    if (handle === undefined) return false;
-    const last = this.lastReply.get(threadKey(threadTs, channelId));
-    if (last !== undefined && this.store.getGate(last.msgId)?.workerHandle === handle) {
-      return true;
-    }
-    return (
-      this.store
-        .listPendingGates(threadTs, channelId)
-        .some((gate) => gate.workerHandle === handle) ||
-      // The stall nudge must land as an ANSWER: keystrokes plus enter (spec
-      // §6) — a send without --enter would leave the prompt sitting, so it
-      // keeps its 🚦 instead of riding the stall's sanction.
-      (hasFlag(tokens, '--enter') &&
-        this.store
-          .listPendingStalls(threadTs, channelId)
-          .some((stall) => stall.workerHandle === handle))
-    );
-  }
 
   /** Registry enforcement on `orchestration reply` — non-reply commands pass. */
   prepare(threadTs: string, channelId: string, command: string): PrepareVerdict {
@@ -269,8 +225,8 @@ export class GateRelay implements SessionRelay {
     segments: string[][],
   ): PrepareVerdict {
     const untouched: PrepareVerdict = { action: 'proceed', command };
-    // Only a lone send can be rebuilt from tokens — a chained one keeps its
-    // CONFIRM tier anyway (sanctionsSend refuses multi-segment commands).
+    // Only a lone send can be rebuilt from tokens: a chained one has no
+    // single --text to rewrite, so it passes through as the session wrote it.
     if (segments.length !== 1) return untouched;
     let tokens = segments[0] as string[];
     if (!isOrcaCommand(tokens, 'terminal', 'send')) return untouched;
