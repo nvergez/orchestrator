@@ -1,6 +1,5 @@
 import type { Logger } from '../kernel/logger.ts';
 import type { SessionRow, SessionStore } from './db.ts';
-import { DAY_MS } from '../kernel/config.ts';
 import { crossedThresholds } from './cost.ts';
 import {
   CLOSED_THREAD_LINE,
@@ -119,7 +118,7 @@ export interface SessionManagerOptions {
   onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
   /** Downloads are activity too: never auto-close while preparing an input. */
   isPreparingTurn: (threadTs: string, channelId: string) => boolean;
-  /** Runs after the closing summary, for explicit and dormant closes alike. */
+  /** Runs on close, for explicit and dormant closes alike. */
   onClose: (threadTs: string, channelId: string) => Promise<void>;
   logger: Logger;
 }
@@ -242,14 +241,14 @@ export class SessionManager {
 
   /**
    * The dormancy sweep (spec §3): auto-close open sessions past the
-   * configured span. Anything showing signs of life right now — a live
-   * process, a running turn, queued messages — is skipped: last_activity_at
-   * only moves when a turn completes, so a first-turn-after-a-week must not
-   * be closed under the user's feet.
+   * configured span, silently — no 🔚 summary. Anything showing signs of life
+   * right now — a live process, a running turn, queued messages — is skipped:
+   * last_activity_at only moves when a turn completes, so a
+   * first-turn-after-a-week must not be closed under the user's feet.
    */
   async sweepDormant(): Promise<number> {
     // Re-entry guard: a sweep slower than its interval (Slack hiccups) must
-    // not overlap the next one and double-post 🔚 summaries.
+    // not overlap the next one and clean the same threads twice.
     if (this.sweeping) return 0;
     this.sweeping = true;
     try {
@@ -270,10 +269,10 @@ export class SessionManager {
           { threadTs: row.threadTs, lastActivityAt: row.lastActivityAt },
           'auto-closed dormant session',
         );
-        // The summary names the *actual* dormancy — a session swept after a
-        // long daemon outage says so, not the configured minimum.
-        const dormantDays = Math.round((Date.now() - Date.parse(row.lastActivityAt)) / DAY_MS);
-        await this.postClosingSummary(row, dormantDays);
+        // Silent by design: a dormant thread is closed for housekeeping, and a
+        // 🔚 summary posted days after the last human word only re-pings the
+        // thread. The explicit `close` still summarises.
+        await this.cleanupThread(row);
       }
       return closed;
     } finally {
@@ -310,7 +309,7 @@ export class SessionManager {
 
   /** Posts the 🔚 summary from the ledger row; a failed outcome read or post
    * never blocks the close. */
-  private async postClosingSummary(row: SessionRow, dormantDays?: number): Promise<void> {
+  private async postClosingSummary(row: SessionRow): Promise<void> {
     try {
       await this.notify(
         row.threadTs,
@@ -319,7 +318,6 @@ export class SessionManager {
           delegations: await this.listDelegations(row.threadTs, row.channelId),
           costUsd: row.costUsdTotal,
           turnCount: row.turnCount,
-          dormantDays,
         }),
       );
     } catch (error) {
@@ -328,6 +326,11 @@ export class SessionManager {
         '🔚 closing summary post failed',
       );
     }
+    await this.cleanupThread(row);
+  }
+
+  /** Thread-scoped cleanup (attachments today); never fails a close. */
+  private async cleanupThread(row: SessionRow): Promise<void> {
     await this.onClose(row.threadTs, row.channelId).catch((err: unknown) => {
       this.logger.warn({ err, threadTs: row.threadTs }, 'thread cleanup failed');
     });

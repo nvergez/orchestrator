@@ -168,17 +168,6 @@ describe('closingSummary', () => {
     expect(summary).toContain('· 1 turn\n');
   });
 
-  it('names the dormancy span when the auto-close sweep is the closer', () => {
-    const summary = closingSummary({
-      delegations: [],
-      costUsd: 2.1,
-      turnCount: 4,
-      dormantDays: 7,
-    });
-
-    expect(summary).toContain('🔚 Session closed — dormant for 7 days.');
-  });
-
   it('always shows the cost with two decimals', () => {
     expect(closingSummary({ delegations: [], costUsd: 5, turnCount: 2 })).toContain('$5.00');
   });

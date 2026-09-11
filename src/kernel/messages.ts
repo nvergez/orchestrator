@@ -371,24 +371,18 @@ function closingDelegationLine(delegation: ClosingDelegation): string {
 
 /**
  * "Brief moments" — the 🔚 closing summary, posted by an explicit
- * `@orchestrator close` or by the dormancy auto-close (which names its
- * reason). Each of the thread's delegations gets its own line with the final
- * outcome and issue link (issue #51, from the #19 ledger) — the thread's
- * durable at-a-glance record; the cost/turn line stays the mock's verbatim.
+ * `@orchestrator close` only: the dormancy sweep closes silently. Each of the
+ * thread's delegations gets its own line with the final outcome and issue link
+ * (issue #51, from the #19 ledger) — the thread's durable at-a-glance record;
+ * the cost/turn line stays the mock's verbatim.
  */
 export function closingSummary(opts: {
   delegations: ClosingDelegation[];
   costUsd: number;
   turnCount: number;
-  /** Set by the auto-close sweep — says why the session closed on its own. */
-  dormantDays?: number;
 }): string {
-  const header =
-    opts.dormantDays === undefined
-      ? '🔚 Session closed.'
-      : `🔚 Session closed — dormant for ${formatDays(opts.dormantDays)}.`;
   return [
-    header,
+    '🔚 Session closed.',
     ...(opts.delegations.length === 0
       ? ['• no delegations']
       : opts.delegations.map(closingDelegationLine)),
@@ -397,7 +391,3 @@ export function closingSummary(opts: {
   ].join('\n');
 }
 
-function formatDays(days: number): string {
-  const shown = Number.isInteger(days) ? String(days) : days.toFixed(1);
-  return `${shown} day${days === 1 ? '' : 's'}`;
-}
