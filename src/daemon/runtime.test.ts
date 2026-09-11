@@ -577,7 +577,7 @@ describe('Slack image attachments — runtime composition', () => {
     expect(h.imageTurns[0]?.images).toEqual([]);
   });
 
-  it('removes attachments after the seven-day auto-close summary', async () => {
+  it('removes attachments on the seven-day auto-close, without posting', async () => {
     const h = makeRuntime();
     const dir = join(h.stateDir, 'attachments', CHANNEL, THREAD);
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -587,7 +587,7 @@ describe('Slack image attachments — runtime composition', () => {
     mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'F.png'), 'png');
     expect(await h.runtime.sessions.sweepDormant()).toBe(1);
     expect(existsSync(dir)).toBe(false);
-    expect(h.surface.posts[0]?.text).toContain('🔚');
+    expect(h.surface.posts).toEqual([]);
   });
 
   it('never downloads a redelivered root image after the thread is closed', async () => {

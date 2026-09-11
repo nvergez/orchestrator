@@ -896,19 +896,20 @@ describe('SessionManager auto-close sweep (spec §3)', () => {
     vi.useRealTimers();
   });
 
-  it('sessions dormant past the span auto-close with the dormancy 🔚 summary', async () => {
+  it('sessions dormant past the span close silently — no 🔚 summary', async () => {
     const { manager, store, notices } = makeHarness(chattyScript('sess-1'), {
       autoCloseMs: 7 * DAY,
     });
     manager.open(THREAD, CHANNEL, USER, 'hello');
     await flush();
+    const before = notices.length;
 
     await vi.advanceTimersByTimeAsync(7 * DAY + 60_000);
     const closed = await manager.sweepDormant();
 
     expect(closed).toBe(1);
     expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
-    expect(notices.at(-1)?.text).toContain('🔚 Session closed — dormant for 7 days.');
+    expect(notices.slice(before)).toEqual([]);
     expect(manager.liveProcessCount()).toBe(0); // the warm TTL reaped it long ago
   });
 
@@ -960,17 +961,6 @@ describe('SessionManager auto-close sweep (spec §3)', () => {
 
     expect(await manager.sweepDormant()).toBe(0);
     expect(store.get(THREAD, CHANNEL)?.status).toBe('open');
-  });
-
-  it('the dormancy summary names the actual span, not the configured minimum', async () => {
-    const { manager, notices } = makeHarness(chattyScript('sess-1'), { autoCloseMs: 7 * DAY });
-    manager.open(THREAD, CHANNEL, USER, 'hello');
-    await flush();
-
-    await vi.advanceTimersByTimeAsync(30 * DAY); // e.g. the daemon was down a while
-    await manager.sweepDormant();
-
-    expect(notices.at(-1)?.text).toContain('🔚 Session closed — dormant for 30 days.');
   });
 
   it('a reply after auto-close gets the fixed line — dormancy closes are final too', async () => {
