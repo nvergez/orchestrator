@@ -83,6 +83,8 @@ export interface RuntimeOptions {
   /** Repeats a task forever; the default is an unref'd `setInterval` so the
    * sweeps never hold the process open. */
   every?: (task: () => void, intervalMs: number) => void;
+  /** Injectable human-message collection window for deterministic tests. */
+  messageBatchWindowMs?: number;
 }
 
 /** The wired graph, plus the boot sequence and sweep arming as callable steps. */
@@ -198,6 +200,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
     costThresholdsUsd: config.costWarnThresholdsUsd,
     warmTtlMs: config.warmTtlMs,
     liveSessionCap: config.liveSessionCap,
+    messageBatchWindowMs: options.messageBatchWindowMs,
     autoCloseAfterMs: config.autoCloseAfterMs,
     // The 🔚 summary's ledger (issue #51): every delegation with its outcome,
     // issue links resolved off one registry read — folder repos stay plain.

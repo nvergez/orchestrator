@@ -59,13 +59,13 @@ export interface ReplyDecorator {
 
 const REPLY_LOG_LINES: Record<ReplyResult, string> = {
   turn: 'thread reply — resuming session',
-  closed: 'reply in closed thread — fixed line posted',
+  closed: 'reply in closed thread — reminder handled',
   unregistered: 'reply in unregistered thread ignored',
 };
 
 const CLOSE_LOG_LINES: Record<CloseResult, string> = {
   closing: 'close command — closing session',
-  closed: 'close in already-closed thread — fixed line posted',
+  closed: 'close in already-closed thread — reminder handled',
   unregistered: 'close in unregistered thread ignored',
 };
 
@@ -93,10 +93,14 @@ export function registerHandlers(
     const decision = classifyEvent(incoming, guard);
 
     const prepare = async (text: string, userId: string, files = incoming.files, context?: ThreadContext): Promise<SessionTurn> => {
-      // One pass over the finished text covers all three places an id shows
-      // up: the instruction, the quoted thread context, the image labels.
-      const named = async (turn: SessionTurn): Promise<SessionTurn> =>
-        names ? { ...turn, text: await names.render(turn.text) } : turn;
+      // Authorship and addressing survive batching: people may be talking to
+      // each other, and their messages must not look like one unnamed user.
+      // Resolve the author in the same pass as mentions, context and images.
+      const named = async (turn: SessionTurn): Promise<SessionTurn> => {
+        if (turn.text.trim() === '' && turn.images.length === 0) return turn;
+        const text = `[Slack message from <@${userId}>; bot explicitly mentioned: ${incoming.type === 'app_mention' ? 'yes' : 'no'}]\n${turn.text}`;
+        return { ...turn, text: names ? await names.render(text) : text };
+      };
       if (!attachments) return named({ text: renderThreadContext(context) + text, images: [] });
       const threadTs = incoming.thread_ts ?? incoming.ts;
       const channelId = incoming.channel!;

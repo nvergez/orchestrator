@@ -69,8 +69,14 @@ export type VoiceFactory = (threadTs: string, channelId: string) => VoiceHandle;
 /** Posts a standalone message to a thread — 💸 warnings "post the event" (spec §8). */
 export type Notifier = (threadTs: string, channelId: string, text: string) => Promise<void>;
 
-/** A thread's FIFO carries turns and, terminally, the close command (spec §3). */
-type QueueItem = { kind: 'turn'; turn: SessionTurn } | { kind: 'close' };
+/** Human bursts can share a turn; events and close remain FIFO boundaries. */
+type TurnItem = { kind: 'turn'; turn: SessionTurn; source: 'human' | 'event'; receivedAt: number };
+type QueueItem = TurnItem | { kind: 'close' };
+
+const MAX_BATCH_MESSAGES = 20;
+const MAX_BATCH_TEXT = 24_000;
+const MAX_BATCH_IMAGES = 8;
+const CLOSED_REMINDER_INTERVAL_MS = 60_000;
 
 interface ThreadState {
   threadTs: string;
@@ -97,6 +103,8 @@ export interface SessionManagerOptions {
   warmTtlMs: number;
   /** Global cap on live sessions — dormant ones don't count (spec §3, default 5). */
   liveSessionCap: number;
+  /** Short, bounded collection window for human messages; default 750 ms. */
+  messageBatchWindowMs?: number;
   /** Dormancy span after which `sweepDormant` closes a session (spec §3, 7 days). */
   autoCloseAfterMs: number;
   /** The thread's delegations from the #19 ledger, outcomes and issue links
@@ -124,6 +132,7 @@ export class SessionManager {
   private readonly costThresholdsUsd: number[];
   private readonly warmTtlMs: number;
   private readonly liveSessionCap: number;
+  private readonly messageBatchWindowMs: number;
   private readonly autoCloseAfterMs: number;
   private readonly listDelegations: (
     threadTs: string,
@@ -135,6 +144,7 @@ export class SessionManager {
   private readonly onClose: SessionManagerOptions['onClose'];
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
+  private readonly closedReminders = new Map<string, NodeJS.Timeout>();
   /**
    * Live sessions = threads holding a subprocess. `pendingSpawns` reserves
    * the async gap between winning a slot and the spawn landing, so a burst
@@ -153,6 +163,7 @@ export class SessionManager {
     this.costThresholdsUsd = options.costThresholdsUsd;
     this.warmTtlMs = options.warmTtlMs;
     this.liveSessionCap = options.liveSessionCap;
+    this.messageBatchWindowMs = options.messageBatchWindowMs ?? 750;
     this.autoCloseAfterMs = options.autoCloseAfterMs;
     this.listDelegations = options.listDelegations;
     this.onTurnStart = options.onTurnStart;
@@ -177,7 +188,7 @@ export class SessionManager {
       this.postClosedLine(threadTs, channelId);
       return;
     }
-    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn) });
+    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn), source: 'human', receivedAt: Date.now() });
   }
 
   /**
@@ -192,7 +203,9 @@ export class SessionManager {
       this.postClosedLine(threadTs, channelId);
       return 'closed';
     }
-    if (asTurn(turn).text.trim() !== '' || asTurn(turn).images.length > 0) this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn) });
+    if (asTurn(turn).text.trim() !== '' || asTurn(turn).images.length > 0) {
+      this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(turn), source: 'human', receivedAt: Date.now() });
+    }
     return 'turn';
   }
 
@@ -207,7 +220,7 @@ export class SessionManager {
   wake(threadTs: string, channelId: string, text: string): 'turn' | 'skipped' {
     const row = this.store.get(threadTs, channelId);
     if (row === undefined || row.status === 'closed') return 'skipped';
-    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(text) });
+    this.enqueue(threadTs, channelId, { kind: 'turn', turn: asTurn(text), source: 'event', receivedAt: Date.now() });
     return 'turn';
   }
 
@@ -279,7 +292,18 @@ export class SessionManager {
 
   /** Closed is final (spec §3): the fixed line, no resume, no state change. */
   private postClosedLine(threadTs: string, channelId: string): void {
+    const key = threadKey(threadTs, channelId);
+    if (this.closedReminders.has(key)) return;
+    // Reserve before the async post so simultaneous replies cannot each
+    // announce the same closure. Expire entries even if no one replies again.
+    const timer = setTimeout(() => this.closedReminders.delete(key), CLOSED_REMINDER_INTERVAL_MS);
+    timer.unref();
+    this.closedReminders.set(key, timer);
     this.notify(threadTs, channelId, CLOSED_THREAD_LINE).catch((error: unknown) => {
+      if (this.closedReminders.get(key) === timer) {
+        clearTimeout(timer);
+        this.closedReminders.delete(key);
+      }
       this.logger.warn({ err: error, threadTs }, 'closed-thread line post failed');
     });
   }
@@ -335,12 +359,12 @@ export class SessionManager {
     }
   }
 
-  /** FIFO per thread (spec §3): strictly one turn in flight, queue the rest. */
+  /** FIFO per thread: one turn in flight, consecutive human messages batched. */
   private async drain(state: ThreadState): Promise<void> {
     try {
       for (let item = state.queue.shift(); item !== undefined; item = state.queue.shift()) {
         if (item.kind === 'close') await this.runClose(state);
-        else await this.runOneTurn(state, item.turn);
+        else await this.runOneTurn(state, item);
       }
     } finally {
       state.running = false;
@@ -450,7 +474,7 @@ export class SessionManager {
     }
   }
 
-  private async runOneTurn(state: ThreadState, turn: SessionTurn): Promise<void> {
+  private async runOneTurn(state: ThreadState, item: TurnItem): Promise<void> {
     // A turn must be observable from start to finish (issue #39): a warm turn
     // used to emit nothing until completion, making "running" and "never
     // started" indistinguishable in the logs.
@@ -463,7 +487,7 @@ export class SessionManager {
     // a message queued at the cap still acks within seconds of arriving.
     await this.hookSafe(this.onTurnStart, state, 'turn-start ack failed');
     try {
-      await this.runTurnBody(state, turn, turnStartedAt);
+      await this.runTurnBody(state, item, turnStartedAt);
     } finally {
       // Every outcome settles the root (issue #49): a pure Q&A turn takes
       // its 👀 back off; a turn that left work in flight leaves the root to
@@ -472,7 +496,7 @@ export class SessionManager {
     }
   }
 
-  private async runTurnBody(state: ThreadState, turn: SessionTurn, turnStartedAt: number): Promise<void> {
+  private async runTurnBody(state: ThreadState, item: TurnItem, turnStartedAt: number): Promise<void> {
     if (state.proc === null) {
       await this.acquireSlot(state);
       const row = this.store.get(state.threadTs, state.channelId);
@@ -494,6 +518,14 @@ export class SessionManager {
       }
     }
 
+    // Collect after the slot wait and ack, right before input reaches Claude:
+    // messages received during those waits must be part of the same decision.
+    // The deadline is fixed at arrival, so continuous chatter cannot starve it.
+    if (item.source === 'human') {
+      const waitMs = item.receivedAt + this.messageBatchWindowMs - Date.now();
+      if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
+    const turn = this.collectTurn(state, item);
     const voice = this.voiceFor(state.threadTs, state.channelId);
     let outcome: TurnOutcome;
     try {
@@ -541,6 +573,30 @@ export class SessionManager {
     await voice.finalize();
     await this.dropProcess(state);
     this.wakeWaiters();
+  }
+
+  private collectTurn(state: ThreadState, first: TurnItem): SessionTurn {
+    if (first.source === 'event') return first.turn;
+    const turns = [first.turn];
+    let textLength = first.turn.text.length;
+    let imageCount = first.turn.images.length;
+    while (turns.length < MAX_BATCH_MESSAGES) {
+      const next = state.queue[0];
+      if (next?.kind !== 'turn' || next.source !== 'human') break;
+      if (textLength + next.turn.text.length > MAX_BATCH_TEXT ||
+          imageCount + next.turn.images.length > MAX_BATCH_IMAGES) break;
+      state.queue.shift();
+      turns.push(next.turn);
+      textLength += next.turn.text.length;
+      imageCount += next.turn.images.length;
+    }
+    if (turns.length === 1) return first.turn;
+    this.logger.info({ threadTs: state.threadTs, channelId: state.channelId, messages: turns.length }, 'human messages batched');
+    return {
+      text: '[Consecutive Slack messages, oldest first. Read the whole batch before acting; later clarifications can revise earlier requests. Respond once to the current request, and stay silent if this is only conversation between people.]\n\n' +
+        turns.map((turn, index) => `[Message ${index + 1}]\n${turn.text}`).join('\n\n'),
+      images: turns.flatMap((turn) => turn.images),
+    };
   }
 
   /** Runs a turn-lifecycle hook; reactions are ambient state — a failing
