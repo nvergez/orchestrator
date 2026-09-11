@@ -23,6 +23,8 @@ const ROOT_TS = '1751970005.000500';
 const USER = 'U0ALLOWED';
 const BOT = 'U0BOT';
 const OTHER = 'U0STRANGER';
+const authored = (text: string, mentioned = false) =>
+  `[Slack message from <@${USER}>; bot explicitly mentioned: ${mentioned ? 'yes' : 'no'}]\n${text}`;
 
 const CHANNEL_B = 'C0SECOND456';
 
@@ -150,6 +152,15 @@ const threadReply = (text: string, user: string = USER): IncomingEvent => ({
 });
 
 describe('registerHandlers — gate-eats-reply', () => {
+  it('identifies who spoke and whether they addressed the bot', async () => {
+    const { app, sessions } = makeHarness();
+    await app.emit('message', threadReply('<@U0COLLEAGUE> can you stop it?'));
+    await app.emit('app_mention', { ...threadReply('<@U0BOT> check the status'), type: 'app_mention' });
+    expect(sessions.replies[0]?.text).toContain('[Slack message from <@U0ALLOWED>; bot explicitly mentioned: no]');
+    expect(sessions.replies[0]?.text).toContain('<@U0COLLEAGUE> can you stop it?');
+    expect(sessions.replies[1]?.text).toContain('[Slack message from <@U0ALLOWED>; bot explicitly mentioned: yes]');
+  });
+
   it('a pending 🚦 gate consumes the thread reply before it becomes a session turn', async () => {
     const { app, sessions, gates } = makeHarness();
     const verdict = gates.request(THREAD, CHANNEL, '🚦 `git push` — go?');
@@ -195,11 +206,11 @@ describe('registerHandlers — gate-eats-reply', () => {
     expect(text.endsWith('use app/ please')).toBe(true);
   });
 
-  it('a plain reply in a thread with no relayed gates passes through untouched', async () => {
+  it('a plain reply preserves its words with author context and no gate decoration', async () => {
     const { app, sessions } = makeHarness();
     await app.emit('message', threadReply('what is the status?'));
     expect(sessions.replies).toEqual([
-      { threadTs: THREAD, channelId: CHANNEL, text: 'what is the status?' },
+      { threadTs: THREAD, channelId: CHANNEL, text: authored('what is the status?') },
     ]);
   });
 });
@@ -238,14 +249,14 @@ describe('registerHandlers — routing', () => {
     expect(sessions.opened).toHaveLength(1);
     expect(sessions.opened[0]?.text).toContain('first page');
     expect(sessions.opened[0]?.text).toContain('second page');
-    expect(sessions.replies.at(-1)?.text).toBe('more detail');
+    expect(sessions.replies.at(-1)?.text).toBe(authored('more detail', true));
   });
 
   it('names the people a turn mentions, in the instruction and in the quoted context alike', async () => {
     // Without this the session only ever sees `<@U0STRANGER>` and answers
     // with the raw id, which nobody reading the thread can place.
     const names: MentionNames = {
-      render: (text) => Promise.resolve(text.replaceAll(`<@${OTHER}>`, '@Alexis')),
+      render: (text) => Promise.resolve(text.replaceAll(`<@${OTHER}>`, '@Alexis').replaceAll(`<@${USER}>`, '@Nicolas')),
     };
     const { app, sessions } = makeHarness(names);
     sessions.replyResult = 'unregistered';
@@ -254,6 +265,7 @@ describe('registerHandlers — routing', () => {
     await app.emit('app_mention', { ...threadReply(`<@${BOT}> what did <@${OTHER}> want?`), type: 'app_mention' });
 
     const text = sessions.opened[0]!.text;
+    expect(text).toContain('[Slack message from @Nicolas; bot explicitly mentioned: yes]');
     expect(text).toContain('ask @Alexis about retries');
     expect(text).toContain('what did @Alexis want?');
     expect(text).not.toContain(OTHER);
@@ -272,7 +284,7 @@ describe('registerHandlers — routing', () => {
     sessions.replyResult = 'unregistered';
     app.readError = new Error('ratelimited');
     await app.emit('app_mention', { ...threadReply(`<@${BOT}>`), type: 'app_mention' });
-    expect(sessions.opened).toEqual([{ threadTs: THREAD, channelId: CHANNEL, rootUser: USER, text: 'Handle this thread.' }]);
+    expect(sessions.opened).toEqual([{ threadTs: THREAD, channelId: CHANNEL, rootUser: USER, text: authored('Handle this thread.', true) }]);
     expect(app.posts[0]?.text).toContain('Earlier messages could not be read');
   });
 
@@ -290,7 +302,7 @@ describe('registerHandlers — routing', () => {
     await app.emit('app_mention', { ...threadReply(`<@${BOT}> explain`), type: 'app_mention' });
     expect(app.reads).toBe(0);
     expect(sessions.opened).toEqual([]);
-    expect(sessions.replies[0]?.text).toBe('explain');
+    expect(sessions.replies[0]?.text).toBe(result === 'turn' ? authored('explain', true) : 'explain');
   });
 
   it('keeps recent thread context when older messages exceed the cap', async () => {
@@ -337,7 +349,7 @@ describe('registerHandlers — routing', () => {
       text: `<@${BOT}> deploy the csv fix`,
     });
     expect(sessions.opened).toEqual([
-      { threadTs: ROOT_TS, channelId: CHANNEL, rootUser: USER, text: 'deploy the csv fix' },
+      { threadTs: ROOT_TS, channelId: CHANNEL, rootUser: USER, text: authored('deploy the csv fix', true) },
     ]);
   });
 
@@ -386,12 +398,12 @@ describe('registerHandlers — routing', () => {
     await app.emit('message', { ...threadReply('progress?'), thread_ts: ROOT_TS, channel: CHANNEL_B });
 
     expect(sessions.opened).toEqual([
-      { threadTs: ROOT_TS, channelId: CHANNEL, rootUser: USER, text: `hello from ${CHANNEL}` },
-      { threadTs: ROOT_TS, channelId: CHANNEL_B, rootUser: USER, text: `hello from ${CHANNEL_B}` },
+      { threadTs: ROOT_TS, channelId: CHANNEL, rootUser: USER, text: authored(`hello from ${CHANNEL}`, true) },
+      { threadTs: ROOT_TS, channelId: CHANNEL_B, rootUser: USER, text: authored(`hello from ${CHANNEL_B}`, true) },
     ]);
     expect(sessions.replies).toEqual([
-      { threadTs: ROOT_TS, channelId: CHANNEL, text: 'status?' },
-      { threadTs: ROOT_TS, channelId: CHANNEL_B, text: 'progress?' },
+      { threadTs: ROOT_TS, channelId: CHANNEL, text: authored('status?') },
+      { threadTs: ROOT_TS, channelId: CHANNEL_B, text: authored('progress?') },
     ]);
   });
 
@@ -402,7 +414,7 @@ describe('registerHandlers — routing', () => {
     // Same thread ts, other channel: an ordinary turn there, and the gate
     // still waits for ITS channel's reply.
     await app.emit('message', { ...threadReply('go'), channel: CHANNEL_B });
-    expect(sessions.replies).toEqual([{ threadTs: THREAD, channelId: CHANNEL_B, text: 'go' }]);
+    expect(sessions.replies).toEqual([{ threadTs: THREAD, channelId: CHANNEL_B, text: authored('go') }]);
 
     await app.emit('message', threadReply('go'));
     await expect(verdict).resolves.toEqual({ approved: true, reply: 'go' });
@@ -428,7 +440,7 @@ describe('registerHandlers — routing', () => {
     await app.emit('message', { ...threadReply('what is the status?'), channel: CHANNEL_B });
 
     expect(sessions.replies).toEqual([
-      { threadTs: THREAD, channelId: CHANNEL_B, text: 'what is the status?' },
+      { threadTs: THREAD, channelId: CHANNEL_B, text: authored('what is the status?') },
     ]);
   });
 

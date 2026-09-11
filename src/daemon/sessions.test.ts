@@ -72,6 +72,7 @@ const makeHarness = (
     store?: SessionStore;
     notify?: Notifier;
     cap?: number;
+    messageBatchWindowMs?: number;
     autoCloseMs?: number;
     listDelegations?: (threadTs: string, channelId: string) => Promise<ClosingDelegation[]>;
     onTurnStart?: (threadTs: string, channelId: string) => Promise<void>;
@@ -105,6 +106,7 @@ const makeHarness = (
     costThresholdsUsd: [5, 10],
     warmTtlMs: TTL,
     liveSessionCap: options.cap ?? 5,
+    messageBatchWindowMs: options.messageBatchWindowMs ?? 0,
     autoCloseAfterMs: options.autoCloseMs ?? 7 * DAY,
     listDelegations: options.listDelegations ?? (() => Promise.resolve([])),
     onTurnStart:
@@ -225,6 +227,120 @@ describe('SessionManager', () => {
 
     expect(spawns).toHaveLength(2);
     expect(spawns[1]?.proc.turns[0]?.text).toBe('other thread');
+  });
+
+  it('reads a burst received during a turn together, including the latest clarification', async () => {
+    const { manager, spawns } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'check the toaster');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'what about contact lists?');
+    manager.reply(THREAD, CHANNEL, '😂');
+    manager.reply(THREAD, CHANNEL, 'I mean pushing contacts into a campaign, same /leads link');
+
+    const proc = spawns[0]!.proc;
+    expect(proc.turns).toHaveLength(1);
+    proc.turns[0]!.resolve({ status: 'success', resultText: 'delegated', costUsd: 0 });
+    await flush();
+
+    expect(proc.turns).toHaveLength(2);
+    expect(proc.turns[1]!.text).toContain('what about contact lists?');
+    expect(proc.turns[1]!.text).toContain('😂');
+    expect(proc.turns[1]!.text).toContain('I mean pushing contacts into a campaign, same /leads link');
+    proc.turns[1]!.resolve({ status: 'success', resultText: 'understood', costUsd: 0 });
+    await flush();
+    expect(proc.turns).toHaveLength(2);
+  });
+
+  it('collects an initial burst for 750 ms without postponing the deadline on each message', async () => {
+    const { manager, spawns, turnStarts } = makeHarness(undefined, { messageBatchWindowMs: 750 });
+    manager.open(THREAD, CHANNEL, USER, 'first');
+    await flush();
+    expect(turnStarts).toEqual([THREAD]); // ack before the collection window
+    const proc = spawns[0]!.proc;
+    expect(proc.turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(250);
+    manager.reply(THREAD, CHANNEL, 'second');
+    await vi.advanceTimersByTimeAsync(499);
+    manager.reply(THREAD, CHANNEL, 'latest clarification');
+    expect(proc.turns).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(proc.turns).toHaveLength(1);
+    const text = proc.turns[0]!.text;
+    expect(text.indexOf('first')).toBeLessThan(text.indexOf('second'));
+    expect(text.indexOf('second')).toBeLessThan(text.indexOf('latest clarification'));
+  });
+
+  it('collects messages received while waiting for a global session slot', async () => {
+    const { manager, spawns } = makeHarness(undefined, { cap: 1 });
+    manager.open(THREAD, CHANNEL, USER, 'busy');
+    await flush();
+    manager.open(THREAD_2, CHANNEL, USER, 'initial request');
+    await flush();
+    manager.reply(THREAD_2, CHANNEL, 'correction before capacity freed');
+    spawns[0]!.proc.turns[0]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]!.proc.turns[0]!.text).toContain('initial request');
+    expect(spawns[1]!.proc.turns[0]!.text).toContain('correction before capacity freed');
+  });
+
+  it('keeps worker events and close in order between human batches', async () => {
+    const { manager, spawns, store, notices } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'working');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'before the report');
+    manager.wake(THREAD, CHANNEL, 'worker report');
+    manager.reply(THREAD, CHANNEL, 'after the report');
+    manager.reply(THREAD, CHANNEL, 'last clarification');
+    manager.close(THREAD, CHANNEL);
+    manager.reply(THREAD, CHANNEL, 'too late');
+    const proc = spawns[0]!.proc;
+    const finish = async () => {
+      proc.turns.at(-1)!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+      await flush();
+    };
+    await finish();
+    expect(proc.turns.at(-1)!.text).toBe('before the report');
+    await finish();
+    expect(proc.turns.at(-1)!.text).toBe('worker report');
+    await finish();
+    expect(proc.turns.at(-1)!.text).toContain('after the report');
+    expect(proc.turns.at(-1)!.text).toContain('last clarification');
+    expect(proc.turns.at(-1)!.text).not.toContain('too late');
+    await finish();
+    expect(proc.turns).toHaveLength(4);
+    expect(store.get(THREAD, CHANNEL)?.status).toBe('closed');
+    expect(notices.at(-1)?.text).toContain('Session closed. Mention me');
+  });
+
+  it('bounds the number of messages per batch without losing the remainder', async () => {
+    const { manager, spawns } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'working');
+    await flush();
+    for (let i = 1; i <= 21; i++) manager.reply(THREAD, CHANNEL, `reply-${i}.`);
+    const proc = spawns[0]!.proc;
+    proc.turns[0]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    for (let i = 1; i <= 20; i++) expect(proc.turns[1]!.text).toContain(`reply-${i}.`);
+    expect(proc.turns[1]!.text).not.toContain('reply-21.');
+    proc.turns[1]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(proc.turns[2]!.text).toBe('reply-21.');
+  });
+
+  it('keeps oversized text messages intact in separate turns', async () => {
+    const { manager, spawns } = makeHarness();
+    manager.open(THREAD, CHANNEL, USER, 'working');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'a'.repeat(24_001));
+    manager.reply(THREAD, CHANNEL, 'remaining detail');
+    const proc = spawns[0]!.proc;
+    proc.turns[0]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(proc.turns[1]!.text).toBe('a'.repeat(24_001));
+    proc.turns[1]!.resolve({ status: 'success', resultText: 'ok', costUsd: 0 });
+    await flush();
+    expect(proc.turns[2]!.text).toBe('remaining detail');
   });
 
   it('constructing the manager over existing rows wakes nothing — the boot rule', () => {
@@ -671,6 +787,43 @@ describe('SessionManager close (spec §3)', () => {
     expect(notices.at(-1)?.text).toBe(
       'Session closed. Mention me on a new root message to start again.',
     );
+  });
+
+  it('limits closed-thread reminders to one per minute, independently per channel', async () => {
+    const { manager, store, notices, spawns } = makeHarness();
+    for (const channel of [CHANNEL, 'C0SECOND']) {
+      store.register(THREAD, channel, USER);
+      store.closeSession(THREAD, channel);
+    }
+    manager.reply(THREAD, CHANNEL, 'one');
+    manager.reply(THREAD, CHANNEL, 'two');
+    manager.close(THREAD, CHANNEL);
+    manager.open(THREAD, CHANNEL, USER, 'three');
+    await flush();
+    expect(notices).toHaveLength(1);
+    manager.reply(THREAD, 'C0SECOND', 'another channel');
+    await flush();
+    expect(notices).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(59_999);
+    manager.reply(THREAD, CHANNEL, 'still chatting');
+    expect(notices).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    manager.reply(THREAD, CHANNEL, 'later reminder');
+    await flush();
+    expect(notices).toHaveLength(3);
+    expect(spawns).toHaveLength(0);
+  });
+
+  it('allows the next closed-thread reply to retry a failed reminder', async () => {
+    const notify = vi.fn<Notifier>().mockRejectedValueOnce(new Error('Slack unavailable')).mockResolvedValue(undefined);
+    const { manager, store } = makeHarness(undefined, { notify });
+    store.register(THREAD, CHANNEL, USER);
+    store.closeSession(THREAD, CHANNEL);
+    manager.reply(THREAD, CHANNEL, 'first');
+    await flush();
+    manager.reply(THREAD, CHANNEL, 'try again');
+    await flush();
+    expect(notify).toHaveBeenCalledTimes(2);
   });
 
   it('close in an unregistered thread does nothing', async () => {
