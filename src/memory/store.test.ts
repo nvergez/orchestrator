@@ -140,6 +140,16 @@ describe('MemoryStore — opt-out', () => {
 });
 
 describe('MemoryStore — participants and extraction bookkeeping', () => {
+  it('names everyone who spoke inside a window, so an ambiguous asker is visible', () => {
+    let clock = 0;
+    const store = new MemoryStore(':memory:', () => new Date(1_700_000_000_000 + (clock += 1000)).toISOString());
+    store.noteParticipant(THREAD, CHANNEL, ALICE);
+    store.noteParticipant(THREAD, CHANNEL, BOB);
+    expect(store.speakersSince(THREAD, CHANNEL, new Date(1_700_000_000_000).toISOString())).toEqual([ALICE, BOB]);
+    expect(store.speakersSince(THREAD, CHANNEL, new Date(1_700_000_001_500).toISOString())).toEqual([BOB]);
+    store.close();
+  });
+
   it('records only who spoke, in arrival order, and names the last speaker', () => {
     let clock = 0;
     const store = new MemoryStore(':memory:', () => new Date(1_700_000_000_000 + (clock += 1000)).toISOString());
@@ -147,10 +157,7 @@ describe('MemoryStore — participants and extraction bookkeeping', () => {
     store.noteParticipant(THREAD, CHANNEL, BOB);
     store.noteParticipant(THREAD, CHANNEL, ALICE);
     expect(store.participants(THREAD, CHANNEL).map((row) => row.userId)).toEqual([ALICE, BOB]);
-    expect(store.lastSpeaker(THREAD, CHANNEL)).toBe(ALICE);
-    expect(store.participants(THREAD, CHANNEL)[0]?.portraitDeliveredAt).toBeNull();
-    store.markPortraitDelivered(THREAD, CHANNEL, BOB);
-    expect(store.participants(THREAD, CHANNEL)[1]?.portraitDeliveredAt).not.toBeNull();
+    expect(store.lastSpeaker(THREAD, CHANNEL)?.userId).toBe(ALICE);
     store.close();
   });
 

@@ -1267,9 +1267,21 @@ describe('Per-person memory — runtime composition', () => {
     expect(pass.inputs).toEqual([]);
     expect(h.seams.systemPromptFor(THREAD, CHANNEL)).not.toContain('What you know about the people here');
 
+    // The work facts come from the ledger, exact and dated — the pass is
+    // never asked to infer from a transcript what can simply be read.
+    h.runtime.delegationStore.recordDispatch({
+      taskId: 'task_csv', dispatchId: 'ctx_csv', worktreeId: 'wt_csv',
+      worktreeName: 'webapp-84-csv-export', worktreePath: '/w/csv', repo: 'webapp',
+      issueNumber: 84, agent: 'claude', kind: 'change', workerHandle: 'term_csv',
+      threadTs: THREAD, channelId: CHANNEL, cardTs: null, title: 'CSV export',
+    });
+
     goQuiet();
     expect(await h.runtime.memory.sweep()).toBe(1);
     expect(pass.inputs[0]?.participants).toEqual([USER]);
+    expect(pass.inputs[0]?.work).toEqual([
+      expect.stringContaining('change in webapp (#84): CSV export — dispatched'),
+    ]);
     // The bot's own words are handed over — that is where the texture is.
     expect(pass.inputs[0]?.transcript).toEqual([
       `<@${USER}>: the toaster is a design choice`,
@@ -1556,6 +1568,29 @@ describe('Per-person memory — runtime composition', () => {
     expect(await forget(mine)).toContain('is gone');
 
     expect(h.runtime.memoryStore.get(mine)).toBeUndefined();
+    expect(h.runtime.memoryStore.get(theirs)).toBeDefined();
+  });
+
+  it('refuses a session deletion when two people were speaking at once, and points at the bare command', async () => {
+    // The session is handed one turn carrying both people's messages (#117),
+    // so "forget that" belongs to either of them. Deleting the wrong
+    // person's memory to save someone a second message is not a trade worth
+    // making — story 15 is the one that must not bend.
+    const pass = passReturning(answer());
+    const h = memoryRuntime(pass, { config: { slackAllowedUserIds: [USER, COLLEAGUE] } });
+    const emit = slackEvents(h, undefined, [USER, COLLEAGUE]);
+    await emit(rootMention);
+    await emit({ ...rootMention, type: 'message', thread_ts: THREAD, ts: '1751970020.000100', user: COLLEAGUE, text: 'same here' });
+    await vi.waitFor(() => expect(h.turns.length).toBeGreaterThan(0));
+    const theirs = h.runtime.memoryStore.add({
+      subjectUserId: COLLEAGUE, participantUserIds: [], nature: 'durable',
+      text: 'Somebody else entirely.', sourceThreadTs: THREAD, sourceChannelId: CHANNEL,
+    })!;
+
+    const result = await canUseToolFor(h.seams)('Bash', { command: `orc memory forget ${theirs}` }, callOptions());
+    if (result?.behavior !== 'deny') throw new Error('a forget must never reach a shell');
+    expect(result.message).toContain('cannot tell whose memory this is');
+    expect(result.message).toContain('forget <id>');
     expect(h.runtime.memoryStore.get(theirs)).toBeDefined();
   });
 

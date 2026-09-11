@@ -152,6 +152,9 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   });
   const store = new SessionStore(config.dbPath);
   const delegationStore = new DelegationStore(config.dbPath);
+  // Opened even when memory is off: the tables are empty and inert, and
+  // creating them now means switching the feature on later is a restart
+  // rather than a migration.
   const memoryStore = new MemoryStore(config.dbPath);
   // Boot rule (spec §3): rows survive the restart, every session comes back
   // dormant, and nothing below wakes one — the next human message does.
@@ -246,9 +249,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
       allowList,
       delegations,
       relay,
-      memory: {
-        forget: (threadTs, channelId, command) => memory.forgetCommand(threadTs, channelId, command),
-      },
+      memory,
       systemPromptFor: (threadTs, channelId) => {
         const portraits = memory.systemPromptBlock(threadTs, channelId);
         return portraits === '' ? baseSystemPrompt : `${baseSystemPrompt}\n\n${portraits}`;

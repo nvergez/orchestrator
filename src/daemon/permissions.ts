@@ -21,7 +21,7 @@ import type { Logger } from '../kernel/logger.ts';
  */
 export interface MemoryPolicy {
   /** Handles the command, or declines it so the classifier rules as usual. */
-  forget(
+  forgetCommand(
     threadTs: string,
     channelId: string,
     command: string,
@@ -74,7 +74,7 @@ export function buildCanUseTool(opts: {
     // here and the process never runs anything. Ahead of the classifier
     // because `orc` is outside the orca/gh/git allow-list and always will
     // be — the session is asking the daemon, not the machine.
-    const forgotten = memory.forget(threadTs, channelId, command);
+    const forgotten = memory.forgetCommand(threadTs, channelId, command);
     if (forgotten.handled) {
       logger.info({ threadTs, command }, 'memory deletion requested by the session');
       return { behavior: 'deny', message: forgotten.message };

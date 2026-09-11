@@ -92,7 +92,7 @@ const callOptions = () => ({
 });
 
 /** Memory declines everything here; runtime.test.ts drives the real keeper. */
-const inertMemory = { forget: () => ({ handled: false as const }) };
+const inertMemory = { forgetCommand: () => ({ handled: false as const }) };
 
 const makeCanUseTool = (
   gates: FakeGates,

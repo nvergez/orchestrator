@@ -134,7 +134,9 @@ You stay in control, in plain words in the thread:
 | `forget me` | your whole portrait is purged and nothing more is kept |
 | `remember me` | it starts keeping memories again; nothing purged comes back |
 
-You can only ever delete what it was shown about *you*. The dashboard shows
+You can only ever delete what it was shown about *you*. If two of you are
+talking at once it will ask for the bare `forget <id>` instead of guessing
+whose memory it is. The dashboard shows
 every portrait read-only — it has no delete button and never will, because it
 never writes anything at all.
 

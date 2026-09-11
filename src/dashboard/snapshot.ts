@@ -345,14 +345,15 @@ function readPendingGates(db: DatabaseSync): GateView[] {
     channelId: (row.channel_id ?? null) as string | null,
     kind: row.kind as GateView['kind'],
     question: row.question as string,
-    options: readOptions(row.options),
+    options: readStringArray(row.options),
     worktreeName: row.worktree_name as string | null,
     relayedAt: row.relayed_at as string,
   }));
 }
 
-/** The options column is JSON the daemon wrote; anything else reads empty. */
-function readOptions(raw: unknown): string[] {
+/** A JSON string array the daemon wrote — gate options, or the people who
+ * were there for a memory. Anything else reads empty rather than throwing. */
+function readStringArray(raw: unknown): string[] {
   if (typeof raw !== 'string') return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -428,7 +429,7 @@ function readMemory(db: DatabaseSync): MemoryState {
       nature: row.nature as 'durable' | 'moment',
       text: row.text as string,
       createdAt: row.created_at as string,
-      participantUserIds: readOptions(row.participant_user_ids),
+      participantUserIds: readStringArray(row.participant_user_ids),
       recurrenceCount: Number(row.recurrence_count),
     });
     bySubject.set(userId, portrait);

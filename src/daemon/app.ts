@@ -1,6 +1,6 @@
 import type { Attachments } from './attachments.ts';
 import { classifyEvent, type Guard, type IncomingEvent, type MemoryCommand, type SlackFile } from './filter.ts';
-import { forgetLine, memorySettingLine, refusalLine } from '../kernel/messages.ts';
+import { forgetLine, memorySettingLine, refusalLine, type ForgetOutcome } from '../kernel/messages.ts';
 import type { GateResolver } from './gate.ts';
 import type { Logger } from '../kernel/logger.ts';
 import type { CloseResult, ReplyResult, SessionTurn } from './sessions.ts';
@@ -61,7 +61,7 @@ export interface MentionNames {
 export interface ThreadMemory {
   /** Records the speaker; returns their portrait iff they are a latecomer. */
   noteSpeaker(threadTs: string, channelId: string, userId: string): string;
-  forget(userId: string, memoryId: string): 'deleted' | 'not_yours' | 'unknown' | 'disabled';
+  forget(userId: string, memoryId: string): ForgetOutcome;
   optOut(userId: string): number;
   optIn(userId: string): void;
   readonly enabled: boolean;
@@ -212,9 +212,7 @@ export function registerHandlers(
         // Deterministic and model-free, beside the bare `close` word: a wrong
         // memory must be removable exactly when the session is confused about
         // what it remembers.
-        const text = memory === undefined || !memory.enabled
-          ? memoryReply(undefined, decision.command)
-          : memoryReply(memory, decision.command, decision.userId);
+        const text = memoryReply(decision.command, decision.userId);
         logger.info(
           { threadTs: decision.threadTs, userId: decision.userId, command: decision.command.kind },
           'bare memory command',
@@ -248,13 +246,12 @@ export function registerHandlers(
   };
 
   /** The fixed answer to a bare memory command — never prose, never a voice. */
-  const memoryReply = (
-    keeper: ThreadMemory | undefined,
-    command: MemoryCommand,
-    userId = '',
-  ): string => {
+  const memoryReply = (command: MemoryCommand, userId: string): string => {
+    const keeper = memory?.enabled === true ? memory : undefined;
     if (keeper === undefined) {
-      return command.kind === 'forget' ? forgetLine('disabled', command.memoryId) : memorySettingLine('disabled');
+      return command.kind === 'forget'
+        ? forgetLine('disabled', command.memoryId)
+        : memorySettingLine('disabled');
     }
     if (command.kind === 'forget') return forgetLine(keeper.forget(userId, command.memoryId), command.memoryId);
     if (command.kind === 'forget_me') return memorySettingLine('forget_me', keeper.optOut(userId));

@@ -92,7 +92,8 @@ describe('renderPortraitBlock', () => {
         memory({ subjectUserId: `U0PERSON${i}`, nature: 'durable', text: 'x'.repeat(120) })),
     }));
     const block = renderPortraitBlock(crowd, NOW);
-    expect(block.length).toBeLessThan(DEFAULT_PORTRAIT_CAPS.blockChars + 1_200);
+    // The whole block, framing included — it all rides in every turn.
+    expect(block.length).toBeLessThanOrEqual(DEFAULT_PORTRAIT_CAPS.blockChars);
     expect(block).toContain('<@U0PERSON0>');
     expect(block).not.toContain('<@U0PERSON11>');
   });

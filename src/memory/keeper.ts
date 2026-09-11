@@ -1,3 +1,4 @@
+import type { ForgetOutcome } from '../kernel/messages.ts';
 import type { Logger } from '../kernel/logger.ts';
 import {
   DEFAULT_PORTRAIT_CAPS,
@@ -7,8 +8,8 @@ import {
   renderPortraitBlock,
   type PortraitCaps,
 } from './portrait.ts';
-import { MAX_MEMORY_CHARS, type MemoryPass } from './pass.ts';
-import type { MemoryRow, MemoryStore } from './store.ts';
+import { MAX_MEMORY_CHARS, type DraftMemory, type MemoryPass } from './pass.ts';
+import type { MemoryStore } from './store.ts';
 
 /**
  * The memory keeper (issue #120, ADR 0009): the module's coordinator, and
@@ -61,13 +62,10 @@ export interface MemoryKeeperOptions {
   silenceMs: number;
   /** Consecutive failures before the slice is abandoned with a log. */
   attemptLimit: number;
-  caps: PortraitCaps;
+  caps?: PortraitCaps;
   logger: Logger;
   now?: () => Date;
 }
-
-/** What a forget attempt did, in the words the Slack reply uses. */
-export type ForgetOutcome = 'deleted' | 'not_yours' | 'unknown' | 'disabled';
 
 /** Past this a thread's transcript stops informing the pass and starts costing. */
 const MAX_TRANSCRIPT_CHARS = 24_000;
@@ -87,6 +85,15 @@ export const RETAINED_MOMENTS_PER_PERSON = 30;
  * still quiet at the next interval, so nothing is lost by waiting.
  */
 const MAX_PASSES_PER_SWEEP = 5;
+
+/**
+ * How close two messages must be for the daemon to be unable to say which of
+ * their authors asked for something. Consecutive human messages this close
+ * can share one turn (issue #117), so the session sees both at once and its
+ * "forget that" belongs to either. Wider than the default batch window;
+ * nothing about how long the turn then ran changes the answer.
+ */
+const CONTEMPORANEOUS_MS = 2_000;
 
 export class MemoryKeeper {
   readonly enabled: boolean;
@@ -146,13 +153,13 @@ export class MemoryKeeper {
     this.store.noteParticipant(threadTs, channelId, userId);
     const latecomer = before.length > 0 && !before.some((row) => row.userId === userId);
     if (!latecomer || this.store.isOptedOut(userId)) return '';
-    const block = renderLatecomerBlock(
+    // Once per person per thread falls out of the participant row above: by
+    // their second message they are in `before`, and this never runs again.
+    return renderLatecomerBlock(
       { userId, memories: this.store.listForPerson(userId) },
       this.now(),
       this.caps,
     );
-    if (block !== '') this.store.markPortraitDelivered(threadTs, channelId, userId);
-    return block;
   }
 
   /**
@@ -209,22 +216,18 @@ export class MemoryKeeper {
   }
 
   /**
-   * The same deletion, reached from inside a session that was asked in plain
-   * words. The asker is the thread's most recent human speaker — the session
-   * never gets to name whose memory it is deleting.
-   */
-  forgetForThread(threadTs: string, channelId: string, memoryId: string): ForgetOutcome {
-    if (!this.enabled) return 'disabled';
-    const speaker = this.store.lastSpeaker(threadTs, channelId);
-    if (speaker === undefined) return 'not_yours';
-    return this.forget(speaker, memoryId);
-  }
-
-  /**
    * The session's Bash-borne request to forget something (ADR 0009). It is a
    * daemon action asked for through the one channel the session has, never a
    * command that runs: `canUseTool` answers it and nothing reaches a shell.
    * Declining leaves the classifier to rule on the command as usual.
+   *
+   * The asker is the thread's most recent speaker — the session never gets
+   * to name whose memory it is deleting. When two people spoke at almost the
+   * same moment their messages can share one turn (issue #117), and then
+   * "the speaker" is genuinely ambiguous: the request is refused rather than
+   * guessed at, and the bare `forget <id>` command, which carries a real
+   * Slack author, still works. Deleting the wrong person's memory to save
+   * someone a second message is not a trade worth making.
    */
   forgetCommand(
     threadTs: string,
@@ -234,8 +237,28 @@ export class MemoryKeeper {
     const match = FORGET_COMMAND.exec(command);
     if (match === null) return { handled: false };
     const memoryId = match[1] ?? '';
-    const outcome = this.forgetForThread(threadTs, channelId, memoryId);
+    const outcome = this.forgetAsAsker(threadTs, channelId, memoryId);
     return { handled: true, message: SESSION_FORGET_REPLIES[outcome](memoryId) };
+  }
+
+  /** Works out who asked, then forgets as them — or refuses to guess. */
+  private forgetAsAsker(threadTs: string, channelId: string, memoryId: string): ForgetOutcome {
+    if (!this.enabled) return 'disabled';
+    const last = this.store.lastSpeaker(threadTs, channelId);
+    if (last === undefined) return 'not_yours';
+    const together = this.store.speakersSince(
+      threadTs,
+      channelId,
+      new Date(Date.parse(last.lastSeenAt) - CONTEMPORANEOUS_MS).toISOString(),
+    );
+    if (together.length > 1) {
+      this.logger.info(
+        { threadTs, channelId, together },
+        'session asked to forget while several people were speaking at once — refused',
+      );
+      return 'ambiguous';
+    }
+    return this.forget(last.userId, memoryId);
   }
 
   /** Stop remembering me: purge the portrait, leave the tombstone. */
@@ -349,7 +372,7 @@ export class MemoryKeeper {
    * moment that has recurred enough is promoted to a durable fact — which is
    * exactly what a private joke is.
    */
-  private absorb(drafts: readonly { subject: string; participants: string[]; nature: 'durable' | 'moment'; text: string }[], threadTs: string, channelId: string): number {
+  private absorb(drafts: readonly DraftMemory[], threadTs: string, channelId: string): number {
     let written = 0;
     for (const draft of drafts) {
       const existing = this.store.listForPerson(draft.subject).find((row) => sameThing(row.text, draft.text));
@@ -405,6 +428,8 @@ const FORGET_COMMAND = /^\s*orc\s+memory\s+forget\s+([A-Za-z0-9]{1,32})\s*$/;
  */
 const SESSION_FORGET_REPLIES: Record<ForgetOutcome, (memoryId: string) => string> = {
   deleted: (id) => `Forgotten: the memory ${id} is gone, from every portrait it was in. Tell them in one short line.`,
+  ambiguous: () =>
+    'Refused: several people have just spoken here, so I cannot tell whose memory this is. Ask them to send `forget <id>` as a message on its own — that carries their name.',
   not_yours: (id) =>
     `Refused: ${id} is not a memory about the person who just spoke, and you can only forget what was shown about them. Say so plainly and do not try another id.`,
   unknown: (id) =>
@@ -467,6 +492,3 @@ function renderTranscript(messages: readonly TranscriptMessage[]): string[] {
   }
   return lines;
 }
-
-/** Re-exported so the composition root never needs the row type twice. */
-export type { MemoryRow };

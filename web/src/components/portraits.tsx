@@ -27,8 +27,9 @@ export function Portraits({ memory, asOf }: { memory: MemoryState; asOf: string 
       <PassActivity memory={memory} asOf={asOf} />
       {memory.portraits.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No portraits yet. Most threads are work and leave nothing behind — that is the ordinary
-          outcome, not a fault.
+          {memory.recentPasses.length === 0
+            ? 'No portraits yet — no memory pass has run against this database.'
+            : 'No portraits yet. Most threads are work and leave nothing behind — that is the ordinary outcome, not a fault.'}
         </p>
       ) : (
         memory.portraits.map((portrait) => (

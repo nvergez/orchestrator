@@ -338,12 +338,19 @@ export function restartNotice(items: Array<{ ref: string; state: string }>): str
 }
 
 /**
+ * What a forget attempt did (issue #120). It lives in kernel because all
+ * three sides of the feature name it: the keeper that decides it, the router
+ * that answers with it, and the lines below.
+ */
+export type ForgetOutcome = 'deleted' | 'not_yours' | 'unknown' | 'disabled' | 'ambiguous';
+
+/**
  * The fixed answers to a bare memory command (issue #120). Deterministic
  * lines, not prose: `forget` runs without a model in the loop precisely so
  * it still works when the session is confused, and a line a voice could
  * restyle would undermine that.
  */
-export function forgetLine(outcome: 'deleted' | 'not_yours' | 'unknown' | 'disabled', memoryId: string): string {
+export function forgetLine(outcome: ForgetOutcome, memoryId: string): string {
   switch (outcome) {
     case 'deleted':
       return `🧽 Forgotten — \`${memoryId}\` is gone.`;
@@ -353,6 +360,8 @@ export function forgetLine(outcome: 'deleted' | 'not_yours' | 'unknown' | 'disab
       return `🧽 I have nothing under \`${memoryId}\`. The id is the one in brackets next to a memory.`;
     case 'disabled':
       return '🧽 I am not keeping memories of anyone right now.';
+    case 'ambiguous':
+      return `🧽 Several people just spoke — send \`forget ${memoryId}\` on its own and I will know it is yours.`;
   }
 }
 

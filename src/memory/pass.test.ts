@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { sameThing } from './keeper.ts';
 import { buildPassPrompt, MAX_MEMORY_CHARS, parseDrafts } from './pass.ts';
 
 /**
@@ -104,23 +103,5 @@ describe('buildPassPrompt', () => {
     expect(prompt).toContain('An empty list is the expected answer');
     expect(prompt).toContain('- nothing yet');
     expect(prompt).toContain('- none');
-  });
-});
-
-describe('sameThing', () => {
-  it('reads the pass’s retellings of one joke as one joke', () => {
-    const tellings = [
-      'Calls the deploy script "the goat", every single time.',
-      'Called the deploy script "the goat" again, as always.',
-      'Still calls the deploy script "the goat".',
-    ];
-    expect(sameThing(tellings[0]!, tellings[1]!)).toBe(true);
-    expect(sameThing(tellings[0]!, tellings[2]!)).toBe(true);
-  });
-
-  it('keeps two genuinely different things apart', () => {
-    expect(sameThing('Works almost exclusively in the webapp repo.', 'Wants a PR rather than a patch.')).toBe(false);
-    expect(sameThing('Lives in webapp.', 'Works in webapp.')).toBe(false);
-    expect(sameThing('Named the deploy script "the goat".', 'Reviews with the diff open.')).toBe(false);
   });
 });

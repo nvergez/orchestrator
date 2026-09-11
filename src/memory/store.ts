@@ -39,9 +39,6 @@ export interface ParticipantRow {
   userId: string;
   firstSeenAt: string;
   lastSeenAt: string;
-  /** When their portrait was handed to a live turn as a latecomer; null
-   * until then, and the reason that only ever happens once per thread. */
-  portraitDeliveredAt: string | null;
 }
 
 /** The per-thread extraction bookkeeping — never the requester's business. */
@@ -123,12 +120,11 @@ export class MemoryStore {
         opted_out_at TEXT
       ) STRICT;
       CREATE TABLE IF NOT EXISTS memory_participants (
-        thread_ts             TEXT NOT NULL,
-        channel_id            TEXT NOT NULL,
-        user_id               TEXT NOT NULL,
-        first_seen_at         TEXT NOT NULL,
-        last_seen_at          TEXT NOT NULL,
-        portrait_delivered_at TEXT,
+        thread_ts     TEXT NOT NULL,
+        channel_id    TEXT NOT NULL,
+        user_id       TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at  TEXT NOT NULL,
         PRIMARY KEY (thread_ts, channel_id, user_id)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS memory_passes (
@@ -200,14 +196,6 @@ export class MemoryStore {
       | Record<string, unknown>
       | undefined;
     return row === undefined ? undefined : toMemoryRow(row);
-  }
-
-  /** Everyone the daemon holds something about — the dashboard's portrait list. */
-  subjects(): string[] {
-    const rows = this.db
-      .prepare('SELECT DISTINCT subject_user_id AS id FROM memories ORDER BY subject_user_id')
-      .all() as Array<{ id: string }>;
-    return rows.map((row) => row.id);
   }
 
   /** Deletes one memory outright — a shared record leaves both portraits. */
@@ -296,32 +284,43 @@ export class MemoryStore {
       userId: row.user_id as string,
       firstSeenAt: row.first_seen_at as string,
       lastSeenAt: row.last_seen_at as string,
-      portraitDeliveredAt: (row.portrait_delivered_at ?? null) as string | null,
     }));
+  }
+
+  /**
+   * Everyone who has spoken here since an instant. The deletion path uses it
+   * to notice that it cannot tell who asked: two people talking at once make
+   * "the speaker" ambiguous, and a deletion must never guess between them.
+   */
+  speakersSince(threadTs: string, channelId: string, sinceIso: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT user_id FROM memory_participants
+          WHERE thread_ts = ? AND channel_id = ? AND last_seen_at >= ?
+          ORDER BY last_seen_at, user_id`,
+      )
+      .all(threadTs, channelId, sinceIso) as Array<{ user_id: string }>;
+    return rows.map((row) => row.user_id);
   }
 
   /**
    * Who spoke here last — the person a deletion asked for in plain words
    * belongs to. A session never gets to name whose memory it is deleting.
    */
-  lastSpeaker(threadTs: string, channelId: string): string | undefined {
+  lastSpeaker(threadTs: string, channelId: string): ParticipantRow | undefined {
     const row = this.db
       .prepare(
-        `SELECT user_id FROM memory_participants
+        `SELECT * FROM memory_participants
           WHERE thread_ts = ? AND channel_id = ?
           ORDER BY last_seen_at DESC, user_id DESC LIMIT 1`,
       )
-      .get(threadTs, channelId) as { user_id?: string } | undefined;
-    return row?.user_id;
-  }
-
-  markPortraitDelivered(threadTs: string, channelId: string, userId: string): void {
-    this.db
-      .prepare(
-        `UPDATE memory_participants SET portrait_delivered_at = ?
-          WHERE thread_ts = ? AND channel_id = ? AND user_id = ?`,
-      )
-      .run(this.now(), threadTs, channelId, userId);
+      .get(threadTs, channelId) as Record<string, unknown> | undefined;
+    if (row === undefined) return undefined;
+    return {
+      userId: row.user_id as string,
+      firstSeenAt: row.first_seen_at as string,
+      lastSeenAt: row.last_seen_at as string,
+    };
   }
 
   extraction(threadTs: string, channelId: string): ExtractionRow {
