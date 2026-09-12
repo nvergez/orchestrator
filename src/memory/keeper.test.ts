@@ -160,6 +160,54 @@ describe('MemoryKeeper — what a failure costs', () => {
   });
 });
 
+describe('MemoryKeeper — when the store goes out from under a pass', () => {
+  /**
+   * What a shutdown looks like from inside the keeper: the daemon closes the
+   * store while a sweep is still waiting on its model call, and the pass it
+   * left in flight comes back to a store that is gone. Nothing about that may
+   * reach the process as a rejection nobody owns — the daemon is long-lived,
+   * and a background pass is the last thing that should be able to end it.
+   */
+  const watchRejections = (): { seen: unknown[]; stop: () => void } => {
+    const seen: unknown[] = [];
+    const onRejection = (reason: unknown): void => { seen.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    return { seen, stop: () => { process.off('unhandledRejection', onRejection); } };
+  };
+
+  it('ends the pass quietly when the store closes mid-flight', async () => {
+    const logger = createLogger('silent');
+    const error = vi.spyOn(logger, 'error');
+    const h = makeKeeper({ logger });
+    h.store.noteParticipant(THREAD, CHANNEL, ALICE);
+    // The close lands while the model call is out, as a shutdown would.
+    h.answerWith(() => { h.store.close(); return { memories: [], costUsd: 0.01 }; });
+    await expect(h.keeper.extractOnClose(THREAD, CHANNEL)).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ threadTs: THREAD, channelId: CHANNEL }),
+      'memory pass failure could not be recorded',
+    );
+  });
+
+  it('leaves no rejection nobody owns, for the pass or the one queued behind it', async () => {
+    const watch = watchRejections();
+    try {
+      const h = makeKeeper();
+      h.store.noteParticipant(THREAD, CHANNEL, ALICE);
+      h.store.close();
+      // The first pass fails on its very first read; the second is queued
+      // behind it, which is the branch that settles without a caller.
+      await expect(h.keeper.extractOnClose(THREAD, CHANNEL)).resolves.toBeUndefined();
+      await expect(h.keeper.extractOnClose(THREAD, CHANNEL)).resolves.toBeUndefined();
+      // The queue's own copy settles a turn behind the pass it is holding.
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+      expect(watch.seen).toEqual([]);
+    } finally {
+      watch.stop();
+    }
+  });
+});
+
 describe('MemoryKeeper — who a deletion belongs to', () => {
   const withSpeakers = () => {
     const h = makeKeeper();

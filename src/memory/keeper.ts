@@ -9,7 +9,7 @@ import {
   type PortraitCaps,
 } from './portrait.ts';
 import { MAX_MEMORY_CHARS, type DraftMemory, type MemoryPass } from './pass.ts';
-import type { MemoryStore } from './store.ts';
+import type { ExtractionRow, MemoryStore } from './store.ts';
 
 /**
  * The memory keeper (issue #120, ADR 0009): the module's coordinator, and
@@ -340,9 +340,15 @@ export class MemoryKeeper {
       .catch(() => undefined)
       .then(() => this.runExtraction(threadTs, channelId, activityMark, trigger));
     this.extractions.set(key, next);
-    void next.finally(() => {
-      if (this.extractions.get(key) === next) this.extractions.delete(key);
-    });
+    // The queue's own copy of the pass, held only to forget it again. It has
+    // to swallow: `next` is what carries a failure to the caller, and a
+    // second unhandled branch of the same rejection would take the daemon
+    // down with it — the one thing a background pass must never do.
+    void next
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.extractions.get(key) === next) this.extractions.delete(key);
+      });
     return next;
   }
 
@@ -352,22 +358,26 @@ export class MemoryKeeper {
     activityMark: string,
     trigger: ExtractionTrigger,
   ): Promise<void> {
-    // Read after the queue, never before it: the pass that just finished may
-    // have moved this very watermark.
-    const marks = this.store.extraction(threadTs, channelId);
-    // Everything from here on is work from BEFORE any deletion asked for
-    // while it runs — which is what makes such a deletion final (§12).
-    const startedAt = this.now().toISOString();
-    const people = this.store
-      .participants(threadTs, channelId)
-      .map((row) => row.userId)
-      .filter((userId) => this.allowedUserIds.includes(userId) && !this.store.isOptedOut(userId));
-    if (people.length === 0) {
-      this.store.advance(threadTs, channelId, marks.watermarkTs, activityMark);
-      return;
-    }
-
+    // Every store touch the pass makes is inside the pass's own failure
+    // handling, the first one included: a store that goes out from under a
+    // pass in flight — a shutdown closing it while the sweep is still
+    // waiting on its model call — is a failure like any other here.
+    let marks: ExtractionRow | undefined;
     try {
+      // Read after the queue, never before it: the pass that just finished
+      // may have moved this very watermark.
+      marks = this.store.extraction(threadTs, channelId);
+      // Everything from here on is work from BEFORE any deletion asked for
+      // while it runs — which is what makes such a deletion final (§12).
+      const startedAt = this.now().toISOString();
+      const people = this.store
+        .participants(threadTs, channelId)
+        .map((row) => row.userId)
+        .filter((userId) => this.allowedUserIds.includes(userId) && !this.store.isOptedOut(userId));
+      if (people.length === 0) {
+        this.store.advance(threadTs, channelId, marks.watermarkTs, activityMark);
+        return;
+      }
       const messages = await this.readTranscript(channelId, threadTs, marks.watermarkTs);
       if (messages.length === 0) {
         // Nothing new to read: not a failure, just a thread with no new slice.
@@ -405,7 +415,7 @@ export class MemoryKeeper {
       });
       this.logger.info({ threadTs, channelId, trigger, written, costUsd: result.costUsd }, 'memory pass finished');
     } catch (error) {
-      this.onFailure(threadTs, channelId, activityMark, marks.watermarkTs, error);
+      this.onFailure(threadTs, channelId, activityMark, marks?.watermarkTs ?? '0', error);
     }
   }
 
@@ -422,31 +432,42 @@ export class MemoryKeeper {
     watermarkTs: string,
     error: unknown,
   ): void {
-    const attempts = this.store.recordAttempt(threadTs, channelId);
-    const abandoned = attempts >= this.attemptLimit;
-    this.store.recordPass({
-      threadTs,
-      channelId,
-      outcome: abandoned ? 'abandoned' : 'failed',
-      written: 0,
-      dropped: 0,
-      // A model can bill for an answer and still fail on it. The money is
-      // spent whatever the outcome, so the pass's own counter must see it.
-      costUsd: billedCost(error),
-    });
-    if (abandoned) {
-      // The slice is what keeps failing, so the slice is what must go: the
-      // watermark jumps to the activity mark's own instant, and the next
-      // attempt reads only what was said after it.
-      const skipped = slackTsFrom(activityMark);
-      this.store.advance(threadTs, channelId, skipped > watermarkTs ? skipped : watermarkTs, activityMark);
+    try {
+      const attempts = this.store.recordAttempt(threadTs, channelId);
+      const abandoned = attempts >= this.attemptLimit;
+      this.store.recordPass({
+        threadTs,
+        channelId,
+        outcome: abandoned ? 'abandoned' : 'failed',
+        written: 0,
+        dropped: 0,
+        // A model can bill for an answer and still fail on it. The money is
+        // spent whatever the outcome, so the pass's own counter must see it.
+        costUsd: billedCost(error),
+      });
+      if (abandoned) {
+        // The slice is what keeps failing, so the slice is what must go: the
+        // watermark jumps to the activity mark's own instant, and the next
+        // attempt reads only what was said after it.
+        const skipped = slackTsFrom(activityMark);
+        this.store.advance(threadTs, channelId, skipped > watermarkTs ? skipped : watermarkTs, activityMark);
+        this.logger.error(
+          { err: error, threadTs, channelId, attempts },
+          'memory pass abandoned after repeated failures — the slice is skipped',
+        );
+        return;
+      }
+      this.logger.warn({ err: error, threadTs, channelId, attempts }, 'memory pass failed — will retry');
+    } catch (bookkeeping) {
+      // Recording the failure failed too — most often the same store that
+      // caused it, gone for the same reason. There is nowhere left to count
+      // the attempt, so the log is the only record the slice gets, and the
+      // pass still ends quietly rather than as a rejection nobody owns.
       this.logger.error(
-        { err: error, threadTs, channelId, attempts },
-        'memory pass abandoned after repeated failures — the slice is skipped',
+        { err: bookkeeping, cause: error, threadTs, channelId },
+        'memory pass failure could not be recorded',
       );
-      return;
     }
-    this.logger.warn({ err: error, threadTs, channelId, attempts }, 'memory pass failed — will retry');
   }
 
   /**
