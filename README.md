@@ -21,8 +21,10 @@ each thread gets its own persistent session, resumable across restarts. The
 orchestrator never writes code itself: it interprets requests, delegates to
 Orca worktree agents on an allow-listed set of repos, watches their structured
 messages (done / blocked / question), and relays anything that needs a human
-back into the thread. State (sessions, delegations, pending gates) lives in a
-local SQLite database, so a restart loses nothing.
+back into the thread. It also keeps a small, bounded memory of the people it
+works with, so a thread does not start from zero every time. State (sessions,
+delegations, pending gates, portraits) lives in a local SQLite database, so a
+restart loses nothing.
 
 The full architecture deep-dive is in [`docs/spec.md`](docs/spec.md).
 
@@ -106,6 +108,41 @@ inlined in every brief, so workers write their answers, questions and reports
 in your register too. Keep it blunt — it must land the same way on `claude` and
 `codex`, and it is tone only: an answer still owes you its paths, its numbers
 and what it could not verify.
+
+## What it remembers
+
+The bot keeps a short **portrait** of every allow-listed person: a handful of
+dated observations — which repo you live in, that you want a PR and not a
+patch, the thing you argued about on Tuesday. Nothing is written by the
+session: when a thread goes quiet (or you close it), a separate tool-less
+model call reads the conversation and decides whether anything is worth
+keeping. Usually nothing is — most threads are work, and an ordinary working
+thread leaves no memory at all.
+
+What it knows about the people in a thread rides in that session's system
+prompt as observations, never instructions: a memory can no more talk it past
+a 🚦 gate or the repo allow-list than a persona can restyle a fixed line. It
+is meant to surface rarely and in passing, not to be performed at you.
+
+You stay in control, in plain words in the thread:
+
+| Say | What happens |
+|---|---|
+| "what do you remember about me?" | it tells you, ids included |
+| `forget k7m2qp` | that one memory is gone — no model in the loop |
+| "forget that, it's wrong" | same thing, asked conversationally |
+| `forget me` | your whole portrait is purged and nothing more is kept |
+| `remember me` | it starts keeping memories again; nothing purged comes back |
+
+You can only ever delete what it was shown about *you*. If two of you are
+talking at once it will ask for the bare `forget <id>` instead of guessing
+whose memory it is. The dashboard shows
+every portrait read-only — it has no delete button and never will, because it
+never writes anything at all.
+
+Set `MEMORY_ENABLED=false` to turn the whole thing off. See
+[`docs/spec.md` §12](docs/spec.md) and
+[ADR 0009](docs/adr/0009-memory-is-written-by-a-pass-not-by-the-session.md).
 
 ## Updating
 

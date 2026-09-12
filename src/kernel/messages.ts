@@ -337,6 +337,48 @@ export function restartNotice(items: Array<{ ref: string; state: string }>): str
   ].join('\n');
 }
 
+/**
+ * What a forget attempt did (issue #120). It lives in kernel because all
+ * three sides of the feature name it: the keeper that decides it, the router
+ * that answers with it, and the lines below.
+ */
+export type ForgetOutcome = 'deleted' | 'not_yours' | 'unknown' | 'disabled' | 'ambiguous';
+
+/**
+ * The fixed answers to a bare memory command (issue #120). Deterministic
+ * lines, not prose: `forget` runs without a model in the loop precisely so
+ * it still works when the session is confused, and a line a voice could
+ * restyle would undermine that.
+ */
+export function forgetLine(outcome: ForgetOutcome, memoryId: string): string {
+  switch (outcome) {
+    case 'deleted':
+      return `🧽 Forgotten — \`${memoryId}\` is gone.`;
+    case 'not_yours':
+      return `🧽 \`${memoryId}\` is not one of yours — you can only forget what I was shown about you.`;
+    case 'unknown':
+      return `🧽 I have nothing under \`${memoryId}\`. The id is the one in brackets next to a memory.`;
+    case 'disabled':
+      return '🧽 I am not keeping memories of anyone right now.';
+    case 'ambiguous':
+      return `🧽 Several people just spoke — send \`forget ${memoryId}\` on its own and I will know it is yours.`;
+  }
+}
+
+/** The opt-out and its inverse — the purge is stated plainly, with the count. */
+export function memorySettingLine(setting: 'forget_me' | 'remember_me' | 'disabled', purged = 0): string {
+  switch (setting) {
+    case 'forget_me':
+      return purged === 0
+        ? '🧽 Nothing of yours was kept, and nothing will be from now on.'
+        : `🧽 Forgotten — ${String(purged)} ${purged === 1 ? 'memory' : 'memories'} about you purged, and I will keep no more. Say \`remember me\` to undo that.`;
+    case 'remember_me':
+      return '🧽 I will keep memories about you again. Nothing purged comes back.';
+    case 'disabled':
+      return '🧽 I am not keeping memories of anyone right now.';
+  }
+}
+
 /** "Brief moments" — the only reply a closed thread ever gets (spec §3: closed is final). */
 export const CLOSED_THREAD_LINE =
   'Session closed. Mention me on a new root message to start again.';

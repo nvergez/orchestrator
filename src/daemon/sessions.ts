@@ -37,6 +37,11 @@ export interface SessionTurn {
     bytes: Uint8Array;
     label: string;
   }>;
+  /** Who wrote it, when a person did (issue #120). An orchestration-event
+   * wake has no author, and a batch has one per message — which is why the
+   * daemon can say whose words a turn is answering without guessing from
+   * arrival times. */
+  author?: string;
 }
 
 const asTurn = (turn: string | SessionTurn): SessionTurn =>
@@ -120,6 +125,22 @@ export interface SessionManagerOptions {
   isPreparingTurn: (threadTs: string, channelId: string) => boolean;
   /** Runs on close, for explicit and dormant closes alike. */
   onClose: (threadTs: string, channelId: string) => Promise<void>;
+  /**
+   * Runs on an EXPLICIT close only (issue #120): a deliberately ended
+   * conversation forces the memory pass at once, where a dormant sweep does
+   * not — by the time a thread has been silent for a week, the pass ran days
+   * ago. Awaited after the 🔚 summary and after the process and its slot are
+   * already released, so the only thing it ever delays is bookkeeping.
+   */
+  onExplicitClose?: (threadTs: string, channelId: string) => Promise<void>;
+  /**
+   * The authors of the turn about to run (issue #120), batching included —
+   * everyone whose words the session is reading. The memory keeper binds a
+   * deletion asked for during the turn to them, so this is announced as late
+   * as possible: after the batch is collected, before the input reaches
+   * Claude.
+   */
+  onTurnSpeakers?: (threadTs: string, channelId: string, userIds: readonly string[]) => void;
   logger: Logger;
 }
 
@@ -141,6 +162,8 @@ export class SessionManager {
   private readonly onTurnEnd: (threadTs: string, channelId: string) => Promise<void>;
   private readonly isPreparingTurn: SessionManagerOptions['isPreparingTurn'];
   private readonly onClose: SessionManagerOptions['onClose'];
+  private readonly onExplicitClose: SessionManagerOptions['onExplicitClose'];
+  private readonly onTurnSpeakers: SessionManagerOptions['onTurnSpeakers'];
   private readonly logger: Logger;
   private readonly threads = new Map<string, ThreadState>();
   private readonly closedReminders = new Map<string, NodeJS.Timeout>();
@@ -168,6 +191,8 @@ export class SessionManager {
     this.onTurnStart = options.onTurnStart;
     this.onTurnEnd = options.onTurnEnd;
     this.onClose = options.onClose;
+    this.onExplicitClose = options.onExplicitClose;
+    this.onTurnSpeakers = options.onTurnSpeakers;
     this.isPreparingTurn = options.isPreparingTurn;
     this.logger = options.logger;
     // Boot rule (spec §3): whatever the store holds comes back dormant.
@@ -255,14 +280,11 @@ export class SessionManager {
       const cutoff = new Date(Date.now() - this.autoCloseAfterMs).toISOString();
       let closed = 0;
       for (const row of this.store.openSessionsInactiveSince(cutoff)) {
-        if (this.isPreparingTurn(row.threadTs, row.channelId)) continue;
-        const state = this.threads.get(threadKey(row.threadTs, row.channelId));
-        if (
-          state !== undefined &&
-          (state.running || state.proc !== null || state.queue.length > 0)
-        ) {
-          continue;
-        }
+        if (this.isBusy(row.threadTs, row.channelId)) continue;
+        // A warm process is a live session even between turns: closing it
+        // would end a conversation somebody is still in. The memory sweep
+        // has no such stake, which is why this one is not in `isBusy`.
+        if (this.threads.get(threadKey(row.threadTs, row.channelId))?.proc != null) continue;
         this.store.closeSession(row.threadTs, row.channelId);
         closed += 1;
         this.logger.info(
@@ -278,6 +300,20 @@ export class SessionManager {
     } finally {
       this.sweeping = false;
     }
+  }
+
+  /**
+   * Whether a turn is happening in a thread right now: one running, others
+   * queued behind it, or an input still downloading. `last_activity_at`
+   * only moves when a turn FINISHES, so it cannot answer this on its own —
+   * a first message after a week of silence, or one queued behind a slow
+   * turn, leaves the row untouched while the thread is plainly alive. Both
+   * sweeps that treat a thread as idle ask here first (spec §3, §12).
+   */
+  isBusy(threadTs: string, channelId: string): boolean {
+    if (this.isPreparingTurn(threadTs, channelId)) return true;
+    const state = this.threads.get(threadKey(threadTs, channelId));
+    return state !== undefined && (state.running || state.queue.length > 0);
   }
 
   /** Warm subprocesses currently alive (the global-cap slice builds on this). */
@@ -470,6 +506,11 @@ export class SessionManager {
     void this.dropProcess(state);
     if (hadProc) this.wakeWaiters();
     await this.postClosingSummary(row);
+    if (this.onExplicitClose !== undefined) {
+      await this.onExplicitClose(state.threadTs, state.channelId).catch((error: unknown) => {
+        this.logger.warn({ err: error, threadTs: state.threadTs }, 'explicit-close hook failed');
+      });
+    }
     // Best-effort and independent of the summary post: a failed summary must
     // not swallow the dropped turns' fixed line, or vice versa.
     if (dropped.some((item) => item.kind === 'turn')) {
@@ -528,7 +569,11 @@ export class SessionManager {
       const waitMs = item.receivedAt + this.messageBatchWindowMs - Date.now();
       if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
     }
-    const turn = this.collectTurn(state, item);
+    const { turn, speakers } = this.collectTurn(state, item);
+    // Whose words this turn is answering, announced once the batch is
+    // settled: the daemon's own answer to "who asked" for anything the
+    // session requests while it runs (issue #120).
+    this.onTurnSpeakers?.(state.threadTs, state.channelId, speakers);
     const voice = this.voiceFor(state.threadTs, state.channelId);
     let outcome: TurnOutcome;
     try {
@@ -578,8 +623,15 @@ export class SessionManager {
     this.wakeWaiters();
   }
 
-  private collectTurn(state: ThreadState, first: TurnItem): SessionTurn {
-    if (first.source === 'event') return first.turn;
+  /**
+   * One input for the session, plus the people who wrote it. The speakers
+   * are returned rather than inferred later because only this batch knows
+   * them: messages that queued behind a slow turn or a slot wait share a
+   * turn however far apart they were sent, so no clock can reconstruct the
+   * list afterwards.
+   */
+  private collectTurn(state: ThreadState, first: TurnItem): { turn: SessionTurn; speakers: string[] } {
+    if (first.source === 'event') return { turn: first.turn, speakers: [] };
     const turns = [first.turn];
     let textLength = first.turn.text.length;
     let imageCount = first.turn.images.length;
@@ -593,12 +645,16 @@ export class SessionManager {
       textLength += next.turn.text.length;
       imageCount += next.turn.images.length;
     }
-    if (turns.length === 1) return first.turn;
+    const speakers = [...new Set(turns.flatMap((turn) => (turn.author === undefined ? [] : [turn.author])))];
+    if (turns.length === 1) return { turn: first.turn, speakers };
     this.logger.info({ threadTs: state.threadTs, channelId: state.channelId, messages: turns.length }, 'human messages batched');
     return {
-      text: '[Consecutive Slack messages, oldest first. Read the whole batch before acting; later clarifications can revise earlier requests. Respond once to the current request, and stay silent if this is only conversation between people.]\n\n' +
-        turns.map((turn, index) => `[Message ${index + 1}]\n${turn.text}`).join('\n\n'),
-      images: turns.flatMap((turn) => turn.images),
+      turn: {
+        text: '[Consecutive Slack messages, oldest first. Read the whole batch before acting; later clarifications can revise earlier requests. Respond once to the current request, and stay silent if this is only conversation between people.]\n\n' +
+          turns.map((turn, index) => `[Message ${index + 1}]\n${turn.text}`).join('\n\n'),
+        images: turns.flatMap((turn) => turn.images),
+      },
+      speakers,
     };
   }
 

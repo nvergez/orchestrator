@@ -3,6 +3,7 @@ import { fetchState } from './api';
 import { GateCallout, StallCallout } from './components/callouts';
 import { DaemonStatus } from './components/daemon-status';
 import { OverviewStrip } from './components/overview-strip';
+import { Portraits } from './components/portraits';
 import { RecentlyClosed } from './components/recently-closed';
 import { SessionCard } from './components/session-card';
 import { deriveOverviewStats } from './lib/stats';
@@ -121,6 +122,15 @@ export default function App() {
                   />
                 ))
               )}
+            </section>
+
+            <section className="space-y-3">
+              <SectionHeader
+                title="What it remembers"
+                count={data.memory.portraits.length}
+                hint="read-only · forget &lt;id&gt; in the thread"
+              />
+              <Portraits memory={data.memory} asOf={data.asOf} />
             </section>
 
             <section className="space-y-3">

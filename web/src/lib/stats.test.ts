@@ -29,6 +29,7 @@ const snapshot = (over: Partial<StateSnapshot>): StateSnapshot => ({
   pendingGates: [],
   pendingStalls: [],
   recentlyClosed: { delegations: [], sessions: [] },
+  memory: { present: true, portraits: [], recentPasses: [], passCostUsdTotal: 0 },
   ...over,
 });
 

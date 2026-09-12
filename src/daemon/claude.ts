@@ -6,7 +6,7 @@ import {
 import type { Logger } from '../kernel/logger.ts';
 import type { ProcessFactory, SessionTurn, TurnEvents, TurnOutcome } from './sessions.ts';
 import { TurnCostMeter } from './cost.ts';
-import { buildCanUseTool, guardrailHooks, type DelegationPolicy } from './permissions.ts';
+import { buildCanUseTool, guardrailHooks, type DelegationPolicy, type MemoryPolicy } from './permissions.ts';
 import type { DispatchObserver, DispatchPreparer } from '../delegation/dispatch.ts';
 import type { SessionGates } from './gate.ts';
 import type { SessionRelay } from '../delegation/relay.ts';
@@ -88,6 +88,7 @@ class ClaudeProcess {
     allowList: DelegationPolicy;
     delegations: SessionDelegations;
     relay: SessionRelay;
+    memory: MemoryPolicy;
     systemPromptAppend: string;
     logger: Logger;
   }) {
@@ -126,6 +127,7 @@ class ClaudeProcess {
           allowList: opts.allowList,
           delegations: opts.delegations,
           relay: opts.relay,
+          memory: opts.memory,
           logger: opts.logger,
         }),
         hooks: guardrailHooks({
@@ -250,7 +252,10 @@ export function createProcessFactory(opts: {
   allowList: DelegationPolicy;
   delegations: SessionDelegations;
   relay: SessionRelay;
-  systemPromptAppend: string;
+  memory: MemoryPolicy;
+  /** Built per thread, not once (issue #120): the portraits of whoever
+   * speaks here ride in this session's prompt and nobody else's. */
+  systemPromptFor: (threadTs: string, channelId: string) => string;
   logger: Logger;
 }): ProcessFactory {
   return ({ resumeSessionId, threadTs, channelId }) =>
@@ -263,7 +268,8 @@ export function createProcessFactory(opts: {
       allowList: opts.allowList,
       delegations: opts.delegations,
       relay: opts.relay,
-      systemPromptAppend: opts.systemPromptAppend + '\n\nSlack thread permalink: ' +
+      memory: opts.memory,
+      systemPromptAppend: opts.systemPromptFor(threadTs, channelId) + '\n\nSlack thread permalink: ' +
         (opts.threadPermalink(threadTs, channelId) ?? 'unavailable — report this if a Change needs a PR link to the thread'),
       logger: opts.logger,
     });

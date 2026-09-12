@@ -44,6 +44,21 @@ export interface Config {
   autoCloseAfterMs: number;
   /** How often the dormancy sweep runs. */
   sweepIntervalMs: number;
+  /** Per-person memory (issue #120): off leaves every memory path inert. */
+  memoryEnabled: boolean;
+  /** The memory pass's own model — the feature is a judgement call about
+   * what is worth remembering, so this defaults high and configures down. */
+  memoryPassModel: string;
+  /** How long a thread must be silent before the pass may read it. */
+  memorySilenceMs: number;
+  /** How often the memory sweep looks for quiet threads. */
+  memorySweepIntervalMs: number;
+  /** Roughly how many characters one person's portrait may occupy. */
+  memoryPerPersonChars: number;
+  /** Roughly how many the whole injected memory block may occupy. */
+  memoryBlockChars: number;
+  /** Consecutive failed passes before a slice is abandoned with a log. */
+  memoryPassAttemptLimit: number;
 }
 
 export class ConfigError extends Error {}
@@ -69,6 +84,23 @@ const DEFAULT_WATCHDOG_STALL_MINUTES = 10;
 const DEFAULT_WATCHDOG_MAX_INFLIGHT_MINUTES = 30;
 
 const DEFAULT_SWEEP_INTERVAL_MINUTES = 60;
+
+/**
+ * Sonnet 5 by default because the whole feature is taste about what is worth
+ * remembering, and a small model produces bland memories — configure it down
+ * and the portraits get flatter, which is the trade the operator is making.
+ */
+const DEFAULT_MEMORY_PASS_MODEL = 'claude-sonnet-5';
+
+const DEFAULT_MEMORY_SILENCE_MINUTES = 30;
+
+const DEFAULT_MEMORY_SWEEP_INTERVAL_MINUTES = 10;
+
+const DEFAULT_MEMORY_PER_PERSON_CHARS = 1_200;
+
+const DEFAULT_MEMORY_BLOCK_CHARS = 4_000;
+
+const DEFAULT_MEMORY_PASS_ATTEMPT_LIMIT = 3;
 
 export const DAY_MS = 24 * 60 * 60_000;
 
@@ -217,6 +249,42 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     }
   }
 
+  const memorySilenceMinutes = positiveNumber(
+    'MEMORY_SILENCE_MINUTES',
+    DEFAULT_MEMORY_SILENCE_MINUTES,
+    'minutes',
+  );
+
+  const memorySweepIntervalMinutes = positiveNumber(
+    'MEMORY_SWEEP_INTERVAL_MINUTES',
+    DEFAULT_MEMORY_SWEEP_INTERVAL_MINUTES,
+    'minutes',
+  );
+
+  const memoryPerPersonChars = positiveNumber(
+    'MEMORY_PER_PERSON_CHARS',
+    DEFAULT_MEMORY_PER_PERSON_CHARS,
+    'characters',
+  );
+
+  const memoryBlockChars = positiveNumber(
+    'MEMORY_BLOCK_CHARS',
+    DEFAULT_MEMORY_BLOCK_CHARS,
+    'characters',
+  );
+
+  const memoryPassAttemptLimit = Number(env.MEMORY_PASS_ATTEMPT_LIMIT ?? DEFAULT_MEMORY_PASS_ATTEMPT_LIMIT);
+  if (!Number.isInteger(memoryPassAttemptLimit) || memoryPassAttemptLimit <= 0) {
+    problems.push('MEMORY_PASS_ATTEMPT_LIMIT must be a positive integer');
+  }
+
+  // Default ON: the feature is the product, and an operator who wants the
+  // bot to stay anonymous says so explicitly.
+  const memoryEnabled = (env.MEMORY_ENABLED ?? 'true').trim().toLowerCase();
+  if (!['true', 'false', '1', '0'].includes(memoryEnabled)) {
+    problems.push('MEMORY_ENABLED must be true or false');
+  }
+
   const mailboxWorktreePath = env.ORCHESTRATOR_MAILBOX_WORKTREE?.trim();
   if (mailboxWorktreePath !== undefined && mailboxWorktreePath !== '' && !isAbsolute(mailboxWorktreePath)) {
     problems.push('ORCHESTRATOR_MAILBOX_WORKTREE must be an absolute path to a registered Orca worktree');
@@ -241,6 +309,13 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     watchdogMaxInflightMs: watchdogMaxInflightMinutes * 60_000,
     autoCloseAfterMs: autoCloseDays * DAY_MS,
     sweepIntervalMs: sweepIntervalMinutes * 60_000,
+    memoryEnabled: memoryEnabled === 'true' || memoryEnabled === '1',
+    memoryPassModel: env.MEMORY_PASS_MODEL?.trim() || DEFAULT_MEMORY_PASS_MODEL,
+    memorySilenceMs: memorySilenceMinutes * 60_000,
+    memorySweepIntervalMs: memorySweepIntervalMinutes * 60_000,
+    memoryPerPersonChars,
+    memoryBlockChars,
+    memoryPassAttemptLimit,
   };
   if (!PINO_LEVELS.includes(config.logLevel)) {
     problems.push(`LOG_LEVEL must be one of ${PINO_LEVELS.join(', ')}`);

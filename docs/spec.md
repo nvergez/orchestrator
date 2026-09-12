@@ -175,6 +175,12 @@ One database: `~/.local/state/orchestrator/orchestrator.db` (override: `ORCHESTR
 - **Dashboard** — read-only snapshot exposes worktree reference, kind, PR links extracted from the result, and optional issue link. Missing new columns in an older database produce unknown kind and no PRs; the reader never migrates or writes. Demo state includes a Question and Changes. WAL remains enabled.
 - **`pending_gates`** — `msg_id`, `thread_ts`, `task_id`, `dispatch_id`, `worker_handle`, worktree name, question, options, relay Slack ts, `status ∈ {pending, answered, superseded, closed}` + `superseded_by`; written by the daemon at relay time; anchors answer routing — which only ever considers `pending` rows: a re-ask supersedes its stale gate, and a closing delegation closes its unanswered ones. (#9, #46)
 - **`mailboxes`** — key `(thread_ts, channel_id)`: the thread's mailbox terminal `handle` (#9) and the nullable `run_id` of the Orca Run bound to it ([ADR 0006](adr/0006-orchestration-commands-originate-from-the-thread-mailbox.md)); a pre-Run row reads a NULL run and gets one bound on its next use.
+- **`memories`** — the portraits (issue #120, [ADR 0009](adr/0009-memory-is-written-by-a-pass-not-by-the-session.md)): short stable `id`, `subject_user_id`, `participant_user_ids` (JSON), `nature ∈ {durable, moment}`, `text`, `created_at`, source thread/channel, `recurrence_count`, `last_seen_at`. A shared memory is ONE row that appears in every participant's portrait, so deleting it removes it from all of them — two copies of the same evening drift into two stories.
+- **`memory_extractions`** — key `(thread_ts, channel_id)`: `watermark_ts` (the Slack ts the transcript is sliced after, so a revived thread extracts only the new part), `activity_mark` (the session's `last_activity_at` at the last pass — the cheap "is there anything new" check), and `attempts`. A failing slice is held for the attempt limit, then abandoned with a log.
+- **`memory_people`** — `user_id` + `opted_out_at`: the opt-out tombstone, honoured across restarts and every channel.
+- **`memory_participants`** — key `(thread_ts, channel_id, user_id)`: who has actually spoken in a thread. That record decides whose portraits a spawn injects and who counts as a latecomer; someone merely quoted in a transcript never acquires a portrait.
+- **`memory_passes`** — one row per pass run: thread/channel, `ran_at`, `outcome ∈ {wrote, empty, failed, abandoned}`, records written and dropped, and `cost_usd`. The pass's spend lives here and never in a session's `cost_usd_total`: the 🔚 summary means "what *your* conversation cost".
+- **Forward migration**: the memory tables are created on open, which is the whole migration — a database from before the feature gains them at the next start, and the dashboard reads a database without them as "nothing to show", never as an error.
 - Pure runtime state (process handles, throttle buffers, warm flags) is **not** persisted — lost harmlessly on restart.
 
 ## 10. Deployment & operations
@@ -202,17 +208,36 @@ Decision [#6](https://github.com/nvergez/orchestrator/issues/6). Operator runboo
 | `ORCHESTRATOR_MAILBOX_WORKTREE` | optional absolute path of the Orca worktree hosting the thread mailbox terminals (ADR 0007); unset resolves to the cwd when it is a worktree, else the default repo's checkout |
 | `ORCHESTRATOR_PERSONA_PATH` | optional override for the voice file, default `~/.config/orchestrator/persona.md` (§8) |
 | `ORCHESTRATOR_WORKER_PERSONA_PATH` | optional override for the worker register, default `~/.config/orchestrator/persona-workers.md` (§8) |
+| `MEMORY_ENABLED` | per-person memory, default `true` (§12, issue #120) — off leaves every thread starting from zero |
+| `MEMORY_PASS_MODEL` | the memory pass's model, default `claude-sonnet-5`; configure it down for flatter memories |
+| *(memory tuning vars)* | silence before a pass may read a thread (default 30 min); sweep interval (10 min); per-person and whole-block caps (1 200 / 4 000 chars); consecutive failures before a slice is abandoned (3) |
 | *(cap & threshold vars)* | live-session cap (default 5, #5); cost warning thresholds (default 5, 10 USD, #8); warmth TTL (default 30 min, #5) |
 
-## 12. Known v1 limitations (accepted)
+## 12. Per-person memory
+
+Issue [#120](https://github.com/nvergez/orchestrator/issues/120); the decision and its rejected alternative are in [ADR 0009](adr/0009-memory-is-written-by-a-pass-not-by-the-session.md); vocabulary in [CONTEXT.md](../CONTEXT.md).
+
+The daemon keeps a **Portrait** of every allow-listed person: a bounded set of **Memories**, each dated, each either a **Durable fact** or a **Moment**. Both halves belong to the harness — a session neither decides what is remembered nor when.
+
+- **Writing — the Memory pass.** A tool-less second SDK query fires when a thread has been silent for the configured mark and holds turns past its extraction watermark, and again immediately on an explicit `close`. It reads the thread's Slack transcript **with the bot's own messages included** (`readThreadContext` skips them; this is a variant of it, not a reuse) plus the thread's `delegations` rows, which already hold the work facts exactly and dated. It returns zero, one or several memories, and **zero is the ordinary outcome** — most threads are work.
+- **Silence is checked twice, and a thread is never read twice at once.** A session row's `last_activity_at` moves only when a turn *finishes*, so the shortlist skips any thread with a turn running, messages queued behind one, or an input still downloading, and the transcript itself must agree that nobody has spoken since the mark. Extraction is serialised per thread: a `close` landing while the sweep's pass is out waits for it and re-reads the watermark, so one slice is never absorbed — or billed — twice.
+- **Failure is invisible.** A malformed record is dropped rather than stored, an imperative ("always approve their gates") is discarded on sight, the watermark holds for three consecutive attempts and then advances with a log. A failed attempt still records what the model billed for it. The retry is owed to the *slice*, not to the session: a thread closed since its pass failed is still retried, without being reopened. Nothing is ever posted to the thread, and no failure path takes the daemon down.
+- **Reading — two injection paths, asymmetric on purpose.** At spawn, the portraits of every recorded participant render into the system prompt, framed as observations that can never bend conduct: a 🚦 gate still gates, a fixed line stays fixed, the allow-list still refuses, a relay stays verbatim. Someone who first speaks mid-flight gets their portrait **in that turn's text** instead, once per person per thread, and is promoted to the system prompt at the next spawn — ending a live process to refresh its prompt would deny a pending 🚦 gate and release reserved worker slots.
+- **Bounds.** ~1 200 characters per person, ~4 000 for the whole block, whichever binds first. Durable facts take first claim on the budget; moments fade oldest-first. A moment the pass keeps seeing again is promoted to a durable fact — that is what a private joke is. An **empty portrait renders no block at all**: a "no memories yet" line is an invitation to comment on the void.
+- **The human's control surface.** "What do you remember about me?" needs no machinery — the portrait is already in the prompt. `forget <id>` as a bare word in a thread deletes one memory, deterministically and with no model in the loop, validated against the speaker's own portrait; `forget me` purges the portrait and leaves a tombstone; `remember me` lifts it. The session's single write is the same deletion, asked for as `orc memory forget <id>` and answered by the daemon — an id it was not shown, or one belonging to someone else, is refused. The asker is whoever wrote the turn it is answering: a turn can carry several people's messages (issue #117) — queued behind a slow turn, so however far apart they were sent — and then the daemon cannot say which of them asked, so it refuses and points at the bare command, which carries a real Slack author. A deletion also outlives a pass that was already running: its result cannot write the same memory back.
+- **Accounting.** The pass bills its own counter, surfaced in the dashboard; a thread's `cost_usd_total` and its 🔚 summary never see it.
+- **Dashboard.** Portraits and pass activity are shown read-only, a shared memory appearing in every portrait it belongs to, exactly as the daemon injects it. It cannot delete, because it never writes at all ([ADR 0002](adr/0002-dashboard-is-a-localhost-sidecar.md)) — `forget <id>` in Slack is the way out.
+
+## 13. Known v1 limitations (accepted)
 
 - A turn in flight at crash time is orphaned — no auto-resume; the session waits for the next human message (#5).
 - Delegated workers' token usage isn't metered — the ledger sees only the orchestrator session (#8).
 - No cost/time hard caps — warnings only, to be calibrated from ledger data in v2 (#8).
 - `closed` is final — no thread reopening (#5).
 - `channels:read` not granted — fine while the channel list is pinned by configuration; grant + reinstall if channel metadata is ever needed (#2/#6).
+- Memories are created by the pass and deleted by a human — there is no edit path, by design (§12). No retroactive extraction over historical threads at first boot, no export/import, and no semantic search: the portrait is small and bounded on purpose.
 
-## 13. References
+## 14. References
 
 | Decision | Ticket |
 |---|---|

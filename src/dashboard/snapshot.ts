@@ -88,6 +88,50 @@ export interface ClosedSessionView {
   costUsdTotal: number;
 }
 
+/**
+ * One person's portrait, read-only (issue #120). The dashboard shows what
+ * the bot believes about a team; it can never delete a memory, because it
+ * never writes at all (ADR 0002) — `forget <id>` in Slack is the way out.
+ *
+ * Everything the daemon would inject for that person, which includes the
+ * shared records they are merely a participant of: one row, every portrait
+ * it belongs to, the same id in each — never a copy.
+ */
+export interface PortraitView {
+  userId: string;
+  memories: Array<{
+    id: string;
+    nature: 'durable' | 'moment';
+    text: string;
+    /** Absolute, as stored: the page is an audit view, not the bot's voice. */
+    createdAt: string;
+    /** Who else was there. The record shows in their portrait too. */
+    participantUserIds: string[];
+    recurrenceCount: number;
+  }>;
+}
+
+/** One memory-pass run, so pass activity is visible without reading a log. */
+export interface MemoryPassView {
+  threadTs: string;
+  channelId: string;
+  ranAt: string;
+  outcome: 'wrote' | 'empty' | 'failed' | 'abandoned';
+  written: number;
+  dropped: number;
+  costUsd: number;
+}
+
+/** The memory section of the snapshot; empty on a database without it. */
+export interface MemoryState {
+  /** False when the database predates the feature — nothing to show yet. */
+  present: boolean;
+  portraits: PortraitView[];
+  recentPasses: MemoryPassView[];
+  /** The pass's own counter, never any thread's cost total. */
+  passCostUsdTotal: number;
+}
+
 /** The `/api/state` response — the one contract the frontend consumes. */
 export interface StateSnapshot {
   /** When this snapshot was taken — the page's "as of" stamp. */
@@ -102,6 +146,8 @@ export interface StateSnapshot {
   pendingStalls: StallView[];
   /** Closed within the ~48h window, so a quiet page still tells a story. */
   recentlyClosed: { delegations: DelegationView[]; sessions: ClosedSessionView[] };
+  /** What the daemon remembers about people, and what the pass has been up to. */
+  memory: MemoryState;
 }
 
 export interface SnapshotDeps {
@@ -136,6 +182,7 @@ export async function readSnapshot(deps: SnapshotDeps): Promise<StateSnapshot> {
       pendingGates: [],
       pendingStalls: [],
       recentlyClosed: { delegations: [], sessions: [] },
+      memory: EMPTY_MEMORY,
     };
   }
   try {
@@ -155,6 +202,7 @@ export async function readSnapshot(deps: SnapshotDeps): Promise<StateSnapshot> {
         delegations: recentlyClosedDelegations,
         sessions: readRecentlyClosedSessions(db, cutoff),
       },
+      memory: readMemory(db),
     };
   } finally {
     db.close();
@@ -302,14 +350,15 @@ function readPendingGates(db: DatabaseSync): GateView[] {
     channelId: (row.channel_id ?? null) as string | null,
     kind: row.kind as GateView['kind'],
     question: row.question as string,
-    options: readOptions(row.options),
+    options: readStringArray(row.options),
     worktreeName: row.worktree_name as string | null,
     relayedAt: row.relayed_at as string,
   }));
 }
 
-/** The options column is JSON the daemon wrote; anything else reads empty. */
-function readOptions(raw: unknown): string[] {
+/** A JSON string array the daemon wrote — gate options, or the people who
+ * were there for a memory. Anything else reads empty rather than throwing. */
+function readStringArray(raw: unknown): string[] {
   if (typeof raw !== 'string') return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -354,6 +403,71 @@ function readRecentlyClosedSessions(db: DatabaseSync, cutoff: string): ClosedSes
     turnCount: Number(row.turn_count),
     costUsdTotal: Number(row.cost_usd_total),
   }));
+}
+
+/** How many pass runs the page shows — enough to see a pattern, no log. */
+const RECENT_PASSES = 20;
+
+const EMPTY_MEMORY: MemoryState = {
+  present: false,
+  portraits: [],
+  recentPasses: [],
+  passCostUsdTotal: 0,
+};
+
+/**
+ * The memory section. A database from before the feature simply has no
+ * memory tables — the page must keep working against it, so that reads as
+ * "nothing to show", never as an error.
+ */
+function readMemory(db: DatabaseSync): MemoryState {
+  if (!hasTable(db, 'memories')) return EMPTY_MEMORY;
+  const rows = db
+    .prepare('SELECT * FROM memories ORDER BY created_at, rowid')
+    .all() as Array<Record<string, unknown>>;
+  const byPerson = new Map<string, PortraitView>();
+  for (const row of rows) {
+    const participantUserIds = readStringArray(row.participant_user_ids);
+    const entry = {
+      id: row.id as string,
+      nature: row.nature as 'durable' | 'moment',
+      text: row.text as string,
+      createdAt: row.created_at as string,
+      participantUserIds,
+      recurrenceCount: Number(row.recurrence_count),
+    };
+    // A shared memory is ONE row in EVERY portrait it belongs to — exactly
+    // what the daemon injects for each of them (CONTEXT.md: Portrait). The
+    // page would otherwise show someone an empty portrait while their
+    // sessions were being handed a memory about them.
+    for (const userId of new Set([row.subject_user_id as string, ...participantUserIds])) {
+      const portrait = byPerson.get(userId) ?? { userId, memories: [] };
+      portrait.memories.push(entry);
+      byPerson.set(userId, portrait);
+    }
+  }
+  const passes = hasTable(db, 'memory_passes')
+    ? (db
+        .prepare('SELECT * FROM memory_passes ORDER BY ran_at DESC, id DESC LIMIT ?')
+        .all(RECENT_PASSES) as Array<Record<string, unknown>>)
+    : [];
+  const total = hasTable(db, 'memory_passes')
+    ? Number((db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS total FROM memory_passes').get() as { total: number }).total)
+    : 0;
+  return {
+    present: true,
+    portraits: [...byPerson.values()].sort((a, b) => a.userId.localeCompare(b.userId)),
+    recentPasses: passes.map((row) => ({
+      threadTs: row.thread_ts as string,
+      channelId: row.channel_id as string,
+      ranAt: row.ran_at as string,
+      outcome: row.outcome as MemoryPassView['outcome'],
+      written: Number(row.written),
+      dropped: Number(row.dropped),
+      costUsd: Number(row.cost_usd),
+    })),
+    passCostUsdTotal: total,
+  };
 }
 
 /** A pre-#87 database the migration hasn't touched yet reads as empty here. */

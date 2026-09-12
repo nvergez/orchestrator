@@ -31,6 +31,12 @@
       "skillPath": "skills/engineering/domain-modeling/SKILL.md",
       "computedHash": "a11713c0ff7870efa3c331b2e273f09116158485246edc89ae5088eefd1b0b48"
     },
+    "exercise-pr": {
+      "source": "nvergez/skills",
+      "sourceType": "github",
+      "skillPath": "skills/exercise-pr/SKILL.md",
+      "computedHash": "7ea880df9405f14b1f6b9249efd696dfa3d093072cb0f2f27c3ab9d6d755368c"
+    },
     "grill-me": {
       "source": "mattpocock/skills",
       "sourceType": "github",
