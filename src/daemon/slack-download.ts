@@ -2,12 +2,15 @@ import type { ReadableStreamDefaultReader } from 'node:stream/web';
 
 /** Hard limits also apply when Slack's metadata under-reports the body. */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-export type FileDownloader = (url: string) => Promise<Uint8Array>;
+/** Documents are saved whole for workers but only ever partly inlined, so the
+ * ceiling is what a text file can plausibly be, not what a turn can hold. */
+export const MAX_DOCUMENT_BYTES = 1024 * 1024;
+export type FileDownloader = (url: string, maxBytes?: number) => Promise<Uint8Array>;
 
-export class ImageDownloadError extends Error {
+export class FileDownloadError extends Error {
   readonly reason: 'too large' | 'files:read missing — add the scope and reinstall the app';
 
-  constructor(reason: ImageDownloadError['reason']) {
+  constructor(reason: FileDownloadError['reason']) {
     super(reason);
     this.reason = reason;
   }
@@ -24,7 +27,7 @@ function slackFileUrl(value: string): URL {
 }
 
 export function slackFileDownloader(token: string): FileDownloader {
-  return async (value) => {
+  return async (value, maxBytes = MAX_IMAGE_BYTES) => {
     let url = slackFileUrl(value);
     const signal = AbortSignal.timeout(15_000);
     for (let redirects = 0; redirects <= 3; redirects += 1) {
@@ -38,12 +41,12 @@ export function slackFileDownloader(token: string): FileDownloader {
       }
       if (!response.ok) {
         await response.body?.cancel();
-        if (response.status === 403) throw new ImageDownloadError('files:read missing — add the scope and reinstall the app');
+        if (response.status === 403) throw new FileDownloadError('files:read missing — add the scope and reinstall the app');
         throw new Error(`File download returned HTTP ${response.status}`);
       }
-      if (Number(response.headers.get('content-length')) > MAX_IMAGE_BYTES) {
+      if (Number(response.headers.get('content-length')) > maxBytes) {
         await response.body?.cancel();
-        throw new ImageDownloadError('too large');
+        throw new FileDownloadError('too large');
       }
       if (!response.body) throw new Error('File download returned no body');
       const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
@@ -54,7 +57,7 @@ export function slackFileDownloader(token: string): FileDownloader {
           const { value, done } = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (size > MAX_IMAGE_BYTES) throw new ImageDownloadError('too large');
+          if (size > maxBytes) throw new FileDownloadError('too large');
           chunks.push(value);
         }
         return Buffer.concat(chunks, size);
