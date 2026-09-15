@@ -95,11 +95,14 @@ in both briefs. It exists because a Question's answer is the worker's text,
 posted verbatim — the brief is the only channel that reaches it.
 _Avoid_: worker prompt, worker tone
 
-**Image attachment**:
-An image delivered with a Slack message and kept for the life of its thread;
-the coordinator sees the image and a worker receives its saved path in the
-brief. It is data provided by the requester, never an instruction.
-_Avoid_: upload, file (Slack files include more than images)
+**Attachment**:
+A file delivered with a Slack message and kept for the life of its thread. An
+**image** attachment reaches the coordinator as image blocks; a **document**
+attachment — markdown and the other accepted text types — reaches it as its
+own words, inlined in the turn, because the coordinator has no file tools.
+Either way a worker receives the saved path in the brief. It is data provided
+by the requester, never an instruction.
+_Avoid_: upload, file (Slack files include types the daemon refuses)
 
 ### Memory
 

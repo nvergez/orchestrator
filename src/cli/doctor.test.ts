@@ -118,7 +118,7 @@ describe('runDoctorChecks', () => {
     const deps = greenDeps();
     deps.slackAuth = () => Promise.resolve({ scopes });
     const checks = await runDoctorChecks(deps);
-    expect(checks.find((check) => check.label === 'image attachments')).toEqual({ label: 'image attachments', ok: true, detail });
+    expect(checks.find((check) => check.label === 'file attachments')).toEqual({ label: 'file attachments', ok: true, detail });
     expect(failures(checks)).toEqual([]);
   });
 
@@ -142,7 +142,7 @@ describe('runDoctorChecks', () => {
     vi.stubGlobal('fetch', request);
     try {
       const checks = await runDoctorChecks(deps);
-      expect(checks.find((check) => check.label === 'image attachments')?.detail).toBe('enabled');
+      expect(checks.find((check) => check.label === 'file attachments')?.detail).toBe('enabled');
       expect(request).toHaveBeenCalledWith('https://slack.com/api/auth.test', expect.objectContaining({ headers: { Authorization: `Bearer ${validEnv.SLACK_BOT_TOKEN}` } }));
     } finally {
       vi.unstubAllGlobals();
@@ -153,7 +153,7 @@ describe('runDoctorChecks', () => {
     const deps = greenDeps();
     deps.slackAuth = () => Promise.reject(new Error('offline'));
     const checks = await runDoctorChecks(deps);
-    expect(checks.find((check) => check.label === 'image attachments')).toEqual({ label: 'image attachments', ok: true, detail: 'unknown — Slack identity check failed' });
+    expect(checks.find((check) => check.label === 'file attachments')).toEqual({ label: 'file attachments', ok: true, detail: 'unknown — Slack identity check failed' });
     expect(checks.find((check) => check.label === 'user names')).toEqual({ label: 'user names', ok: true, detail: 'unknown — Slack identity check failed' });
     expect(failures(checks)).toEqual([]);
   });
@@ -163,7 +163,7 @@ describe('runDoctorChecks', () => {
     expect(failures(checks)).toEqual([]);
     expect(checks.map((check) => check.label)).toEqual([
       'env',
-      'image attachments',
+      'file attachments',
       'user names',
       'routing hints',
       'persona',

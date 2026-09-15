@@ -75,7 +75,7 @@ nothing depends on the literal name. What the manifest configures:
 - **7 bot scopes** — exactly what the code uses: read mentions
   (`app_mentions:read`), read thread replies in public or private channels
   (`channels:history`, `groups:history`), post and edit messages
-  (`chat:write`), download image attachments (`files:read`), turn mention ids
+  (`chat:write`), download file attachments (`files:read`), turn mention ids
   into people's names (`users:read`), add/remove the status reactions (`reactions:write`).
 - **3 event subscriptions** — `app_mention` plus both `message.channels`
   (public channels) and `message.groups` (private channels). The channel's
@@ -106,7 +106,7 @@ authorize the requested scopes. The **Bot User OAuth Token** (`xoxb-…`) then
 appears under *OAuth & Permissions* — copy it. You only ever need to
 reinstall if the scopes change.
 
-### Existing installs: enable image attachments and user names
+### Existing installs: enable file attachments and user names
 
 After updating with `orc update`, add **`files:read`** and **`users:read`**
 under **OAuth & Permissions → Bot Token Scopes** (or apply the manifest
@@ -115,10 +115,10 @@ scope alone does not grant it to the installed token. If Slack supplies a
 replacement bot token, update `SLACK_BOT_TOKEN` in the env file; restart the
 daemon so its boot identity check sees the new scopes.
 
-`orc doctor` reports `image attachments: enabled`, or
-`image attachments: disabled — bot token lacks files:read`. Missing scope
+`orc doctor` reports `file attachments: enabled`, or
+`file attachments: disabled — bot token lacks files:read`. Missing scope
 is informational: text requests keep working. The daemon logs one warning
-at boot and explains the missing scope when it skips an image.
+at boot and explains the missing scope when it skips an attachment.
 
 It reports `user names: enabled` the same way. Without `users:read` the
 daemon never learns who `<@U08…>` is, so the bot can only refer to people in
@@ -171,10 +171,16 @@ Then, in the pinned channel:
 3. Mention the bot with a PNG screenshot, then reply with only an image.
    Expect 👀 and an answer that describes the picture. PNG, JPEG, GIF and
    WebP are accepted, up to 5 MiB and 8,000 px on the longest side, with at
-   most eight images per turn. Other files get one skip notice per message.
-4. In an isolated dev install, verify that the acting `app_mention` event
+   most eight images per turn.
+4. Mention the bot with a `.md` file. Expect an answer that quotes the
+   document's actual words. Markdown, plain text, logs, CSV/TSV, JSON, YAML
+   and patches are accepted up to 1 MiB, at most eight per turn; a turn shows
+   the first 32 KiB of each and 64 KiB in total, and says so when it cuts.
+   The whole file is still saved for the workers. Other files get one skip
+   notice per message.
+5. In an isolated dev install, verify that the acting `app_mention` event
    carries `files`, and that a Question/Change worker can read the saved
    absolute paths under the daemon's state directory. These depend on the
    workspace payload and worker sandbox; the unit tests use fakes. Do not
-   copy images into a worktree as a workaround without revisiting the
+   copy attachments into a worktree as a workaround without revisiting the
    storage decision in [issue #109](https://github.com/nvergez/orchestrator/issues/109).

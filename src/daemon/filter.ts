@@ -19,11 +19,14 @@ export interface IncomingEvent {
   files?: SlackFile[];
 }
 
-/** Metadata delivered with a Slack message; only accepted images are saved. */
+/** Metadata delivered with a Slack message; only accepted images and text
+ * documents are saved. `filetype` is Slack's own label, the fallback when the
+ * upload carries no extension in its name. */
 export interface SlackFile {
   id?: string;
   name?: string;
   mimetype?: string;
+  filetype?: string;
   size?: number;
   original_w?: number | string;
   original_h?: number | string;

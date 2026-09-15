@@ -1,7 +1,7 @@
 import { dirname } from 'node:path';
 import { Attachments } from './attachments.ts';
 import { slackFileDownloader, type FileDownloader } from './slack-download.ts';
-import { imageAttachmentsEnabled } from '../kernel/slack.ts';
+import { fileAttachmentsEnabled } from '../kernel/slack.ts';
 import { SessionStore } from './db.ts';
 import { DelegationStore } from '../delegation/delegations.ts';
 import {
@@ -145,7 +145,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
 
   const attachments = new Attachments({
     stateDir: dirname(config.dbPath),
-    enabled: imageAttachmentsEnabled(options.slackScopes),
+    enabled: fileAttachmentsEnabled(options.slackScopes),
     download: options.downloadFile ?? slackFileDownloader(config.slackBotToken),
     logger,
     notify: (channelId, threadTs, text) => slack.post(channelId, threadTs, text),
@@ -350,7 +350,7 @@ export function buildRuntime(options: RuntimeOptions): Runtime {
   };
 
   const boot = async (): Promise<void> => {
-    if (!imageAttachmentsEnabled(options.slackScopes)) logger.warn('image attachments disabled — bot token lacks files:read; add the scope and reinstall the app');
+    if (!fileAttachmentsEnabled(options.slackScopes)) logger.warn('file attachments disabled — bot token lacks files:read; add the scope and reinstall the app');
     // Boot reconciliation (spec §7, issue #25): crash recovery without waking
     // sessions — dispatched rows reconciled against task-list + worktree ps,
     // one truthful ⚠️ line per affected thread, completions missed during the

@@ -1,5 +1,5 @@
 /** Slack's auth.test returns granted scopes in the x-oauth-scopes header. */
-export function imageAttachmentsEnabled(scopes: readonly string[] = []): boolean {
+export function fileAttachmentsEnabled(scopes: readonly string[] = []): boolean {
   return scopes.includes('files:read');
 }
 
